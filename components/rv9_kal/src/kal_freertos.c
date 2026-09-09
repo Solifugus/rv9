@@ -254,6 +254,32 @@ void *rv9_alloc_dma(size_t size)
     return heap_caps_malloc(size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
 }
 
+void *rv9_alloc_exec(size_t size)
+{
+    void *p = NULL;
+
+#ifdef MALLOC_CAP_EXEC
+    p = heap_caps_malloc(size, MALLOC_CAP_EXEC | MALLOC_CAP_8BIT);
+    if (p != NULL) return p;
+#endif
+
+    /* Fall back to plain internal memory. On the C5, IRAM and DRAM are the
+       same physical range (SOC_IRAM_LOW == SOC_DRAM_LOW), so internal RAM is
+       executable whether or not the heap advertises MALLOC_CAP_EXEC -- that
+       flag only exists when ESP_SYSTEM_MEMPROT is off. Insist on internal:
+       external PSRAM would not be executable on a future board. */
+    return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+size_t rv9_heap_free_exec(void)
+{
+#ifdef MALLOC_CAP_EXEC
+    return heap_caps_get_free_size(MALLOC_CAP_EXEC | MALLOC_CAP_8BIT);
+#else
+    return heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#endif
+}
+
 size_t rv9_heap_free(void)      { return heap_caps_get_free_size(MALLOC_CAP_DEFAULT); }
 size_t rv9_heap_low_water(void) { return heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT); }
 
@@ -263,3 +289,12 @@ static portMUX_TYPE s_rv9_lock = portMUX_INITIALIZER_UNLOCKED;
 
 void rv9_critical_enter(void) { portENTER_CRITICAL(&s_rv9_lock); }
 void rv9_critical_exit(void)  { portEXIT_CRITICAL(&s_rv9_lock); }
+
+/* ---------------- instruction sync ---------------- */
+
+void rv9_isync(void)
+{
+    /* The C5 has unified IRAM/DRAM, so freshly written code is visible to
+       the fetch unit once the pipeline is flushed. */
+    __asm__ volatile ("fence.i" ::: "memory");
+}

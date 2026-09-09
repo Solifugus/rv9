@@ -7,7 +7,7 @@ Estimates assume evenings-and-weekends pace, not full-time.
 
 ---
 
-## Phase 0 — Skeleton
+## Phase 0 — Skeleton  ✅ done
 
 **Goal:** an ESP-IDF project that builds, boots, and enforces the layering rule.
 
@@ -25,7 +25,7 @@ deliberate violation.
 
 ---
 
-## Phase 1 — Modules
+## Phase 1 — Modules  ✅ done
 
 **Goal:** code as a runtime object.
 
@@ -34,8 +34,9 @@ deliberate violation.
 - Flash partition for module storage
 - Module directory: scan flash at boot, index everything valid
 - Load, link/unlink, link counting, sharing
-- **Decision point:** PIC vs fixed load addresses. Prototype both if unclear;
-  this choice constrains everything after it.
+- **Decided:** position-independent by construction (`-mcmodel=medany`, one
+  blob, no `.data`/`.bss`, enforced by linker assertions), copied into
+  executable RAM. See design §5.
 - `mdir`-equivalent: list modules over serial
 
 **Done when:** a module is built by the host tool, written to flash, found at
@@ -168,4 +169,6 @@ useful, working preparation, but preparation.*
 
 ## Immediate next step
 
-Phase 0. Scaffold, KAL header, FreeRTOS backend, layering check.
+Phase 2. Process descriptors, fork from a module, priority scheduling with
+aging. The loader already allocates per-instance statics, which is the piece
+a process needs; phase 2 gives that storage a lifetime and an owner.

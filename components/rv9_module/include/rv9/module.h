@@ -1,0 +1,164 @@
+/*
+ * RV-9 memory modules.
+ *
+ * A module is a self-contained, CRC-verified blob of position-independent
+ * code that the system can find, verify, share and load at runtime. This is
+ * the idea worth stealing from OS-9: code is a runtime object, not something
+ * linked in at build time.
+ *
+ * Position independence is achieved by discipline rather than relocation:
+ *
+ *   - compiled -mcmodel=medany, so every internal reference is PC-relative
+ *   - text and rodata are linked as ONE blob that moves as a unit
+ *   - no external symbols; everything the module needs arrives through the
+ *     environment pointer handed to its entry point
+ *   - no writable static data in the module image; per-instance state lives
+ *     in a separate area allocated by the loader
+ *
+ * That last pair is straight OS-9: pure reentrant code shared between
+ * processes, with static storage per process. The 6809 passed it in U and
+ * the 68000 in A6; we pass it in the environment struct.
+ */
+#pragma once
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
+#define RV9_MODULE_ABI     1
+#define RV9_MODULE_HDR_LEN 40
+
+/* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
+   now because the I/O system in phase 3 is built from them. */
+typedef enum {
+    RV9_MOD_PROGRAM    = 1,
+    RV9_MOD_LIBRARY    = 2,
+    RV9_MOD_FILEMGR    = 3,
+    RV9_MOD_DRIVER     = 4,
+    RV9_MOD_DESCRIPTOR = 5,
+    RV9_MOD_DATA       = 6,
+    RV9_MOD_SYSTEM     = 7,
+} rv9_mod_type_t;
+
+/*
+ * On-media module header. Little-endian, 40 bytes.
+ *
+ * crc32 covers the entire module image with the crc32 field itself taken
+ * as zero -- standard CRC-32 (the zlib polynomial), so tools/mkmodule.py
+ * can compute it with Python's zlib.
+ */
+typedef struct __attribute__((packed)) {
+    uint32_t magic;         /* RV9_MODULE_MAGIC */
+    uint16_t header_len;    /* RV9_MODULE_HDR_LEN */
+    uint16_t abi_version;   /* RV9_MODULE_ABI */
+    uint32_t module_len;    /* total bytes, header included */
+    uint32_t name_offset;   /* NUL-terminated name, from module start */
+    uint32_t entry_offset;  /* entry point, from module start */
+    uint32_t static_size;   /* per-instance storage the loader must provide */
+    uint32_t stack_size;    /* hint; 0 means "loader decides" */
+    uint8_t  type;          /* rv9_mod_type_t */
+    uint8_t  attr;          /* reserved for flags */
+    uint8_t  revision;      /* higher revision wins when names collide */
+    uint8_t  reserved0;
+    uint32_t crc32;
+    uint32_t reserved1;
+} rv9_mod_header_t;
+
+_Static_assert(sizeof(rv9_mod_header_t) == RV9_MODULE_HDR_LEN,
+               "module header must be exactly 40 bytes");
+
+/* ------------------------------------------------------------------ */
+/* Module ABI -- what a module receives when it runs                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Everything a module may touch arrives through this struct. A module has
+ * no other way to reach the system: no libc, no globals, no imports.
+ *
+ * This is deliberately tiny in phase 1. It grows into the real system-call
+ * surface as the I/O manager (phase 3) and process manager (phase 2) land.
+ * Appending fields is compatible; reordering or removing them is not, and
+ * must bump RV9_MODULE_ABI.
+ */
+typedef struct {
+    uint32_t    abi_version;
+    void       *statics;       /* zeroed, static_size bytes, per instance */
+    uint32_t    statics_size;
+    int       (*print)(const char *s);       /* stand-in until SCF exists */
+    uint64_t  (*time_ms)(void);
+} rv9_mod_env_t;
+
+typedef int (*rv9_mod_entry_fn)(const rv9_mod_env_t *env);
+
+/* ------------------------------------------------------------------ */
+/* Module directory                                                    */
+/* ------------------------------------------------------------------ */
+
+/* One entry per module known to the system, whether loaded or not. */
+typedef struct rv9_mod_entry {
+    char                  name[32];
+    uint8_t               type;
+    uint8_t               revision;
+    uint32_t              size;         /* module_len */
+    uint32_t              store_offset; /* where it lives in the module store */
+    uint32_t              link_count;   /* processes holding it */
+    void                 *image;        /* RAM image, NULL when not loaded */
+    rv9_mod_entry_fn      entry;        /* valid while loaded */
+    struct rv9_mod_entry *next;
+} rv9_mod_entry_t;
+
+typedef enum {
+    RV9_MOD_OK = 0,
+    RV9_MOD_ERR_NOTFOUND,
+    RV9_MOD_ERR_BADMAGIC,
+    RV9_MOD_ERR_BADCRC,
+    RV9_MOD_ERR_BADABI,
+    RV9_MOD_ERR_NOMEM,
+    RV9_MOD_ERR_IO,
+    RV9_MOD_ERR_INVAL,
+} rv9_mod_err_t;
+
+const char *rv9_mod_strerror(rv9_mod_err_t err);
+
+/* Scan the module store and build the directory. Safe to call once at boot.
+   Returns the number of valid modules found. */
+int rv9_mod_dir_init(void);
+
+/* Walk the directory. Pass NULL to start. */
+const rv9_mod_entry_t *rv9_mod_dir_next(const rv9_mod_entry_t *prev);
+
+const rv9_mod_entry_t *rv9_mod_find(const char *name);
+
+/*
+ * Load a module into executable memory and take a link on it. Repeated
+ * links share one image -- this is why module code must be reentrant.
+ */
+rv9_mod_err_t rv9_mod_link(const char *name, rv9_mod_entry_t **out_entry);
+
+/* Drop a link. The image is freed when the count reaches zero. */
+rv9_mod_err_t rv9_mod_unlink(rv9_mod_entry_t *entry);
+
+/*
+ * Run a linked module: allocates and zeroes its static storage, builds the
+ * environment, calls the entry point, frees the storage.
+ *
+ * Phase 2 replaces this with fork(), where the process manager owns the
+ * static area for the process's lifetime.
+ */
+rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result);
+
+/* CRC-32 (zlib polynomial), exposed because the loader and the host tool
+   must agree on it exactly. */
+uint32_t rv9_crc32(uint32_t crc, const void *data, size_t len);
+
+/* Verify a module image already in memory. */
+rv9_mod_err_t rv9_mod_verify(const void *image, size_t avail);
+
+#ifdef __cplusplus
+}
+#endif

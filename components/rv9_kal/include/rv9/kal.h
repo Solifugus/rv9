@@ -126,9 +126,16 @@ uint32_t  rv9_queue_count(rv9_queue_t queue);
 void *rv9_alloc(size_t size);
 void *rv9_calloc(size_t count, size_t size);
 void *rv9_alloc_dma(size_t size);
+
+/* Memory that may be executed. The module loader copies module text here.
+   On this hardware IRAM and DRAM are the same physical range, so this is
+   cheap -- but do not assume that of every future target. */
+void *rv9_alloc_exec(size_t size);
+
 void  rv9_free(void *ptr);
 
 size_t rv9_heap_free(void);        /* bytes currently free */
+size_t rv9_heap_free_exec(void);   /* bytes free that may be executed */
 size_t rv9_heap_low_water(void);   /* smallest free ever seen */
 
 /* ------------------------------------------------------------------ */
@@ -140,6 +147,15 @@ size_t rv9_heap_low_water(void);   /* smallest free ever seen */
 
 void rv9_critical_enter(void);
 void rv9_critical_exit(void);
+
+/* ------------------------------------------------------------------ */
+/* Instruction stream synchronisation                                  */
+/*                                                                     */
+/* Call after writing code into memory and before jumping to it. On    */
+/* RISC-V this is fence.i; other targets may need more.                */
+/* ------------------------------------------------------------------ */
+
+void rv9_isync(void);
 
 /*
  * TODO (phase 3): ISR attach/detach. Not needed until drivers exist, and

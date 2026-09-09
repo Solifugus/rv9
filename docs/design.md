@@ -2,8 +2,9 @@
 
 A small modular operating system for RISC-V, in the spirit of Microware OS-9.
 
-Status: phase 0 complete — KAL implemented on FreeRTOS, 27/27 conformance
-tests passing on hardware. See docs/roadmap.md.
+Status: phases 0-1 complete — KAL on FreeRTOS (27/27 conformance tests
+passing on hardware), module format, directory and loader working. See
+docs/roadmap.md.
 
 ---
 
@@ -51,6 +52,13 @@ Waveshare **ESP32-C5-LCD-1.47**, verified in hand:
 | Storage | microSD over SPI (shares the LCD bus) |
 | Radio | dual-band WiFi 6, BLE 5, 802.15.4 |
 | Protection | RISC-V PMP (physical memory protection) |
+
+Note on PMP: ESP-IDF uses it to mark data RAM non-executable
+(`ESP_SYSTEM_PMP_IDRAM_SPLIT`). Since the module loader jumps into heap
+memory, RV-9 disables that split for phases 1-6. This is not a permanent
+retreat from memory protection — in phase 7 RV-9 programs the PMP itself and
+marks module regions executable explicitly, which is stricter than the IDF
+default, not weaker.
 
 The RAM figure is the dominant constraint in every decision below. It is
 measured on hardware with nothing but the KAL resident; WiFi and lwIP will
@@ -172,9 +180,33 @@ Flash is memory-mapped, so modules living in a flash partition can execute
 without being copied into RAM. Given ~246 KB of RAM this is not a nicety, it
 is how the system survives.
 
-Open question: relocation. Either PIC-compiled modules, or fixed load addresses
-assigned per module at build time. OS-9's position independence came from the
-same pressure on the 6809, so the precedent is apt. **To be decided in phase 1.**
+### Relocation — decided in phase 1
+
+**Modules are position-independent by construction, and are copied into
+executable RAM to run.** No relocation table, no GOT, no ELF parsing.
+
+This works because of four rules the build enforces:
+
+- compiled `-mcmodel=medany`, so every symbol reference is PC-relative
+- text and rodata link as one blob that moves as a unit
+- no external symbols; everything arrives through the environment struct
+- no `.data` and no `.bss` — `modules/module.ld` *asserts* both are empty and
+  refuses to link otherwise
+
+The last rule is the important one. A module with writable static data would
+appear to work and then corrupt itself the moment two processes shared its
+image. Catching that at link time rather than in the field is worth the
+restriction. Per-instance state comes from `env->statics`, allocated and
+zeroed by the loader — exactly OS-9's arrangement, where the 6809 passed the
+data pointer in U and the 68000 in A6.
+
+Verified on hardware: `objdump` shows string constants reached via `auipc`
+(PC-relative), one `.text` section, zero undefined symbols.
+
+Execute-in-place from flash remains attractive for RAM reasons and is
+compatible with this design — the blob is relocatable, so mapping it rather
+than copying it is an optimisation, not a redesign. Deferred until RAM
+pressure justifies it.
 
 ---
 

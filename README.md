@@ -9,13 +9,16 @@ on the Waveshare ESP32-C5-LCD-1.47 board.
   FreeRTOS-to-native strategy
 - [Development plan](docs/roadmap.md) — phased, each phase useful on its own
 
-Status: **phase 0 complete.** KAL implemented over FreeRTOS, 27/27
-conformance tests passing on hardware.
+Status: **phases 0-1 complete.** KAL over FreeRTOS (27/27 conformance tests
+passing on hardware); modules built, verified, loaded and run from flash.
 
 ```
 . ~/esp/esp-idf/export.sh
-idf.py build
-idf.py -p /dev/ttyACM0 flash monitor
+idf.py build                          # app
+./tools/build_modules.sh              # modules -> build/modules.bin
+idf.py -p /dev/ttyACM0 flash
+./tools/flash_modules.sh /dev/ttyACM0 # module store
+idf.py -p /dev/ttyACM0 monitor
 ```
 
 ## The idea in one paragraph
