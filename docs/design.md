@@ -2,9 +2,9 @@
 
 A small modular operating system for RISC-V, in the spirit of Microware OS-9.
 
-Status: phases 0-1 complete — KAL on FreeRTOS (27/27 conformance tests
-passing on hardware), module format, directory and loader working. See
-docs/roadmap.md.
+Status: phases 0-2 complete — KAL on FreeRTOS (27/27 conformance tests
+passing on hardware), module format/directory/loader, and processes with
+priority aging, all verified on hardware. See docs/roadmap.md.
 
 ---
 
@@ -213,11 +213,45 @@ pressure justifies it.
 ## 6. Processes
 
 - Preemptive, priority-scheduled, with **aging** so low-priority work cannot starve
-- `fork` (new process from a module), `chain` (replace current), `exit`, `wait`
+- `fork` (new process from a module), `exit`, `wait`, and minimal signals
 - Each process: module reference, static data area, stack, path table, priority,
   state, parent, exit status
 - No memory protection in early phases; PMP-based isolation arrives with the
   native kernel
+
+### Scheduling policy
+
+The KAL provides priorities and nothing else. The policy is RV-9's own, which
+is why phase 7 can replace the kernel without changing how the system behaves.
+
+Effective priority = base + age, capped. An ager runs every 20 ms: whichever
+runnable process currently ranks highest has its age reset (it is the one
+getting CPU), and every other runnable process ages upward, to a maximum
+boost of 10. The result is a sawtooth — a starved process climbs until it
+outranks the hog, runs, and falls back.
+
+Measured on hardware with two CPU-bound processes at priority 12 and 4:
+
+| | low-priority progress at 600 ms | round duration |
+| --- | --- | --- |
+| aging off | 0 units | 2421 ms (sequential) |
+| aging on | 59 units | 1359 ms (concurrent) |
+
+### Priority hierarchy
+
+Three bands, and the ordering is load-bearing:
+
+| Band | Priority | Rule |
+| --- | --- | --- |
+| ager | `RV9_PRIO_AGER` (15) | must outrank everything it manages |
+| system tasks | `RV9_PRIO_SYSTEM` (14) | must outrank user processes |
+| user processes | ≤ 13 including aging boost | |
+
+Both rules were learned by violating them. An ager that can be starved
+rescues nobody. And an orchestrator below its children means a forked child
+preempts the forker before it can create a sibling — which silently turned
+the first scheduler test into two processes running one after the other
+while appearing to run together.
 
 ---
 

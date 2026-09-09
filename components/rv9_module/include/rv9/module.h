@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     1
+#define RV9_MODULE_ABI     2
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -86,14 +86,31 @@ _Static_assert(sizeof(rv9_mod_header_t) == RV9_MODULE_HDR_LEN,
  * must bump RV9_MODULE_ABI.
  */
 typedef struct {
+    /* --- ABI 1 --- */
     uint32_t    abi_version;
     void       *statics;       /* zeroed, static_size bytes, per instance */
     uint32_t    statics_size;
     int       (*print)(const char *s);       /* stand-in until SCF exists */
     uint64_t  (*time_ms)(void);
+
+    /* --- ABI 2: running as a process --- */
+    uint32_t    pid;           /* 0 when run outside a process */
+    const char *arg;           /* may be NULL */
+    void      (*yield)(void);
+    void      (*sleep_ms)(uint32_t ms);
+    uint32_t  (*signals_take)(void);  /* pending signals, cleared by reading */
 } rv9_mod_env_t;
 
 typedef int (*rv9_mod_entry_fn)(const rv9_mod_env_t *env);
+
+/*
+ * Signals a process may be sent. Deliberately minimal: enough to ask a
+ * process to stop cooperatively. A module polls with env->signals_take(),
+ * which returns and clears whatever is pending.
+ */
+#define RV9_SIG_STOP  (1u << 0)
+#define RV9_SIG_USER1 (1u << 1)
+#define RV9_SIG_USER2 (1u << 2)
 
 /* ------------------------------------------------------------------ */
 /* Module directory                                                    */

@@ -9,6 +9,7 @@
  */
 #include "rv9/kal.h"
 #include "rv9/module.h"
+#include "rv9/proc.h"
 #include "kal_selftest.h"
 
 #include "esp_chip_info.h"
@@ -17,7 +18,7 @@
 
 static const char *TAG = "rv9";
 
-#define RV9_VERSION "0.0.2-phase1"
+#define RV9_VERSION "0.0.3-phase2"
 
 static void banner(void)
 {
@@ -109,6 +110,138 @@ static void run_module(const char *name)
     rv9_mod_unlink(mod);
 }
 
+/* procs -- list the process table. Becomes a loadable utility in phase 4. */
+static void procs(void)
+{
+    static const char *state_name[] = { "?", "active", "waiting", "exited" };
+
+    ESP_LOGI(TAG, "process table:");
+    ESP_LOGI(TAG, "  %3s %-10s %-8s %4s %4s %4s %6s",
+             "pid", "name", "state", "base", "age", "eff", "status");
+
+    for (const rv9_proc_t *p = rv9_proc_next(NULL); p; p = rv9_proc_next(p)) {
+        const char *sn = (p->state < 4) ? state_name[p->state] : "?";
+        ESP_LOGI(TAG, "  %3u %-10s %-8s %4d %4d %4d %6d",
+                 (unsigned)p->pid, p->name, sn,
+                 p->base_priority, p->age, p->effective_priority,
+                 p->exit_status);
+    }
+}
+
+/*
+ * Run two CPU-bound processes at different priorities.
+ *
+ * The metric that matters is how much work the LOW priority process has
+ * done partway through, while both are still running. Final unit counts
+ * cannot show starvation: a starved process starts its wall-clock budget
+ * late and then runs unimpeded, so it finishes with a full tally having
+ * spent the first half of the test getting nothing at all.
+ *
+ * Total elapsed time is the second tell -- starved processes run
+ * sequentially, so the round takes roughly twice as long.
+ */
+#define SAMPLE_AT_MS 600
+
+static void contention_round(const char *label, bool aging,
+                             uint32_t *out_mid_low, uint32_t *out_elapsed)
+{
+    rv9_proc_aging_set(aging);
+    ESP_LOGI(TAG, "--- %s (aging %s) ---", label, aging ? "on" : "off");
+
+    uint64_t t0 = rv9_time_ms();
+
+    rv9_pid_t hi = 0, lo = 0;
+    if (rv9_proc_fork("worker", RV9_PRIO_HIGH, NULL, &hi) != RV9_PROC_OK ||
+        rv9_proc_fork("worker", RV9_PRIO_LOW,  NULL, &lo) != RV9_PROC_OK) {
+        ESP_LOGE(TAG, "fork failed");
+        return;
+    }
+
+    /* Both forked from one module image -- two processes, one copy of the
+       code, separate static storage. This is what reentrancy buys. */
+    const rv9_mod_entry_t *m = rv9_mod_find("worker");
+    if (m) {
+        ESP_LOGI(TAG, "both processes share image %p, link count %lu",
+                 m->image, (unsigned long)m->link_count);
+    }
+
+    /* Sample the low-priority process while both are still running. The
+       first word of worker's statics is its running unit count. */
+    rv9_task_delay_ms(SAMPLE_AT_MS);
+    uint32_t mid_low = 0, mid_high = 0;
+    const uint32_t *lo_st = (const uint32_t *)rv9_proc_statics(lo);
+    const uint32_t *hi_st = (const uint32_t *)rv9_proc_statics(hi);
+    if (lo_st) mid_low  = *lo_st;
+    if (hi_st) mid_high = *hi_st;
+
+    ESP_LOGI(TAG, "at %d ms: high has done %lu units, low has done %lu",
+             SAMPLE_AT_MS, (unsigned long)mid_high, (unsigned long)mid_low);
+
+    int hi_units = 0, lo_units = 0;
+    rv9_proc_wait(hi, &hi_units, 10000);
+    rv9_proc_wait(lo, &lo_units, 10000);
+
+    uint32_t elapsed = (uint32_t)(rv9_time_ms() - t0);
+    ESP_LOGI(TAG, "final: high %d units, low %d units, round took %lu ms",
+             hi_units, lo_units, (unsigned long)elapsed);
+
+    if (out_mid_low)  *out_mid_low  = mid_low;
+    if (out_elapsed)  *out_elapsed  = elapsed;
+}
+
+static void signal_demo(void)
+{
+    ESP_LOGI(TAG, "--- signals ---");
+
+    rv9_pid_t pid = 0;
+    if (rv9_proc_fork("worker", RV9_PRIO_NORMAL, NULL, &pid) != RV9_PROC_OK) {
+        ESP_LOGE(TAG, "fork failed");
+        return;
+    }
+
+    rv9_task_delay_ms(300);
+    ESP_LOGI(TAG, "sending RV9_SIG_STOP to pid %u", (unsigned)pid);
+    rv9_proc_signal(pid, RV9_SIG_STOP);
+
+    int units = 0;
+    rv9_proc_wait(pid, &units, 5000);
+    ESP_LOGI(TAG, "pid %u stopped early after %d units "
+                  "(a full run is ~4x that)", (unsigned)pid, units);
+}
+
+static void phase2_demo(void)
+{
+    if (rv9_proc_init() != RV9_PROC_OK) {
+        ESP_LOGE(TAG, "process manager failed to start");
+        return;
+    }
+
+    uint32_t starved_mid = 0, starved_ms = 0;
+    uint32_t aged_mid = 0, aged_ms = 0;
+
+    contention_round("without aging", false, &starved_mid, &starved_ms);
+    contention_round("with aging",    true,  &aged_mid,    &aged_ms);
+
+    signal_demo();
+    procs();
+
+    ESP_LOGI(TAG, "--- result ---");
+    ESP_LOGI(TAG, "low-priority progress at %d ms: %lu units starved, "
+                  "%lu units aged", SAMPLE_AT_MS,
+             (unsigned long)starved_mid, (unsigned long)aged_mid);
+    ESP_LOGI(TAG, "round duration: %lu ms starved, %lu ms aged",
+             (unsigned long)starved_ms, (unsigned long)aged_ms);
+
+    if (starved_mid == 0 && aged_mid > 0) {
+        ESP_LOGI(TAG, "aging works: without it the low-priority process got "
+                      "no CPU at all until the high-priority one finished");
+    } else if (aged_mid > starved_mid) {
+        ESP_LOGI(TAG, "aging helps, though starvation was not total");
+    } else {
+        ESP_LOGE(TAG, "aging did NOT help -- policy is not working");
+    }
+}
+
 /* Placeholder for the process manager. For now it just proves the system
    keeps running and reports heap drift, which is the number that will matter
    most once WiFi arrives. */
@@ -127,6 +260,34 @@ static void heartbeat_task(void *arg)
     }
 }
 
+/*
+ * The system runs here rather than in app_main, because it forks processes
+ * and must outrank them. app_main sits at the host kernel's default
+ * priority, far below any RV-9 process -- forking from there means the
+ * child preempts the parent immediately.
+ */
+static void rv9_init_task(void *arg)
+{
+    (void)arg;
+
+    rv9_mod_dir_init();
+    mdir();
+    run_module("hello");
+
+    phase2_demo();
+
+    ESP_LOGI(TAG, "Phase 2 complete.");
+    ESP_LOGI(TAG, "next: I/O manager and a console on the LCD (phase 3)");
+
+    rv9_err_t err = rv9_task_create(heartbeat_task, "rv9-heartbeat", 3072,
+                                    NULL, RV9_PRIO_LOW, NULL);
+    if (err != RV9_OK) {
+        ESP_LOGE(TAG, "could not start heartbeat: %s", rv9_strerror(err));
+    }
+
+    rv9_task_delete(NULL);
+}
+
 void app_main(void)
 {
     banner();
@@ -138,16 +299,9 @@ void app_main(void)
 
     ESP_LOGI(TAG, "KAL is sound.");
 
-    rv9_mod_dir_init();
-    mdir();
-    run_module("hello");
-
-    ESP_LOGI(TAG, "Phase 1 complete.");
-    ESP_LOGI(TAG, "next: processes and scheduling (phase 2)");
-
-    rv9_err_t err = rv9_task_create(heartbeat_task, "rv9-heartbeat", 3072,
-                                    NULL, RV9_PRIO_LOW, NULL);
+    rv9_err_t err = rv9_task_create(rv9_init_task, "rv9-init", 4096, NULL,
+                                    RV9_PRIO_SYSTEM, NULL);
     if (err != RV9_OK) {
-        ESP_LOGE(TAG, "could not start heartbeat: %s", rv9_strerror(err));
+        ESP_LOGE(TAG, "could not start init: %s", rv9_strerror(err));
     }
 }

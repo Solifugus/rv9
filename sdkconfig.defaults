@@ -17,3 +17,8 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # which is stricter than this, not weaker. Until then we have no protection
 # from a misbehaving module -- which is fine, because we wrote all of them.
 CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT=n
+
+# RV-9 processes are CPU-bound by design in phase 2, which upsets the idle
+# task watchdog. Supervision is the OS's job, not the host kernel's -- RV-9
+# grows its own in a later phase.
+CONFIG_ESP_TASK_WDT_INIT=n

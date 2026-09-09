@@ -46,12 +46,14 @@ boot, verified, loaded, and its entry point called.
 
 ---
 
-## Phase 2 — Processes
+## Phase 2 — Processes  ✅ done
 
 **Goal:** more than one thing running, scheduled the way OS-9 did it.
 
 - Process descriptor, state machine, process table
-- `fork` from a module, `chain`, `exit`, `wait`
+- `fork` from a module, `exit`, `wait`
+- `chain` (replace the running module, keeping the pid) **deferred to phase 4**,
+  where the shell is the thing that actually wants it
 - Priority scheduling **with aging** — starvation-free is a design requirement
 - Per-process static data and stack from the module header hints
 - Signals or an equivalent minimal async notification
@@ -169,6 +171,9 @@ useful, working preparation, but preparation.*
 
 ## Immediate next step
 
-Phase 2. Process descriptors, fork from a module, priority scheduling with
-aging. The loader already allocates per-instance statics, which is the piece
-a process needs; phase 2 gives that storage a lifetime and an owner.
+Phase 3. The I/O manager: path table, the generic call surface, and the
+file-manager / driver / descriptor split. Then SCF and a console on the LCD.
+
+This is the largest phase so far and the one the rest of the system hangs
+from. It is also where RV-9 stops being a scheduler with a loader attached
+and starts being an operating system.

@@ -53,7 +53,9 @@ rv9_mod_err_t rv9_mod_verify(const void *image, size_t avail)
 
     if (h->magic != RV9_MODULE_MAGIC)         return RV9_MOD_ERR_BADMAGIC;
     if (h->header_len != RV9_MODULE_HDR_LEN)  return RV9_MOD_ERR_INVAL;
-    if (h->abi_version != RV9_MODULE_ABI)     return RV9_MOD_ERR_BADABI;
+    /* A module built against an older ABI still runs: fields are only ever
+       appended. A module built against a newer one cannot. */
+    if (h->abi_version > RV9_MODULE_ABI)      return RV9_MOD_ERR_BADABI;
     if (h->module_len < RV9_MODULE_HDR_LEN)   return RV9_MOD_ERR_INVAL;
     if (h->module_len > avail)                return RV9_MOD_ERR_INVAL;
     if (h->entry_offset >= h->module_len)     return RV9_MOD_ERR_INVAL;
@@ -278,6 +280,9 @@ static int env_print(const char *s)
 }
 
 static uint64_t env_time_ms(void) { return rv9_time_ms(); }
+static void     env_yield(void) { rv9_task_yield(); }
+static void     env_sleep_ms(uint32_t ms) { rv9_task_delay_ms(ms); }
+static uint32_t env_no_signals(void) { return 0; }
 
 rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result)
 {
@@ -297,6 +302,11 @@ rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result)
         .statics_size = h->static_size,
         .print        = env_print,
         .time_ms      = env_time_ms,
+        .pid          = 0,          /* not a process; phase 2 fork() gives one */
+        .arg          = NULL,
+        .yield        = env_yield,
+        .sleep_ms     = env_sleep_ms,
+        .signals_take = env_no_signals,
     };
 
     int result = entry->entry(&env);

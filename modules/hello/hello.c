@@ -24,7 +24,7 @@ __attribute__((section(".text.entry")))
 int rv9_module_entry(const rv9_mod_env_t *env)
 {
     if (env == NULL)                          return -1;
-    if (env->abi_version != RV9_MODULE_ABI)   return -2;
+    if (env->abi_version < RV9_MODULE_ABI)    return -2;
     if (env->print == NULL)                   return -3;
 
     env->print("hello from a loaded RV-9 module");
