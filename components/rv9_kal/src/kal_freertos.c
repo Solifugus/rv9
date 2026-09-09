@@ -59,6 +59,8 @@ const char *rv9_strerror(rv9_err_t err)
 uint64_t rv9_time_us(void) { return (uint64_t)esp_timer_get_time(); }
 uint64_t rv9_time_ms(void) { return (uint64_t)esp_timer_get_time() / 1000ULL; }
 
+uint32_t rv9_ms_to_ticks(uint32_t ms) { return (uint32_t)pdMS_TO_TICKS(ms); }
+
 /* ---------------- tasks ---------------- */
 
 rv9_err_t rv9_task_create(rv9_task_fn fn, const char *name, size_t stack_bytes,

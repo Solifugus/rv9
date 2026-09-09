@@ -2,7 +2,7 @@
 
 A small modular operating system for RISC-V, in the spirit of Microware OS-9.
 
-Status: phases 0-3 complete — KAL on FreeRTOS (27/27 conformance tests
+Status: phases 0-4 complete — KAL on FreeRTOS (27/27 conformance tests
 passing on hardware), module format/directory/loader, and processes with
 priority aging, all verified on hardware. See docs/roadmap.md.
 
@@ -203,6 +203,20 @@ data pointer in U and the 68000 in A6.
 Verified on hardware: `objdump` shows string constants reached via `auipc`
 (PC-relative), one `.text` section, zero undefined symbols.
 
+**The build proves this rather than assuming it.** `tools/build_modules.sh`
+links every module twice, at two different base addresses, and compares the
+bytes. PC-relative code is byte-identical wherever it is linked; anything
+holding an absolute address differs, and the build fails with an explanation.
+
+This was added after a crash, not before one. GCC rewrote a `switch` over
+string literals into a table of pointers in `.rodata` — absolute addresses,
+tiny because the module links at base 0. The module loaded, ran, printed its
+header, and took a load fault at `0x294` the moment it touched the table.
+`-fno-jump-tables` does not prevent this; `-fno-tree-switch-conversion` does.
+
+Compiler flags stop the constructs we know about. The dual-link check stops
+the ones we do not.
+
 Execute-in-place from flash remains attractive for RAM reasons and is
 compatible with this design — the blob is relocatable, so mapping it rather
 than copying it is an optimisation, not a redesign. Deferred until RAM
@@ -284,6 +298,16 @@ device is loading a descriptor — no kernel rebuild.
 read/write, keeping the main path narrow. This is `ioctl` done deliberately
 rather than by accident.
 
+### The console is the USB cable
+
+The C5 has a USB Serial/JTAG *device* peripheral and no host controller, so
+a USB keyboard cannot be attached to this board at any price. The terminal
+is whatever sits at the other end of the programming cable — which is also
+the only reason the shell has a keyboard at all.
+
+`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG` matters here: the default routes the
+console to UART0, whose pins go nowhere on this board.
+
 ### Planned devices
 
 | Descriptor | File manager | Driver | Notes |
@@ -295,6 +319,17 @@ rather than by accident.
 
 `/term` on the LCD is the first milestone that will actually feel like an
 operating system.
+
+### Redirection
+
+A child inherits its parent's standard paths **by reference**, sharing one
+path descriptor rather than reopening the device. That is what makes shell
+redirection work without the child participating: the shell parks its own
+stdout with `dup2`, points stdout at the target, forks — the child writes to
+the target knowing nothing about it — then puts its stdout back.
+
+`echo > /term` sends a module's output to the panel instead of the serial
+line, and `echo` contains no code for either.
 
 ### What is loadable, and what is not yet
 

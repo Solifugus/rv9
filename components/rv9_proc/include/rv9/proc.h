@@ -88,6 +88,10 @@ typedef struct rv9_proc {
     uint64_t          started_ms;
     rv9_sem_t         exited;
 
+    /* Set by rv9_proc_chain; acted on when the module returns. */
+    char              chain_to[32];
+    bool              chain_pending;
+
     struct rv9_proc  *next;
 } rv9_proc_t;
 
@@ -117,6 +121,13 @@ rv9_proc_err_t rv9_proc_wait(rv9_pid_t pid, int *out_status, uint32_t timeout_ms
 
 /* Post signals to a process. It sees them next time it asks. */
 rv9_proc_err_t rv9_proc_signal(rv9_pid_t pid, uint32_t signals);
+
+/*
+ * Ask the calling process to continue as a different module, keeping its
+ * pid, priority and open paths. Takes effect when the current module
+ * returns from its entry point.
+ */
+rv9_proc_err_t rv9_proc_chain(const char *module_name);
 
 const rv9_proc_t *rv9_proc_get(rv9_pid_t pid);
 

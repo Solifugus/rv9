@@ -356,6 +356,36 @@ rv9_io_err_t rv9_io_write(int num, const void *buf, size_t len, size_t *done)
     return err;
 }
 
+/*
+ * Point path `to` at whatever `from` refers to, sharing one path
+ * descriptor. This is how redirection works: the shell aims its own stdout
+ * elsewhere, forks -- the child inherits the redirected path -- then puts
+ * its stdout back.
+ */
+rv9_io_err_t rv9_io_dup2(int from, int to)
+{
+    if (from == to) return RV9_IO_OK;
+    if (to < 0 || to >= RV9_MAX_PATHS) return RV9_IO_ERR_BADPATH;
+
+    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+
+    rv9_pid_t pid = rv9_proc_current_pid();
+    proc_paths_t *t = table_for(pid, true);
+    if (t == NULL || from < 0 || from >= RV9_MAX_PATHS ||
+        t->paths[from] == NULL) {
+        rv9_mutex_unlock(s_lock);
+        return RV9_IO_ERR_BADPATH;
+    }
+
+    if (t->paths[to] != NULL) path_release(t->paths[to]);
+
+    t->paths[from]->refs++;
+    t->paths[to] = t->paths[from];
+
+    rv9_mutex_unlock(s_lock);
+    return RV9_IO_OK;
+}
+
 rv9_io_err_t rv9_io_puts(int num, const char *s)
 {
     if (s == NULL) return RV9_IO_ERR_INVAL;
@@ -489,11 +519,18 @@ static int io_write_op(int path, const void *buf, uint32_t len)
     return (err == RV9_IO_OK) ? (int)done : -(int)err;
 }
 
+static int io_dup2_op(int from, int to)
+{
+    rv9_io_err_t err = rv9_io_dup2(from, to);
+    return (err == RV9_IO_OK) ? 0 : -(int)err;
+}
+
 static const rv9_mod_io_ops_t s_mod_io_ops = {
     .open  = io_open_op,
     .close = io_close_op,
     .read  = io_read_op,
     .write = io_write_op,
+    .dup2  = io_dup2_op,
 };
 
 rv9_io_err_t rv9_io_init(void)

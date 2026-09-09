@@ -20,15 +20,31 @@
 
 #define XLAT_CHUNK 64
 
+/* Line discipline */
+#define LINE_MAX      128
+#define POLL_MS       10
+#define KEY_BACKSPACE 8
+#define KEY_DELETE    127
+#define KEY_CTRL_C    3
+
+typedef struct {
+    char   line[LINE_MAX];
+    size_t len;
+} scf_path_state_t;
+
 static rv9_io_err_t scf_open(rv9_path_t *path)
 {
-    (void)path;
-    return RV9_IO_OK;   /* SCF keeps no per-path state yet */
+    /* Only readers need a line buffer; a write-only path stays free of it. */
+    if (!(path->mode & RV9_MODE_READ)) return RV9_IO_OK;
+
+    path->fm_state = rv9_calloc(1, sizeof(scf_path_state_t));
+    return path->fm_state ? RV9_IO_OK : RV9_IO_ERR_NOMEM;
 }
 
 static rv9_io_err_t scf_close(rv9_path_t *path)
 {
-    (void)path;
+    rv9_free(path->fm_state);
+    path->fm_state = NULL;
     return RV9_IO_OK;
 }
 
@@ -82,22 +98,76 @@ static rv9_io_err_t scf_write(rv9_path_t *path, const void *buf, size_t len,
     return RV9_IO_OK;
 }
 
+/* Echo is SCF's job, not the driver's. The driver moves bytes; it has no
+   idea that what it just read should be reflected back. */
+static void echo(const rv9_dev_t *dev, const char *s, size_t n)
+{
+    if (!dev->opt[OPT_ECHO] || dev->drv->write == NULL) return;
+    size_t moved = 0;
+    dev->drv->write((rv9_dev_t *)dev, s, n, &moved);
+}
+
+/*
+ * Read one line, with editing.
+ *
+ * Blocks until the user presses return. That is the discipline a character
+ * device gets for free by sitting under SCF -- the driver is non-blocking
+ * and knows nothing about lines, backspace, or when a read is finished.
+ */
 static rv9_io_err_t scf_read(rv9_path_t *path, void *buf, size_t len,
                              size_t *done)
 {
     const rv9_dev_t *dev = path->dev;
+    scf_path_state_t *st = (scf_path_state_t *)path->fm_state;
+
     if (dev->drv->read == NULL) return RV9_IO_ERR_UNSUPPORTED;
+    if (st == NULL || len == 0) return RV9_IO_ERR_INVAL;
 
-    rv9_io_err_t err = dev->drv->read((rv9_dev_t *)dev, buf, len, done);
+    for (;;) {
+        char ch;
+        size_t got = 0;
+        rv9_io_err_t err = dev->drv->read((rv9_dev_t *)dev, &ch, 1, &got);
 
-    /* Echo is SCF's job, not the driver's -- the driver may not even be able
-       to write back to where the input came from. */
-    if (err == RV9_IO_OK && dev->opt[OPT_ECHO] && done && *done > 0 &&
-        dev->drv->write != NULL) {
-        size_t moved = 0;
-        dev->drv->write((rv9_dev_t *)dev, buf, *done, &moved);
+        if (err == RV9_IO_ERR_WOULDBLOCK || got == 0) {
+            /* Nothing typed yet. Sleeping rather than spinning is what lets
+               other processes run while a shell waits at its prompt. */
+            rv9_task_delay_ms(POLL_MS);
+            continue;
+        }
+        if (err != RV9_IO_OK) return err;
+
+        if (ch == '\r' || ch == '\n') {
+            echo(dev, "\r\n", 2);
+
+            size_t n = st->len < len ? st->len : len;
+            memcpy(buf, st->line, n);
+            st->len = 0;
+            if (done) *done = n;
+            return RV9_IO_OK;
+        }
+
+        if (ch == KEY_BACKSPACE || ch == KEY_DELETE) {
+            if (st->len > 0) {
+                st->len--;
+                echo(dev, "\b \b", 3);   /* rub out the character */
+            }
+            continue;
+        }
+
+        if (ch == KEY_CTRL_C) {
+            st->len = 0;
+            echo(dev, "^C\r\n", 4);
+            if (done) *done = 0;
+            return RV9_IO_OK;
+        }
+
+        if (ch < 32 || ch > 126) continue;    /* ignore what we cannot show */
+
+        if (st->len < LINE_MAX - 1) {
+            st->line[st->len++] = ch;
+            echo(dev, &ch, 1);
+        }
     }
-    return err;
 }
 
 /* A character stream has no position. Saying so is more useful than

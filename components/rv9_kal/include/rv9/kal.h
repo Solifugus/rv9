@@ -47,6 +47,13 @@ const char *rv9_strerror(rv9_err_t err);
 uint64_t rv9_time_us(void);
 uint64_t rv9_time_ms(void);
 
+/*
+ * Milliseconds in whatever unit the host kernel counts time in. Needed
+ * because some hardware APIs demand a tick count; nothing above the KAL
+ * should have to know what a tick is.
+ */
+uint32_t rv9_ms_to_ticks(uint32_t ms);
+
 /* ------------------------------------------------------------------ */
 /* Tasks                                                               */
 /*                                                                     */

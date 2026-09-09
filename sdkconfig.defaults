@@ -22,3 +22,8 @@ CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT=n
 # task watchdog. Supervision is the OS's job, not the host kernel's -- RV-9
 # grows its own in a later phase.
 CONFIG_ESP_TASK_WDT_INIT=n
+
+# The console must be the native USB Serial/JTAG, not UART0. UART0's pins go
+# nowhere on this board, and RV-9 needs the USB link for input as well as
+# output -- it is the only terminal the board has.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

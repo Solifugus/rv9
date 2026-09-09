@@ -1,0 +1,27 @@
+/*
+ * free -- report memory and system counts.
+ */
+#include "modlib.h"
+
+__attribute__((section(".text.entry")))
+int rv9_module_entry(const rv9_mod_env_t *env)
+{
+    if (env == NULL || env->abi_version < 5) return -1;
+
+    rv9_sys_mem_t m;
+    if (env->sysinfo(RV9_SYS_MEM, &m, sizeof(m)) < 1) return -2;
+
+    m_say(env, RV9_STDOUT, "heap free      ");
+    m_num(env, RV9_STDOUT, (int32_t)m.heap_free);
+    m_say(env, RV9_STDOUT, "\nlow water      ");
+    m_num(env, RV9_STDOUT, (int32_t)m.heap_low_water);
+    m_say(env, RV9_STDOUT, "\nexecutable     ");
+    m_num(env, RV9_STDOUT, (int32_t)m.heap_exec_free);
+    m_say(env, RV9_STDOUT, "\nmodules        ");
+    m_num(env, RV9_STDOUT, (int32_t)m.module_count);
+    m_say(env, RV9_STDOUT, "\nprocesses      ");
+    m_num(env, RV9_STDOUT, (int32_t)m.proc_count);
+    m_say(env, RV9_STDOUT, "\n");
+
+    return 0;
+}

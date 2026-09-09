@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     3
+#define RV9_MODULE_ABI     6
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -107,7 +107,70 @@ typedef struct {
     int       (*close)(int path);
     int       (*read)(int path, void *buf, uint32_t len);
     int       (*write)(int path, const void *buf, uint32_t len);
+
+    /* --- ABI 4: starting other modules --- */
+    /* fork returns a pid, or negative on failure. wait blocks for it and
+       fills *status with the module's return value. */
+    int       (*fork)(const char *module, int priority);
+    int       (*wait)(int pid, int *status, uint32_t timeout_ms);
+
+    /* --- ABI 5: asking the system about itself, and redirection --- */
+    /* sysinfo fills buf with records of the requested kind and returns how
+       many it wrote, or negative on error. */
+    int       (*sysinfo)(uint32_t what, void *buf, uint32_t len);
+    /* Make path `to` refer to whatever `from` refers to. This is how a
+       shell redirects: it points its own stdout somewhere else, forks, and
+       puts it back. */
+    int       (*dup2)(int from, int to);
+
+    /* --- ABI 6: chain --- */
+    /*
+     * Replace the running module with another, keeping this pid, its open
+     * paths and its priority. Returns 0 if the request was accepted; the
+     * module should then return from its entry point, and the new module
+     * runs in its place. OS-9 called this F$Chain.
+     *
+     * It is not exec(): the old module returns normally first, so it can
+     * clean up. The process simply continues as something else.
+     */
+    int       (*chain)(const char *module);
 } rv9_mod_env_t;
+
+/* ------------------------------------------------------------------ */
+/* sysinfo                                                             */
+/* ------------------------------------------------------------------ */
+
+#define RV9_SYS_MEM      1
+#define RV9_SYS_MODULES  2
+#define RV9_SYS_PROCS    3
+
+typedef struct __attribute__((packed)) {
+    uint32_t heap_free;
+    uint32_t heap_low_water;
+    uint32_t heap_exec_free;
+    uint32_t module_count;
+    uint32_t proc_count;
+} rv9_sys_mem_t;
+
+typedef struct __attribute__((packed)) {
+    char     name[32];
+    uint8_t  type;
+    uint8_t  revision;
+    uint16_t reserved;
+    uint32_t size;
+    uint32_t links;
+} rv9_sys_module_t;
+
+typedef struct __attribute__((packed)) {
+    uint16_t pid;
+    uint16_t parent;
+    char     name[32];
+    uint8_t  state;
+    int8_t   base_priority;
+    int8_t   effective_priority;
+    int8_t   reserved;
+    int32_t  status;
+} rv9_sys_proc_t;
 
 typedef int (*rv9_mod_entry_fn)(const rv9_mod_env_t *env);
 
@@ -198,9 +261,20 @@ typedef struct {
     int (*close)(int path);
     int (*read)(int path, void *buf, uint32_t len);
     int (*write)(int path, const void *buf, uint32_t len);
+    int (*dup2)(int from, int to);
 } rv9_mod_io_ops_t;
 
 void rv9_mod_set_io_ops(const rv9_mod_io_ops_t *ops);
+
+/* Same arrangement for the process manager, for the same reason. */
+typedef struct {
+    int (*fork)(const char *module, int priority);
+    int (*wait)(int pid, int *status, uint32_t timeout_ms);
+    int (*procs)(void *buf, uint32_t len);   /* fills rv9_sys_proc_t records */
+    int (*chain)(const char *module);
+} rv9_mod_proc_ops_t;
+
+void rv9_mod_set_proc_ops(const rv9_mod_proc_ops_t *ops);
 
 /*
  * Fill in the environment handed to a module. One place builds it so that

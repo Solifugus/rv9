@@ -86,14 +86,21 @@ panel — through the full manager/driver/descriptor stack, with no shortcuts.
 
 ---
 
-## Phase 4 — Shell and utilities
+## Phase 4 — Shell and utilities  ✅ done
 
 **Goal:** it stops being a demo and becomes something you can sit in front of.
 
 - Shell as a loadable module: parse, fork, wait, redirect paths
-- Utilities as separate modules: `mdir`, `procs`, `free`, `echo`, `load`, `unlink`
-- I/O redirection between paths
-- Pipes (`PIPE` file manager) if they fall out cheaply
+- Utilities as separate modules: `mdir`, `procs`, `free`, `echo`, `chaintest`
+- I/O redirection between paths (`cmd > /dev`), via `dup2` and
+  inherit-by-reference
+- `chain()`, deferred here from phase 2 and now done: a process continues as
+  a different module, keeping its pid, priority and open paths
+- `sysinfo` in the module ABI, so utilities can ask about modules, processes
+  and memory without being part of the kernel
+- `load`/`unlink` as commands, and pipes, did **not** land. Pipes want a PIPE
+  file manager, which is better company for RBF in phase 5 than bolted on
+  here.
 
 **Done when:** you type a command at a prompt on the LCD and a separate module
 runs, with output redirected.
@@ -171,9 +178,9 @@ useful, working preparation, but preparation.*
 
 ## Immediate next step
 
-Phase 4. The shell, and utilities as loadable modules.
+Phase 5. Storage: RBF, the `sdspi` driver, and `/sd0`.
 
-The pieces are in place: processes inherit standard paths across fork, which
-is what makes redirection work, and `chain()` is deferred to here because the
-shell is what wants it. Console *input* is the missing driver capability --
-`uart` read currently returns WOULDBLOCK.
+The SD card shares its SPI bus with the LCD, so bus arbitration is the new
+problem — the console and the card will contend. A PIPE file manager belongs
+in this phase too, since it is a file manager and wants the same attention
+as RBF.

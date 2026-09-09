@@ -30,16 +30,22 @@ CFLAGS=(
     -Os
     -ffreestanding
     -fno-builtin
-    -fno-jump-tables            # jump tables would need absolute addresses
+    -fno-jump-tables            # jump tables hold absolute addresses
+    -fno-tree-switch-conversion # so do switch-to-lookup-table rewrites
     -ffunction-sections
     -fdata-sections
     -Wall -Wextra -Werror
     -I"$ROOT/components/rv9_module/include"
+    -I"$ROOT/modules"
 )
 LDFLAGS=(-nostdlib -nostartfiles -T"$ROOT/modules/module.ld" -Wl,--gc-sections)
 
 mkdir -p "$OUT"
 : > "$STORE"
+
+# Same script, different base, for the position-independence check below.
+PROBE_LD="$OUT/module_probe.ld"
+sed 's/^    \. = 0;$/    . = 0x4000;/' "$ROOT/modules/module.ld" > "$PROBE_LD"
 
 shopt -s nullglob
 for dir in "$ROOT"/modules/*/; do
@@ -77,6 +83,27 @@ for dir in "$ROOT"/modules/*/; do
 
     "$CC" "${CFLAGS[@]}" "${LDFLAGS[@]}" -o "$OUT/$name.elf" "${srcs[@]}"
     "$OBJCOPY" -O binary "$OUT/$name.elf" "$OUT/$name.bin"
+
+    # Prove position independence instead of assuming it.
+    #
+    # Link the same objects at a different base and compare the bytes. Code
+    # that only uses PC-relative references is byte-identical wherever it is
+    # linked; anything holding an absolute address differs. This catches the
+    # constructs that quietly break the loader -- pointer tables built from
+    # a switch over string literals being the one that actually bit us.
+    "$CC" "${CFLAGS[@]}" -nostdlib -nostartfiles -T"$PROBE_LD" \
+        -Wl,--gc-sections -o "$OUT/$name.probe.elf" "${srcs[@]}"
+    "$OBJCOPY" -O binary "$OUT/$name.probe.elf" "$OUT/$name.probe.bin"
+
+    if ! cmp -s "$OUT/$name.bin" "$OUT/$name.probe.bin"; then
+        echo "error: module '$name' is not position independent." >&2
+        echo "  Linking it at a different address produced different code," >&2
+        echo "  which means it holds an absolute address somewhere." >&2
+        echo "  Usual causes: a table of pointers (often a switch over" >&2
+        echo "  string literals), or a static array of function pointers." >&2
+        echo "  Use if/else returning literals, or index into a char array." >&2
+        exit 1
+    fi
 
     python3 "$ROOT/tools/mkmodule.py" \
         --name "$name" \

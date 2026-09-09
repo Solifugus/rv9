@@ -20,7 +20,7 @@
 
 static const char *TAG = "rv9";
 
-#define RV9_VERSION "0.0.4-phase3"
+#define RV9_VERSION "0.0.5-phase4"
 
 static void banner(void)
 {
@@ -144,7 +144,9 @@ static void io_bringup(void)
     devs();
 
     /* Processes with no parent inherit these. */
-    rv9_io_set_system_std("/uart0", "/term");
+    /* The terminal is the USB cable: keyboard in, characters out. The
+       panel is a second display, not the shell's console. */
+    rv9_io_set_system_std("/uart0", "/uart0");
 }
 
 /* Write the banner to the panel from kernel context, through the same
@@ -165,6 +167,23 @@ static void term_banner(void)
 
     rv9_io_close(t);
     ESP_LOGI(TAG, "banner written to /term");
+}
+
+static void phase4_shell(void)
+{
+    ESP_LOGI(TAG, "starting shell on /uart0");
+
+    rv9_pid_t pid = 0;
+    if (rv9_proc_fork("shell", RV9_PRIO_NORMAL, NULL, &pid) != RV9_PROC_OK) {
+        ESP_LOGE(TAG, "could not start shell");
+        return;
+    }
+
+    /* The shell owns the console from here. Waiting forever is right: when
+       it exits, the system has nothing left to do. */
+    int status = 0;
+    rv9_proc_wait(pid, &status, RV9_WAIT_FOREVER);
+    ESP_LOGI(TAG, "shell exited with %d", status);
 }
 
 static void phase3_demo(void)
@@ -353,9 +372,7 @@ static void rv9_init_task(void *arg)
 
     phase2_demo();
     phase3_demo();
-
-    ESP_LOGI(TAG, "Phase 3 complete.");
-    ESP_LOGI(TAG, "next: shell and utilities as modules (phase 4)");
+    phase4_shell();
 
     rv9_err_t err = rv9_task_create(heartbeat_task, "rv9-heartbeat", 3072,
                                     NULL, RV9_PRIO_LOW, NULL);

@@ -171,6 +171,7 @@ rv9_io_err_t rv9_io_getstat(int path, uint32_t code, void *arg);
 rv9_io_err_t rv9_io_setstat(int path, uint32_t code, void *arg);
 
 /* Convenience: write a NUL-terminated string. */
+rv9_io_err_t rv9_io_dup2(int from, int to);
 rv9_io_err_t rv9_io_puts(int path, const char *s);
 
 const rv9_dev_t *rv9_io_dev_next(const rv9_dev_t *prev);   /* NULL to start */

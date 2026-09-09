@@ -98,6 +98,28 @@ static void proc_trampoline(void *arg)
 {
     rv9_proc_t *p = (rv9_proc_t *)arg;
 
+    /*
+     * Claim our own identity before doing anything else.
+     *
+     * A process is recognised by matching task handles, and fork() cannot
+     * record the handle until rv9_task_create returns -- by which time the
+     * child may already be running. In that window the child has no pid, so
+     * its path table lookups miss and every write fails. Setting it here,
+     * from inside the task itself, closes the window: whoever asks is asking
+     * after this line has run. fork() writes the same value again later,
+     * which is harmless.
+     */
+    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    p->task = rv9_task_self();
+    rv9_mutex_unlock(s_lock);
+
+    /*
+     * A process may outlive the module it started as: chain() swaps the
+     * module underneath it, keeping the pid, priority and open paths. So
+     * this is a loop, not a single call.
+     */
+    int rc = 0;
+    for (;;) {
     const rv9_mod_header_t *h = (const rv9_mod_header_t *)p->module->image;
 
     /* One place builds the environment, so a module cannot tell whether it
@@ -107,7 +129,49 @@ static void proc_trampoline(void *arg)
     rv9_mod_env_init(&env, p->statics, h->static_size, p->pid);
     env.signals_take = env_signals_take;
 
-    int rc = p->module->entry(&env);
+    rc = p->module->entry(&env);
+
+    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    bool chaining = p->chain_pending;
+    char next_name[32];
+    if (chaining) {
+        memcpy(next_name, p->chain_to, sizeof(next_name));
+        p->chain_pending = false;
+    }
+    rv9_mutex_unlock(s_lock);
+
+    if (!chaining) break;
+
+    rv9_mod_entry_t *next = NULL;
+    if (rv9_mod_link(next_name, &next) != RV9_MOD_OK) {
+        ESP_LOGE(TAG, "pid %u: cannot chain to '%s'",
+                 (unsigned)p->pid, next_name);
+        rc = -1;
+        break;
+    }
+
+    /* Swap the module out. Paths stay open, which is the point. */
+    rv9_mod_unlink(p->module);
+    rv9_free(p->statics);
+    p->statics = NULL;
+
+    const rv9_mod_header_t *nh = (const rv9_mod_header_t *)next->image;
+    if (nh->static_size > 0) {
+        p->statics = rv9_calloc(1, nh->static_size);
+        if (p->statics == NULL) {
+            rv9_mod_unlink(next);
+            rc = -1;
+            break;
+        }
+    }
+
+    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    p->module = next;
+    strncpy(p->name, next_name, sizeof(p->name) - 1);
+    rv9_mutex_unlock(s_lock);
+
+    ESP_LOGI(TAG, "pid %u chained to '%s'", (unsigned)p->pid, next_name);
+    }
 
     /* Let the I/O manager close whatever this process left open, before we
        mark it dead and someone waiting on it wakes up. */
@@ -181,6 +245,62 @@ static void ager_task(void *arg)
 /* API                                                                 */
 /* ------------------------------------------------------------------ */
 
+/* Adapter so a module can start other modules without rv9_module having to
+   know the process manager exists. */
+static int proc_fork_op(const char *module, int priority)
+{
+    rv9_pid_t pid = 0;
+    rv9_proc_err_t err = rv9_proc_fork(module, priority, NULL, &pid);
+    return (err == RV9_PROC_OK) ? (int)pid : -(int)err;
+}
+
+static int proc_wait_op(int pid, int *status, uint32_t timeout_ms)
+{
+    rv9_proc_err_t err = rv9_proc_wait((rv9_pid_t)pid, status, timeout_ms);
+    return (err == RV9_PROC_OK) ? 0 : -(int)err;
+}
+
+/* Fill rv9_sys_proc_t records. buf==NULL just counts, which is how
+   sysinfo(RV9_SYS_MEM) learns the process count. */
+static int proc_list_op(void *buf, uint32_t len)
+{
+    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+
+    uint32_t max = buf ? len / sizeof(rv9_sys_proc_t) : 0;
+    rv9_sys_proc_t *out = (rv9_sys_proc_t *)buf;
+    uint32_t n = 0;
+
+    for (rv9_proc_t *p = s_procs; p; p = p->next) {
+        if (buf == NULL) { n++; continue; }
+        if (n >= max) break;
+
+        memset(&out[n], 0, sizeof(out[n]));
+        out[n].pid                = p->pid;
+        out[n].parent             = p->parent;
+        strncpy(out[n].name, p->name, sizeof(out[n].name) - 1);
+        out[n].state              = (uint8_t)p->state;
+        out[n].base_priority      = (int8_t)p->base_priority;
+        out[n].effective_priority = (int8_t)p->effective_priority;
+        out[n].status             = p->exit_status;
+        n++;
+    }
+
+    rv9_mutex_unlock(s_lock);
+    return (int)n;
+}
+
+static int proc_chain_op(const char *module)
+{
+    return rv9_proc_chain(module) == RV9_PROC_OK ? 0 : -1;
+}
+
+static const rv9_mod_proc_ops_t s_mod_proc_ops = {
+    .fork  = proc_fork_op,
+    .wait  = proc_wait_op,
+    .procs = proc_list_op,
+    .chain = proc_chain_op,
+};
+
 rv9_proc_err_t rv9_proc_init(void)
 {
     if (s_running) return RV9_PROC_OK;
@@ -191,6 +311,8 @@ rv9_proc_err_t rv9_proc_init(void)
     rv9_err_t err = rv9_task_create(ager_task, "rv9-ager", 2560, NULL,
                                     RV9_PRIO_AGER, NULL);
     if (err != RV9_OK) return RV9_PROC_ERR_NOMEM;
+
+    rv9_mod_set_proc_ops(&s_mod_proc_ops);
 
     s_running = true;
     ESP_LOGI(TAG, "process manager up (aging every %d ms, max boost %d)",
@@ -306,6 +428,22 @@ rv9_proc_err_t rv9_proc_wait(rv9_pid_t pid, int *out_status, uint32_t timeout_ms
 
     if (out_status) *out_status = p->exit_status;
     return RV9_PROC_OK;
+}
+
+rv9_proc_err_t rv9_proc_chain(const char *module_name)
+{
+    if (module_name == NULL) return RV9_PROC_ERR_INVAL;
+
+    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_proc_t *p = current_locked();
+    if (p != NULL) {
+        strncpy(p->chain_to, module_name, sizeof(p->chain_to) - 1);
+        p->chain_to[sizeof(p->chain_to) - 1] = '\0';
+        p->chain_pending = true;
+    }
+    rv9_mutex_unlock(s_lock);
+
+    return p ? RV9_PROC_OK : RV9_PROC_ERR_NOTFOUND;
 }
 
 rv9_proc_err_t rv9_proc_signal(rv9_pid_t pid, uint32_t signals)

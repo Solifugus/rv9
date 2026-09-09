@@ -9,10 +9,22 @@ on the Waveshare ESP32-C5-LCD-1.47 board.
   FreeRTOS-to-native strategy
 - [Development plan](docs/roadmap.md) — phased, each phase useful on its own
 
-Status: **phases 0-3 complete.** KAL over FreeRTOS (27/27 conformance tests
+Status: **phases 0-4 complete.** KAL over FreeRTOS (27/27 conformance tests
 passing on hardware); modules built, verified, loaded and run from flash;
 processes with OS-9-style priority aging, measured starvation-free; unified
-I/O with SCF, a UART driver, and a text console on the ST7789 panel.
+I/O with SCF, a UART driver, and a text console on the ST7789 panel; and a
+shell where every command is a loadable module.
+
+```
+rv9> mdir
+name        type    rev  size link
+desc_term   descrip 5    132   0
+echo        program 1    136   0
+mdir        program 1    784   1
+shell       program 2    1248  1
+...
+rv9> echo > /term        # output goes to the panel instead
+```
 
 ```
 . ~/esp/esp-idf/export.sh

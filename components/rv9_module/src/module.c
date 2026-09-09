@@ -300,6 +300,22 @@ static uint32_t env_no_signals(void) { return 0; }
 
 void rv9_mod_set_io_ops(const rv9_mod_io_ops_t *ops) { s_io_ops = ops; }
 
+static const rv9_mod_proc_ops_t *s_proc_ops;
+
+void rv9_mod_set_proc_ops(const rv9_mod_proc_ops_t *ops) { s_proc_ops = ops; }
+
+static int env_fork(const char *module, int priority)
+{
+    return s_proc_ops && s_proc_ops->fork
+           ? s_proc_ops->fork(module, priority) : -1;
+}
+
+static int env_wait(int pid, int *status, uint32_t timeout_ms)
+{
+    return s_proc_ops && s_proc_ops->wait
+           ? s_proc_ops->wait(pid, status, timeout_ms) : -1;
+}
+
 static int env_open(const char *name, uint32_t mode)
 {
     return s_io_ops && s_io_ops->open ? s_io_ops->open(name, mode) : -1;
@@ -320,6 +336,73 @@ static int env_write(int path, const void *buf, uint32_t len)
     return s_io_ops && s_io_ops->write ? s_io_ops->write(path, buf, len) : -1;
 }
 
+static int env_dup2(int from, int to)
+{
+    return s_io_ops && s_io_ops->dup2 ? s_io_ops->dup2(from, to) : -1;
+}
+
+/*
+ * sysinfo. The module directory lives here, so module records are filled
+ * directly; process records come back through the process manager's ops,
+ * because rv9_module must not depend on rv9_proc.
+ */
+static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
+{
+    if (buf == NULL) return -1;
+
+    switch (what) {
+    case RV9_SYS_MEM: {
+        if (len < sizeof(rv9_sys_mem_t)) return -1;
+        rv9_sys_mem_t *m = (rv9_sys_mem_t *)buf;
+
+        uint32_t mods = 0;
+        for (rv9_mod_entry_t *e = s_dir; e; e = e->next) mods++;
+
+        m->heap_free      = (uint32_t)rv9_heap_free();
+        m->heap_low_water = (uint32_t)rv9_heap_low_water();
+        m->heap_exec_free = (uint32_t)rv9_heap_free_exec();
+        m->module_count   = mods;
+        m->proc_count     = 0;
+
+        if (s_proc_ops && s_proc_ops->procs) {
+            int n = s_proc_ops->procs(NULL, 0);
+            if (n > 0) m->proc_count = (uint32_t)n;
+        }
+        return 1;
+    }
+
+    case RV9_SYS_MODULES: {
+        uint32_t max = len / sizeof(rv9_sys_module_t);
+        rv9_sys_module_t *out = (rv9_sys_module_t *)buf;
+        uint32_t n = 0;
+
+        for (rv9_mod_entry_t *e = s_dir; e && n < max; e = e->next, n++) {
+            memset(&out[n], 0, sizeof(out[n]));
+            strncpy(out[n].name, e->name, sizeof(out[n].name) - 1);
+            out[n].type     = e->type;
+            out[n].revision = e->revision;
+            out[n].size     = e->size;
+            out[n].links    = e->link_count;
+        }
+        return (int)n;
+    }
+
+    case RV9_SYS_PROCS:
+        if (s_proc_ops && s_proc_ops->procs) {
+            return s_proc_ops->procs(buf, len);
+        }
+        return -1;
+
+    default:
+        return -1;
+    }
+}
+
+static int env_chain(const char *module)
+{
+    return s_proc_ops && s_proc_ops->chain ? s_proc_ops->chain(module) : -1;
+}
+
 void rv9_mod_env_init(rv9_mod_env_t *env, void *statics,
                       uint32_t statics_size, uint32_t pid)
 {
@@ -337,6 +420,11 @@ void rv9_mod_env_init(rv9_mod_env_t *env, void *statics,
     env->close        = env_close;
     env->read         = env_read;
     env->write        = env_write;
+    env->fork         = env_fork;
+    env->wait         = env_wait;
+    env->sysinfo      = env_sysinfo;
+    env->dup2         = env_dup2;
+    env->chain        = env_chain;
 }
 
 rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result)
