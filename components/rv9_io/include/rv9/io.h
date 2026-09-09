@@ -117,17 +117,17 @@ typedef struct __attribute__((packed)) {
     char     name[16];       /* "/term" */
     char     filemgr[16];    /* "scf" */
     char     driver[16];     /* "lcdcon" */
-    uint32_t opt[4];         /* meaning is the driver's and manager's own */
+    uint32_t opt[8];         /* meaning is the driver's and manager's own */
 } rv9_devdesc_t;
 
-_Static_assert(sizeof(rv9_devdesc_t) == 64, "device descriptor must be 64 bytes");
+_Static_assert(sizeof(rv9_devdesc_t) == 80, "device descriptor must be 80 bytes");
 
 /* Live device: a descriptor bound to its file manager and driver. */
 typedef struct rv9_dev {
     char                 name[16];
     const rv9_filemgr_t *fmgr;
     const rv9_driver_t  *drv;
-    uint32_t             opt[4];
+    uint32_t             opt[8];
 
     void                *drv_state;   /* the driver's own */
     bool                 initialised;

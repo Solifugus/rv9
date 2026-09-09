@@ -49,11 +49,12 @@ for dir in "$ROOT"/modules/*/; do
     # device name to a file manager and a driver. Adding a device to the
     # system is adding one of these -- no kernel rebuild.
     if [[ -f "$dir/descriptor.conf" ]]; then
-        opt0=0; opt1=0; opt2=0; opt3=0
+        opt0=0; opt1=0; opt2=0; opt3=0; opt4=0; opt5=0; opt6=0; opt7=0
         source "$dir/descriptor.conf"
         python3 "$ROOT/tools/mkdesc.py" \
             --dev-name "$dev_name" --filemgr "$filemgr" --driver "$driver" \
             --opt "$opt0" "$opt1" "$opt2" "$opt3" \
+            "$opt4" "$opt5" "$opt6" "$opt7" \
             "$OUT/$name.bin"
         python3 "$ROOT/tools/mkmodule.py" \
             --name "$name" --type descriptor --revision "${revision:-1}" \

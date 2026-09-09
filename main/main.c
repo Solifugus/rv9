@@ -158,11 +158,9 @@ static void term_banner(void)
         return;
     }
 
+    /* The console is 30 columns wide. Keep lines short or they wrap. */
     rv9_io_puts(t, "RV-9 " RV9_VERSION "\n");
     rv9_io_puts(t, "RISC-V, after OS-9\n");
-    rv9_io_puts(t, "\n");
-    rv9_io_puts(t, "scf over lcdcon\n");
-    rv9_io_puts(t, "21x40 cells\n");
     rv9_io_puts(t, "\n");
 
     rv9_io_close(t);

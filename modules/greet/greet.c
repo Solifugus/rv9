@@ -33,19 +33,18 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     if (env->open == NULL || env->write == NULL) return -3;
 
     /* Inherited stdout: this module never opened anything. */
-    say(env, RV9_STDOUT, "greet: writing to inherited stdout\n");
+    say(env, RV9_STDOUT, "greet: writing to stdout\n");
 
     /* And a device opened by name. */
     int term = env->open("/term", RV9_MODE_WRITE);
     if (term < 0) return -4;
 
-    say(env, term, "\n");
-    say(env, term, "  RV-9 greet module\n");
-    say(env, term, "  path -> scf -> lcdcon\n");
-    say(env, term, "  no ST7789 knowledge here\n");
+    say(env, term, "greet: opened /term\n");
+    say(env, term, "  path > scf > lcdcon\n");
+    say(env, term, "  no LCD code in here\n");
 
     if (env->close(term) < 0) return -5;
 
-    say(env, RV9_STDOUT, "greet: wrote to /term and closed it\n");
+    say(env, RV9_STDOUT, "greet: closed /term\n");
     return 0;
 }
