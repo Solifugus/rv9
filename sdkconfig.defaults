@@ -1,0 +1,6 @@
+# Board is 4MB; without this the image header claims 2MB and half is unusable.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# RV-9 does its own scheduling above the KAL; a 1ms tick keeps the mapping
+# between RV-9 time and kernel time simple.
+CONFIG_FREERTOS_HZ=1000
