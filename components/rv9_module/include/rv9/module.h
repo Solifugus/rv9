@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     2
+#define RV9_MODULE_ABI     3
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -99,6 +99,14 @@ typedef struct {
     void      (*yield)(void);
     void      (*sleep_ms)(uint32_t ms);
     uint32_t  (*signals_take)(void);  /* pending signals, cleared by reading */
+
+    /* --- ABI 3: unified I/O --- */
+    /* All return >= 0 on success (a path number, or a byte count), and a
+       negative rv9_io_err_t on failure. */
+    int       (*open)(const char *name, uint32_t mode);
+    int       (*close)(int path);
+    int       (*read)(int path, void *buf, uint32_t len);
+    int       (*write)(int path, const void *buf, uint32_t len);
 } rv9_mod_env_t;
 
 typedef int (*rv9_mod_entry_fn)(const rv9_mod_env_t *env);
@@ -108,6 +116,16 @@ typedef int (*rv9_mod_entry_fn)(const rv9_mod_env_t *env);
  * process to stop cooperatively. A module polls with env->signals_take(),
  * which returns and clears whatever is pending.
  */
+/* Standard path numbers. A forked process inherits its parent's. */
+#define RV9_STDIN   0
+#define RV9_STDOUT  1
+#define RV9_STDERR  2
+
+/* Open modes, shared by the module ABI and the I/O manager. */
+#define RV9_MODE_READ   (1u << 0)
+#define RV9_MODE_WRITE  (1u << 1)
+#define RV9_MODE_RW     (RV9_MODE_READ | RV9_MODE_WRITE)
+
 #define RV9_SIG_STOP  (1u << 0)
 #define RV9_SIG_USER1 (1u << 1)
 #define RV9_SIG_USER2 (1u << 2)
@@ -168,6 +186,30 @@ rv9_mod_err_t rv9_mod_unlink(rv9_mod_entry_t *entry);
  * static area for the process's lifetime.
  */
 rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result);
+
+/*
+ * The I/O manager registers itself here so that modules can be given I/O
+ * without rv9_module having to depend on rv9_io. The dependency runs one
+ * way -- rv9_io knows about rv9_module, never the reverse -- and this is
+ * the seam that keeps it that way.
+ */
+typedef struct {
+    int (*open)(const char *name, uint32_t mode);
+    int (*close)(int path);
+    int (*read)(int path, void *buf, uint32_t len);
+    int (*write)(int path, const void *buf, uint32_t len);
+} rv9_mod_io_ops_t;
+
+void rv9_mod_set_io_ops(const rv9_mod_io_ops_t *ops);
+
+/*
+ * Fill in the environment handed to a module. One place builds it so that
+ * a module cannot tell whether it was started by rv9_mod_run or by fork.
+ * The caller may override individual fields afterwards -- the process
+ * manager replaces signals_take with its own.
+ */
+void rv9_mod_env_init(rv9_mod_env_t *env, void *statics,
+                      uint32_t statics_size, uint32_t pid);
 
 /* CRC-32 (zlib polynomial), exposed because the loader and the host tool
    must agree on it exactly. */

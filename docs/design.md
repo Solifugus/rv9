@@ -2,7 +2,7 @@
 
 A small modular operating system for RISC-V, in the spirit of Microware OS-9.
 
-Status: phases 0-2 complete — KAL on FreeRTOS (27/27 conformance tests
+Status: phases 0-3 complete — KAL on FreeRTOS (27/27 conformance tests
 passing on hardware), module format/directory/loader, and processes with
 priority aging, all verified on hardware. See docs/roadmap.md.
 
@@ -295,6 +295,24 @@ rather than by accident.
 
 `/term` on the LCD is the first milestone that will actually feel like an
 operating system.
+
+### What is loadable, and what is not yet
+
+Device **descriptors** are real loadable modules: `rv9_io_attach_from_modules()`
+scans the store for `RV9_MOD_DESCRIPTOR` modules and binds each one. Adding a
+device is adding a module — no kernel rebuild, exactly as OS-9 intended.
+
+File managers and drivers are *interfaces* but are still compiled in. The
+module ABI cannot yet express what a driver needs — register access,
+interrupts, DMA — and inventing that before a second driver exists would be
+guessing. The interfaces in `rv9/io.h` are already shaped for it, so making
+them loadable later changes nothing above them.
+
+The `uart` driver reaches the console through the host kernel's stdout and
+`lcdcon` drives the panel through ESP-IDF's `esp_lcd`. Both are shims at the
+layer where shims belong: drivers are exactly where hardware knowledge is
+allowed to live, and phase 7 replaces their insides without touching the
+stack above.
 
 ---
 

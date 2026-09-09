@@ -272,9 +272,23 @@ rv9_mod_err_t rv9_mod_unlink(rv9_mod_entry_t *entry)
 
 /* ---- the environment handed to modules ---- */
 
+static const rv9_mod_io_ops_t *s_io_ops;
+
 static int env_print(const char *s)
 {
     if (s == NULL) return -1;
+
+    /* Once the I/O manager is up, print is just a write to stdout -- which
+       means every module's output travels the full path/filemgr/driver
+       stack rather than shortcutting to the log. */
+    if (s_io_ops && s_io_ops->write) {
+        size_t n = strlen(s);
+        if (s_io_ops->write(RV9_STDOUT, s, (uint32_t)n) >= 0) {
+            s_io_ops->write(RV9_STDOUT, "\n", 1);
+            return 0;
+        }
+    }
+
     ESP_LOGI("module", "%s", s);
     return 0;
 }
@@ -283,6 +297,47 @@ static uint64_t env_time_ms(void) { return rv9_time_ms(); }
 static void     env_yield(void) { rv9_task_yield(); }
 static void     env_sleep_ms(uint32_t ms) { rv9_task_delay_ms(ms); }
 static uint32_t env_no_signals(void) { return 0; }
+
+void rv9_mod_set_io_ops(const rv9_mod_io_ops_t *ops) { s_io_ops = ops; }
+
+static int env_open(const char *name, uint32_t mode)
+{
+    return s_io_ops && s_io_ops->open ? s_io_ops->open(name, mode) : -1;
+}
+
+static int env_close(int path)
+{
+    return s_io_ops && s_io_ops->close ? s_io_ops->close(path) : -1;
+}
+
+static int env_read(int path, void *buf, uint32_t len)
+{
+    return s_io_ops && s_io_ops->read ? s_io_ops->read(path, buf, len) : -1;
+}
+
+static int env_write(int path, const void *buf, uint32_t len)
+{
+    return s_io_ops && s_io_ops->write ? s_io_ops->write(path, buf, len) : -1;
+}
+
+void rv9_mod_env_init(rv9_mod_env_t *env, void *statics,
+                      uint32_t statics_size, uint32_t pid)
+{
+    env->abi_version  = RV9_MODULE_ABI;
+    env->statics      = statics;
+    env->statics_size = statics_size;
+    env->print        = env_print;
+    env->time_ms      = env_time_ms;
+    env->pid          = pid;
+    env->arg          = NULL;
+    env->yield        = env_yield;
+    env->sleep_ms     = env_sleep_ms;
+    env->signals_take = env_no_signals;
+    env->open         = env_open;
+    env->close        = env_close;
+    env->read         = env_read;
+    env->write        = env_write;
+}
 
 rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result)
 {
@@ -296,18 +351,8 @@ rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result)
         if (statics == NULL) return RV9_MOD_ERR_NOMEM;
     }
 
-    rv9_mod_env_t env = {
-        .abi_version  = RV9_MODULE_ABI,
-        .statics      = statics,
-        .statics_size = h->static_size,
-        .print        = env_print,
-        .time_ms      = env_time_ms,
-        .pid          = 0,          /* not a process; phase 2 fork() gives one */
-        .arg          = NULL,
-        .yield        = env_yield,
-        .sleep_ms     = env_sleep_ms,
-        .signals_take = env_no_signals,
-    };
+    rv9_mod_env_t env;
+    rv9_mod_env_init(&env, statics, h->static_size, 0);
 
     int result = entry->entry(&env);
     if (out_result) *out_result = result;

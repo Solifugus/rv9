@@ -31,6 +31,16 @@ static rv9_pid_t   s_next_pid = 1;
 static bool        s_aging = true;
 static bool        s_running;
 
+static rv9_proc_fork_hook_t s_on_fork;
+static rv9_proc_exit_hook_t s_on_exit;
+
+void rv9_proc_set_hooks(rv9_proc_fork_hook_t on_fork,
+                        rv9_proc_exit_hook_t on_exit)
+{
+    s_on_fork = on_fork;
+    s_on_exit = on_exit;
+}
+
 const char *rv9_proc_strerror(rv9_proc_err_t err)
 {
     switch (err) {
@@ -67,23 +77,6 @@ static rv9_proc_t *current_locked(void)
 /* The environment handed to a process's module                        */
 /* ------------------------------------------------------------------ */
 
-static int env_print(const char *s)
-{
-    if (s == NULL) return -1;
-
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
-    rv9_proc_t *p = current_locked();
-    rv9_pid_t pid = p ? p->pid : 0;
-    rv9_mutex_unlock(s_lock);
-
-    ESP_LOGI("proc", "[%u] %s", (unsigned)pid, s);
-    return 0;
-}
-
-static uint64_t env_time_ms(void)        { return rv9_time_ms(); }
-static void     env_yield(void)          { rv9_task_yield(); }
-static void     env_sleep_ms(uint32_t m) { rv9_task_delay_ms(m); }
-
 static uint32_t env_signals_take(void)
 {
     rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
@@ -107,20 +100,18 @@ static void proc_trampoline(void *arg)
 
     const rv9_mod_header_t *h = (const rv9_mod_header_t *)p->module->image;
 
-    rv9_mod_env_t env = {
-        .abi_version  = RV9_MODULE_ABI,
-        .statics      = p->statics,
-        .statics_size = h->static_size,
-        .print        = env_print,
-        .time_ms      = env_time_ms,
-        .pid          = p->pid,
-        .arg          = NULL,
-        .yield        = env_yield,
-        .sleep_ms     = env_sleep_ms,
-        .signals_take = env_signals_take,
-    };
+    /* One place builds the environment, so a module cannot tell whether it
+       was started by rv9_mod_run or by fork. Signals are the exception --
+       they are per-process, so the process manager supplies its own. */
+    rv9_mod_env_t env;
+    rv9_mod_env_init(&env, p->statics, h->static_size, p->pid);
+    env.signals_take = env_signals_take;
 
     int rc = p->module->entry(&env);
+
+    /* Let the I/O manager close whatever this process left open, before we
+       mark it dead and someone waiting on it wakes up. */
+    if (s_on_exit) s_on_exit(p->pid);
 
     rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
     p->exit_status = rc;
@@ -207,6 +198,17 @@ rv9_proc_err_t rv9_proc_init(void)
     return RV9_PROC_OK;
 }
 
+rv9_pid_t rv9_proc_current_pid(void)
+{
+    if (s_lock == NULL) return RV9_PID_NONE;
+
+    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_proc_t *p = current_locked();
+    rv9_pid_t pid = p ? p->pid : RV9_PID_NONE;
+    rv9_mutex_unlock(s_lock);
+    return pid;
+}
+
 rv9_proc_err_t rv9_proc_fork(const char *module_name, int priority,
                              const char *arg, rv9_pid_t *out_pid)
 {
@@ -245,10 +247,12 @@ rv9_proc_err_t rv9_proc_fork(const char *module_name, int priority,
         return RV9_PROC_ERR_NOMEM;
     }
 
+    rv9_pid_t parent = rv9_proc_current_pid();
+
     rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
 
     p->pid                = s_next_pid++;
-    p->parent             = RV9_PID_NONE;
+    p->parent             = parent;
     p->module             = mod;
     p->base_priority      = priority;
     p->age                = 0;
@@ -261,6 +265,9 @@ rv9_proc_err_t rv9_proc_fork(const char *module_name, int priority,
     s_procs = p;
 
     rv9_mutex_unlock(s_lock);
+
+    /* Hand the child whatever the parent had open, before it can run. */
+    if (s_on_fork) s_on_fork(parent, p->pid);
 
     size_t stack = h->stack_size ? h->stack_size : PROC_DEFAULT_STACK;
     rv9_err_t err = rv9_task_create(proc_trampoline, p->name, stack, p,

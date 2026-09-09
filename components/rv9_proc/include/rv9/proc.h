@@ -57,6 +57,9 @@ typedef uint16_t rv9_pid_t;
 #define RV9_PRIO_SYSTEM        (RV9_PRIO_MAX - 1)
 #define RV9_PROC_PRIO_CEILING  (RV9_PRIO_MAX - 2)
 
+/* Paths a process may hold open at once. */
+#define RV9_MAX_PATHS 8
+
 typedef enum {
     RV9_PROC_ACTIVE = 1,   /* runnable or running */
     RV9_PROC_WAITING,      /* blocked on something */
@@ -133,6 +136,21 @@ const rv9_proc_t *rv9_proc_next(const rv9_proc_t *prev);   /* NULL to start */
  */
 void rv9_proc_aging_set(bool enabled);
 bool rv9_proc_aging_get(void);
+
+/* The pid of the calling task, or RV9_PID_NONE if the caller is not a
+   process (the boot task, the ager, a driver's own task). */
+rv9_pid_t rv9_proc_current_pid(void);
+
+/*
+ * Hooks, so that the I/O manager can hang per-process state off processes
+ * without the process manager having to know the I/O manager exists. The
+ * dependency runs one way: rv9_io knows about rv9_proc, never the reverse.
+ */
+typedef void (*rv9_proc_fork_hook_t)(rv9_pid_t parent, rv9_pid_t child);
+typedef void (*rv9_proc_exit_hook_t)(rv9_pid_t pid);
+
+void rv9_proc_set_hooks(rv9_proc_fork_hook_t on_fork,
+                        rv9_proc_exit_hook_t on_exit);
 
 #ifdef __cplusplus
 }

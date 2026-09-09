@@ -44,6 +44,27 @@ mkdir -p "$OUT"
 shopt -s nullglob
 for dir in "$ROOT"/modules/*/; do
     name="$(basename "$dir")"
+
+    # A device descriptor is a data module: no code, just the binding of a
+    # device name to a file manager and a driver. Adding a device to the
+    # system is adding one of these -- no kernel rebuild.
+    if [[ -f "$dir/descriptor.conf" ]]; then
+        opt0=0; opt1=0; opt2=0; opt3=0
+        source "$dir/descriptor.conf"
+        python3 "$ROOT/tools/mkdesc.py" \
+            --dev-name "$dev_name" --filemgr "$filemgr" --driver "$driver" \
+            --opt "$opt0" "$opt1" "$opt2" "$opt3" \
+            "$OUT/$name.bin"
+        python3 "$ROOT/tools/mkmodule.py" \
+            --name "$name" --type descriptor --revision "${revision:-1}" \
+            "$OUT/$name.bin" "$OUT/$name.mod"
+        cat "$OUT/$name.mod" >> "$STORE"
+        size=$(stat -c%s "$OUT/$name.mod")
+        pad=$(( (4 - size % 4) % 4 ))
+        (( pad > 0 )) && head -c "$pad" /dev/zero >> "$STORE"
+        continue
+    fi
+
     srcs=("$dir"*.c)
     [[ ${#srcs[@]} -gt 0 ]] || continue
 

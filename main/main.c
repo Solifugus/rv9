@@ -10,6 +10,8 @@
 #include "rv9/kal.h"
 #include "rv9/module.h"
 #include "rv9/proc.h"
+#include "rv9/io.h"
+#include "rv9/io_builtin.h"
 #include "kal_selftest.h"
 
 #include "esp_chip_info.h"
@@ -18,7 +20,7 @@
 
 static const char *TAG = "rv9";
 
-#define RV9_VERSION "0.0.3-phase2"
+#define RV9_VERSION "0.0.4-phase3"
 
 static void banner(void)
 {
@@ -108,6 +110,82 @@ static void run_module(const char *name)
     }
 
     rv9_mod_unlink(mod);
+}
+
+/* devs -- list attached devices, showing the binding each descriptor made. */
+static void devs(void)
+{
+    ESP_LOGI(TAG, "devices:");
+    ESP_LOGI(TAG, "  %-10s %-8s %-8s %5s", "name", "filemgr", "driver", "open");
+    for (const rv9_dev_t *d = rv9_io_dev_next(NULL); d; d = rv9_io_dev_next(d)) {
+        ESP_LOGI(TAG, "  %-10s %-8s %-8s %5lu",
+                 d->name, d->fmgr->name, d->drv->name,
+                 (unsigned long)d->open_count);
+    }
+}
+
+/* Bring up the I/O system: managers and drivers register, then every
+   descriptor module in the store is attached. */
+static void io_bringup(void)
+{
+    if (rv9_io_init() != RV9_IO_OK) {
+        ESP_LOGE(TAG, "I/O manager failed to start");
+        return;
+    }
+
+    rv9_scf_register();
+    rv9_drv_uart_register();
+    rv9_drv_lcdcon_register();
+
+    int n = rv9_io_attach_from_modules();
+    ESP_LOGI(TAG, "%d device%s attached from descriptor modules",
+             n, n == 1 ? "" : "s");
+
+    devs();
+
+    /* Processes with no parent inherit these. */
+    rv9_io_set_system_std("/uart0", "/term");
+}
+
+/* Write the banner to the panel from kernel context, through the same
+   stack a module would use. */
+static void term_banner(void)
+{
+    int t = rv9_io_open("/term", RV9_MODE_WRITE);
+    if (t < 0) {
+        ESP_LOGE(TAG, "could not open /term: %s",
+                 rv9_io_strerror((rv9_io_err_t)(-t)));
+        return;
+    }
+
+    rv9_io_puts(t, "RV-9 " RV9_VERSION "\n");
+    rv9_io_puts(t, "RISC-V, after OS-9\n");
+    rv9_io_puts(t, "\n");
+    rv9_io_puts(t, "scf over lcdcon\n");
+    rv9_io_puts(t, "21x40 cells\n");
+    rv9_io_puts(t, "\n");
+
+    rv9_io_close(t);
+    ESP_LOGI(TAG, "banner written to /term");
+}
+
+static void phase3_demo(void)
+{
+    term_banner();
+
+    ESP_LOGI(TAG, "--- module I/O through the stack ---");
+    rv9_pid_t pid = 0;
+    if (rv9_proc_fork("greet", RV9_PRIO_NORMAL, NULL, &pid) == RV9_PROC_OK) {
+        int rc = 0;
+        rv9_proc_wait(pid, &rc, 5000);
+        if (rc == 0) {
+            ESP_LOGI(TAG, "greet finished cleanly");
+        } else {
+            ESP_LOGE(TAG, "greet failed with %d", rc);
+        }
+    }
+
+    devs();
 }
 
 /* procs -- list the process table. Becomes a loadable utility in phase 4. */
@@ -272,12 +350,14 @@ static void rv9_init_task(void *arg)
 
     rv9_mod_dir_init();
     mdir();
+    io_bringup();
     run_module("hello");
 
     phase2_demo();
+    phase3_demo();
 
-    ESP_LOGI(TAG, "Phase 2 complete.");
-    ESP_LOGI(TAG, "next: I/O manager and a console on the LCD (phase 3)");
+    ESP_LOGI(TAG, "Phase 3 complete.");
+    ESP_LOGI(TAG, "next: shell and utilities as modules (phase 4)");
 
     rv9_err_t err = rv9_task_create(heartbeat_task, "rv9-heartbeat", 3072,
                                     NULL, RV9_PRIO_LOW, NULL);

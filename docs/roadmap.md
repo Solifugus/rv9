@@ -66,7 +66,7 @@ priorities, and the low-priority one still makes progress.
 
 ---
 
-## Phase 3 — I/O manager and SCF
+## Phase 3 — I/O manager and SCF  ✅ done
 
 **Goal:** the abstraction the whole system hangs from — and a real console.
 
@@ -171,9 +171,9 @@ useful, working preparation, but preparation.*
 
 ## Immediate next step
 
-Phase 3. The I/O manager: path table, the generic call surface, and the
-file-manager / driver / descriptor split. Then SCF and a console on the LCD.
+Phase 4. The shell, and utilities as loadable modules.
 
-This is the largest phase so far and the one the rest of the system hangs
-from. It is also where RV-9 stops being a scheduler with a loader attached
-and starts being an operating system.
+The pieces are in place: processes inherit standard paths across fork, which
+is what makes redirection work, and `chain()` is deferred to here because the
+shell is what wants it. Console *input* is the missing driver capability --
+`uart` read currently returns WOULDBLOCK.
