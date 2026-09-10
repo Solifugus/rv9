@@ -53,6 +53,7 @@ const char *rv9_io_strerror(rv9_io_err_t err)
     case RV9_IO_ERR_IO:          return "device error";
     case RV9_IO_ERR_INVAL:       return "invalid argument";
     case RV9_IO_ERR_EXISTS:      return "already exists";
+    case RV9_IO_ERR_TIMEOUT:     return "timed out";
     default:                     return "unknown error";
     }
 }
@@ -267,24 +268,45 @@ static void split_path(const char *full, char *dev_out, size_t dev_len,
     *rest_out = slash + 1;
 }
 
-static rv9_path_t *path_alloc(rv9_dev_t *dev, const char *rest, uint32_t mode,
-                              rv9_io_err_t *err)
+/*
+ * Opening is split in two because a file manager's open may block for a
+ * long time -- NFM's listener sits in accept() until someone connects. The
+ * descriptor is built and the slot reserved under the lock; the file
+ * manager runs outside it.
+ *
+ * Holding the global I/O lock across a blocking open freezes every other
+ * process's I/O, including the shell that is waiting to see what happens.
+ */
+static rv9_path_t *path_new(rv9_dev_t *dev, uint32_t mode)
 {
     rv9_path_t *p = rv9_calloc(1, sizeof(*p));
-    if (p == NULL) { *err = RV9_IO_ERR_NOMEM; return NULL; }
+    if (p == NULL) return NULL;
 
     p->dev  = dev;
     p->mode = mode;
     p->pos  = 0;
     p->refs = 1;
+    return p;
+}
 
-    if (dev->fmgr->open) {
-        rv9_io_err_t e = dev->fmgr->open(p, rest);
-        if (e != RV9_IO_OK) {
-            rv9_free(p);
-            *err = e;
-            return NULL;
-        }
+/* Must be called with the lock NOT held. */
+static rv9_io_err_t path_open(rv9_path_t *p, const char *rest)
+{
+    if (p->dev->fmgr->open == NULL) return RV9_IO_OK;
+    return p->dev->fmgr->open(p, rest);
+}
+
+static rv9_path_t *path_alloc(rv9_dev_t *dev, const char *rest, uint32_t mode,
+                              rv9_io_err_t *err)
+{
+    rv9_path_t *p = path_new(dev, mode);
+    if (p == NULL) { *err = RV9_IO_ERR_NOMEM; return NULL; }
+
+    rv9_io_err_t e = path_open(p, rest);
+    if (e != RV9_IO_OK) {
+        rv9_free(p);
+        *err = e;
+        return NULL;
     }
 
     dev->open_count++;
@@ -334,15 +356,29 @@ int rv9_io_open(const char *name, uint32_t mode)
         return -RV9_IO_ERR_NOPATHS;
     }
 
-    rv9_io_err_t err = RV9_IO_OK;
-    rv9_path_t *p = path_alloc(dev, rest, mode, &err);
+    rv9_path_t *p = path_new(dev, mode);
     if (p == NULL) {
         rv9_mutex_unlock(s_lock);
+        return -RV9_IO_ERR_NOMEM;
+    }
+
+    /* Reserve the slot so a concurrent open in this process cannot take it,
+       then let go of the lock: what follows may block for a long time. */
+    t->paths[num] = p;
+    dev->open_count++;
+    rv9_mutex_unlock(s_lock);
+
+    rv9_io_err_t err = path_open(p, rest);
+
+    if (err != RV9_IO_OK) {
+        rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+        t->paths[num] = NULL;
+        if (dev->open_count) dev->open_count--;
+        rv9_mutex_unlock(s_lock);
+        rv9_free(p);
         return -err;
     }
 
-    t->paths[num] = p;
-    rv9_mutex_unlock(s_lock);
     return num;
 }
 
@@ -580,6 +616,24 @@ static int io_write_op(int path, const void *buf, uint32_t len)
     return (err == RV9_IO_OK) ? (int)done : -(int)err;
 }
 
+static int io_seek_op(int path, int32_t offset, int whence)
+{
+    rv9_io_err_t err = rv9_io_seek(path, offset, whence);
+    return (err == RV9_IO_OK) ? 0 : -(int)err;
+}
+
+static int io_getstat_op(int path, uint32_t code, void *arg)
+{
+    rv9_io_err_t err = rv9_io_getstat(path, code, arg);
+    return (err == RV9_IO_OK) ? 0 : -(int)err;
+}
+
+static int io_setstat_op(int path, uint32_t code, void *arg)
+{
+    rv9_io_err_t err = rv9_io_setstat(path, code, arg);
+    return (err == RV9_IO_OK) ? 0 : -(int)err;
+}
+
 static int io_remove_op(const char *name)
 {
     rv9_io_err_t err = rv9_io_remove(name);
@@ -599,6 +653,9 @@ static const rv9_mod_io_ops_t s_mod_io_ops = {
     .write = io_write_op,
     .dup2   = io_dup2_op,
     .remove = io_remove_op,
+    .seek    = io_seek_op,
+    .getstat = io_getstat_op,
+    .setstat = io_setstat_op,
 };
 
 rv9_io_err_t rv9_io_init(void)

@@ -135,9 +135,11 @@ static void io_bringup(void)
 
     rv9_scf_register();
     rv9_rbf_register();
+    rv9_nfm_register();
     rv9_drv_uart_register();
     rv9_drv_lcdcon_register();
     rv9_drv_ramdisk_register();
+    rv9_drv_net_register();
 
     int n = rv9_io_attach_from_modules();
     ESP_LOGI(TAG, "%d device%s attached from descriptor modules",

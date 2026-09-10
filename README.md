@@ -14,7 +14,7 @@ passing on hardware); modules built, verified, loaded and run from flash;
 processes with OS-9-style priority aging, measured starvation-free; unified
 I/O with SCF, a UART driver, and a text console on the ST7789 panel; and a
 shell where every command is a loadable module; and RBF storage with
-segment-list files on a RAM disk.
+segment-list files on a RAM disk; and the network as a path.
 
 ```
 rv9> mdir
@@ -30,6 +30,9 @@ filetest: wrote and verified 600 bytes to /r0/notes.txt
 rv9> dir
 name                     size
 notes.txt                600
+rv9> nettest
+netecho: listening on /n0/listen/8042
+nettest: echoed 'the network is a path' over loopback
 ```
 
 ```

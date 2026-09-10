@@ -2,7 +2,7 @@
 
 A small modular operating system for RISC-V, in the spirit of Microware OS-9.
 
-Status: phases 0-5 complete — KAL on FreeRTOS (27/27 conformance tests
+Status: phases 0-6 complete — KAL on FreeRTOS (27/27 conformance tests
 passing on hardware), module format/directory/loader, and processes with
 priority aging, all verified on hardware. See docs/roadmap.md.
 

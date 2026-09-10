@@ -37,6 +37,7 @@ CFLAGS=(
     -Wall -Wextra -Werror
     -I"$ROOT/components/rv9_module/include"
     -I"$ROOT/modules"
+    -I"$ROOT/components/rv9_io/include"
 )
 LDFLAGS=(-nostdlib -nostartfiles -T"$ROOT/modules/module.ld" -Wl,--gc-sections)
 

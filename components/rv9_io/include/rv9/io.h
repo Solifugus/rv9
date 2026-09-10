@@ -47,26 +47,21 @@ typedef enum {
     RV9_IO_ERR_IO,
     RV9_IO_ERR_INVAL,
     RV9_IO_ERR_EXISTS,
+    RV9_IO_ERR_TIMEOUT,      /* appended: existing values are ABI, they
+                                travel to modules as negative returns */
 } rv9_io_err_t;
 
 const char *rv9_io_strerror(rv9_io_err_t err);
 
 /* Open modes (RV9_MODE_*) come from rv9/module.h -- they are ABI. */
 
-/* Seek whence */
-#define RV9_SEEK_SET 0
-#define RV9_SEEK_CUR 1
-#define RV9_SEEK_END 2
+/* Seek whence (RV9_SEEK_*) comes from rv9/module.h -- it is ABI. */
 
 /* rv9_dirent_t comes from rv9/module.h -- modules read them too. */
 
 /* getstat/setstat codes. Low numbers are generic; drivers may define their
    own above RV9_SS_DRIVER_BASE. */
-#define RV9_SS_ECHO        1   /* uint32: line echo on/off */
-#define RV9_SS_AUTOLF      2   /* uint32: translate \n to \r\n on write */
-#define RV9_GS_READY       3   /* uint32: bytes available to read */
-#define RV9_GS_SIZE        4   /* uint64: size, for block devices */
-#define RV9_SS_DRIVER_BASE 256
+/* Generic codes (RV9_SS_ECHO and friends) come from rv9/module.h. */
 
 struct rv9_dev;
 struct rv9_path;

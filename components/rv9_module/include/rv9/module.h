@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     7
+#define RV9_MODULE_ABI     8
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -140,7 +140,29 @@ typedef struct {
     /* fork with an argument, which arrives as the child's env->arg. The
        plain fork above stays for callers with nothing to say. */
     int       (*fork_arg)(const char *module, int priority, const char *arg);
+
+    /* --- ABI 8: the rest of the generic call surface --- */
+    /*
+     * getstat and setstat were missing, which meant a module could read and
+     * write a device but not configure one. They are first-class in the I/O
+     * design (see rv9/io.h) and should always have been here.
+     */
+    int       (*seek)(int path, int32_t offset, int whence);
+    int       (*getstat)(int path, uint32_t code, void *arg);
+    int       (*setstat)(int path, uint32_t code, void *arg);
 } rv9_mod_env_t;
+
+/* Seek whence, matching the I/O manager. */
+#define RV9_SEEK_SET 0
+#define RV9_SEEK_CUR 1
+#define RV9_SEEK_END 2
+
+/* Generic getstat/setstat codes a module may use. */
+#define RV9_SS_ECHO        1
+#define RV9_SS_AUTOLF      2
+#define RV9_GS_READY       3
+#define RV9_GS_SIZE        4
+#define RV9_SS_DRIVER_BASE 256
 
 /* ------------------------------------------------------------------ */
 /* sysinfo                                                             */
@@ -282,6 +304,9 @@ typedef struct {
     int (*write)(int path, const void *buf, uint32_t len);
     int (*dup2)(int from, int to);
     int (*remove)(const char *name);
+    int (*seek)(int path, int32_t offset, int whence);
+    int (*getstat)(int path, uint32_t code, void *arg);
+    int (*setstat)(int path, uint32_t code, void *arg);
 } rv9_mod_io_ops_t;
 
 void rv9_mod_set_io_ops(const rv9_mod_io_ops_t *ops);

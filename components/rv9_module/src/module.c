@@ -409,6 +409,21 @@ static int env_fork_arg(const char *module, int priority, const char *arg)
            ? s_proc_ops->fork_arg(module, priority, arg) : -1;
 }
 
+static int env_seek(int path, int32_t offset, int whence)
+{
+    return s_io_ops && s_io_ops->seek ? s_io_ops->seek(path, offset, whence) : -1;
+}
+
+static int env_getstat(int path, uint32_t code, void *arg)
+{
+    return s_io_ops && s_io_ops->getstat ? s_io_ops->getstat(path, code, arg) : -1;
+}
+
+static int env_setstat(int path, uint32_t code, void *arg)
+{
+    return s_io_ops && s_io_ops->setstat ? s_io_ops->setstat(path, code, arg) : -1;
+}
+
 static int env_chain(const char *module)
 {
     return s_proc_ops && s_proc_ops->chain ? s_proc_ops->chain(module) : -1;
@@ -438,6 +453,9 @@ void rv9_mod_env_init(rv9_mod_env_t *env, void *statics,
     env->chain        = env_chain;
     env->remove       = env_remove;
     env->fork_arg     = env_fork_arg;
+    env->seek         = env_seek;
+    env->getstat      = env_getstat;
+    env->setstat      = env_setstat;
 }
 
 rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result)
