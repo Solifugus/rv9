@@ -13,7 +13,8 @@ Status: **phases 0-4 complete.** KAL over FreeRTOS (27/27 conformance tests
 passing on hardware); modules built, verified, loaded and run from flash;
 processes with OS-9-style priority aging, measured starvation-free; unified
 I/O with SCF, a UART driver, and a text console on the ST7789 panel; and a
-shell where every command is a loadable module.
+shell where every command is a loadable module; and RBF storage with
+segment-list files on a RAM disk.
 
 ```
 rv9> mdir
@@ -24,6 +25,11 @@ mdir        program 1    784   1
 shell       program 2    1248  1
 ...
 rv9> echo > /term        # output goes to the panel instead
+rv9> filetest
+filetest: wrote and verified 600 bytes to /r0/notes.txt
+rv9> dir
+name                     size
+notes.txt                600
 ```
 
 ```

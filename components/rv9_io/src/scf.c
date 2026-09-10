@@ -32,8 +32,10 @@ typedef struct {
     size_t len;
 } scf_path_state_t;
 
-static rv9_io_err_t scf_open(rv9_path_t *path)
+static rv9_io_err_t scf_open(rv9_path_t *path, const char *rest)
 {
+    (void)rest;   /* a character device has no names below it */
+
     /* Only readers need a line buffer; a write-only path stays free of it. */
     if (!(path->mode & RV9_MODE_READ)) return RV9_IO_OK;
 

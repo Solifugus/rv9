@@ -58,6 +58,8 @@ const char *rv9_io_strerror(rv9_io_err_t err);
 #define RV9_SEEK_CUR 1
 #define RV9_SEEK_END 2
 
+/* rv9_dirent_t comes from rv9/module.h -- modules read them too. */
+
 /* getstat/setstat codes. Low numbers are generic; drivers may define their
    own above RV9_SS_DRIVER_BASE. */
 #define RV9_SS_ECHO        1   /* uint32: line echo on/off */
@@ -86,6 +88,19 @@ typedef struct rv9_driver {
 
     rv9_io_err_t (*getstat)(struct rv9_dev *dev, uint32_t code, void *arg);
     rv9_io_err_t (*setstat)(struct rv9_dev *dev, uint32_t code, void *arg);
+
+    /*
+     * Block devices implement these instead of read/write. A driver is one
+     * kind or the other: character drivers move bytes as they arrive, block
+     * drivers move whole sectors at an address. Pretending one is the other
+     * is how storage stacks end up unpleasant.
+     */
+    rv9_io_err_t (*geometry)(struct rv9_dev *dev, uint32_t *sector_size,
+                             uint32_t *sector_count);
+    rv9_io_err_t (*read_blocks)(struct rv9_dev *dev, uint32_t lsn,
+                                void *buf, uint32_t count);
+    rv9_io_err_t (*write_blocks)(struct rv9_dev *dev, uint32_t lsn,
+                                 const void *buf, uint32_t count);
 } rv9_driver_t;
 
 /* ------------------------------------------------------------------ */
@@ -95,13 +110,22 @@ typedef struct rv9_driver {
 typedef struct rv9_filemgr {
     const char *name;
 
-    rv9_io_err_t (*open)(struct rv9_path *path);
+    /* `rest` is whatever followed the device name: "notes" for "/r0/notes",
+       and "" for "/r0" itself. SCF ignores it; RBF treats it as a filename
+       and an empty one as the directory. */
+    rv9_io_err_t (*open)(struct rv9_path *path, const char *rest);
     rv9_io_err_t (*close)(struct rv9_path *path);
     rv9_io_err_t (*read)(struct rv9_path *path, void *buf, size_t len, size_t *done);
     rv9_io_err_t (*write)(struct rv9_path *path, const void *buf, size_t len, size_t *done);
     rv9_io_err_t (*seek)(struct rv9_path *path, int64_t offset, int whence);
     rv9_io_err_t (*getstat)(struct rv9_path *path, uint32_t code, void *arg);
     rv9_io_err_t (*setstat)(struct rv9_path *path, uint32_t code, void *arg);
+
+    /* Remove a file. Block file managers only. */
+    rv9_io_err_t (*remove)(struct rv9_dev *dev, const char *name);
+
+    /* Called once when the device is attached, so the manager can mount. */
+    rv9_io_err_t (*mount)(struct rv9_dev *dev);
 } rv9_filemgr_t;
 
 /* ------------------------------------------------------------------ */
@@ -129,7 +153,8 @@ typedef struct rv9_dev {
     const rv9_driver_t  *drv;
     uint32_t             opt[8];
 
-    void                *drv_state;   /* the driver's own */
+    void                *drv_state;    /* the driver's own */
+    void                *fmgr_state;   /* the file manager's own, e.g. a mount */
     bool                 initialised;
     uint32_t             open_count;
 
@@ -139,6 +164,7 @@ typedef struct rv9_dev {
 /* Path descriptor: one open connection to a device. */
 typedef struct rv9_path {
     rv9_dev_t *dev;
+    char       name[28];     /* the part after the device, "" for the device */
     uint32_t   mode;
     int64_t    pos;
     void      *fm_state;     /* the file manager's own */
@@ -172,6 +198,9 @@ rv9_io_err_t rv9_io_setstat(int path, uint32_t code, void *arg);
 
 /* Convenience: write a NUL-terminated string. */
 rv9_io_err_t rv9_io_dup2(int from, int to);
+
+/* Remove a file, e.g. "/r0/notes". */
+rv9_io_err_t rv9_io_remove(const char *name);
 rv9_io_err_t rv9_io_puts(int path, const char *s);
 
 const rv9_dev_t *rv9_io_dev_next(const rv9_dev_t *prev);   /* NULL to start */

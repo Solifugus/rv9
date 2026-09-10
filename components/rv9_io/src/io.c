@@ -158,6 +158,17 @@ rv9_io_err_t rv9_io_attach(const rv9_devdesc_t *desc)
     }
     dev->initialised = true;
 
+    /* Give the file manager a chance to mount before anyone can open it. */
+    if (fm->mount) {
+        rv9_io_err_t err = fm->mount(dev);
+        if (err != RV9_IO_OK) {
+            ESP_LOGE(TAG, "%s: file manager '%s' could not mount: %s",
+                     name, fmname, rv9_io_strerror(err));
+            rv9_free(dev);
+            return err;
+        }
+    }
+
     dev->next = s_devs;
     s_devs = dev;
 
@@ -230,7 +241,34 @@ static rv9_path_t *path_for(rv9_pid_t pid, int num)
 
 /* ---- open / close ---- */
 
-static rv9_path_t *path_alloc(rv9_dev_t *dev, uint32_t mode, rv9_io_err_t *err)
+/*
+ * Split "/r0/notes" into the device "/r0" and the remainder "notes".
+ * A name with no second slash is the device itself, and the remainder is
+ * empty -- which is how a block file manager knows it is being asked for
+ * its directory rather than a file.
+ */
+static void split_path(const char *full, char *dev_out, size_t dev_len,
+                       const char **rest_out)
+{
+    const char *slash = NULL;
+    if (full[0] == '/') slash = strchr(full + 1, '/');
+
+    if (slash == NULL) {
+        strncpy(dev_out, full, dev_len - 1);
+        dev_out[dev_len - 1] = '\0';
+        *rest_out = "";
+        return;
+    }
+
+    size_t n = (size_t)(slash - full);
+    if (n >= dev_len) n = dev_len - 1;
+    memcpy(dev_out, full, n);
+    dev_out[n] = '\0';
+    *rest_out = slash + 1;
+}
+
+static rv9_path_t *path_alloc(rv9_dev_t *dev, const char *rest, uint32_t mode,
+                              rv9_io_err_t *err)
 {
     rv9_path_t *p = rv9_calloc(1, sizeof(*p));
     if (p == NULL) { *err = RV9_IO_ERR_NOMEM; return NULL; }
@@ -241,7 +279,7 @@ static rv9_path_t *path_alloc(rv9_dev_t *dev, uint32_t mode, rv9_io_err_t *err)
     p->refs = 1;
 
     if (dev->fmgr->open) {
-        rv9_io_err_t e = dev->fmgr->open(p);
+        rv9_io_err_t e = dev->fmgr->open(p, rest);
         if (e != RV9_IO_OK) {
             rv9_free(p);
             *err = e;
@@ -268,9 +306,13 @@ int rv9_io_open(const char *name, uint32_t mode)
 {
     if (name == NULL || (mode & RV9_MODE_RW) == 0) return -RV9_IO_ERR_INVAL;
 
+    char devname[16];
+    const char *rest = "";
+    split_path(name, devname, sizeof(devname), &rest);
+
     rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
 
-    rv9_dev_t *dev = find_dev(name);
+    rv9_dev_t *dev = find_dev(devname);
     if (dev == NULL) {
         rv9_mutex_unlock(s_lock);
         return -RV9_IO_ERR_NOTFOUND;
@@ -293,7 +335,7 @@ int rv9_io_open(const char *name, uint32_t mode)
     }
 
     rv9_io_err_t err = RV9_IO_OK;
-    rv9_path_t *p = path_alloc(dev, mode, &err);
+    rv9_path_t *p = path_alloc(dev, rest, mode, &err);
     if (p == NULL) {
         rv9_mutex_unlock(s_lock);
         return -err;
@@ -386,6 +428,25 @@ rv9_io_err_t rv9_io_dup2(int from, int to)
     return RV9_IO_OK;
 }
 
+rv9_io_err_t rv9_io_remove(const char *name)
+{
+    if (name == NULL) return RV9_IO_ERR_INVAL;
+
+    char devname[16];
+    const char *rest = "";
+    split_path(name, devname, sizeof(devname), &rest);
+
+    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_dev_t *dev = find_dev(devname);
+    rv9_mutex_unlock(s_lock);
+
+    if (dev == NULL) return RV9_IO_ERR_NOTFOUND;
+    if (dev->fmgr->remove == NULL) return RV9_IO_ERR_UNSUPPORTED;
+    if (rest[0] == '\0') return RV9_IO_ERR_INVAL;
+
+    return dev->fmgr->remove(dev, rest);
+}
+
 rv9_io_err_t rv9_io_puts(int num, const char *s)
 {
     if (s == NULL) return RV9_IO_ERR_INVAL;
@@ -450,9 +511,9 @@ static void io_on_fork(rv9_pid_t parent, rv9_pid_t child)
     rv9_dev_t *out = s_sys_out[0] ? find_dev(s_sys_out) : NULL;
     rv9_io_err_t err;
 
-    if (in)  ct->paths[RV9_STDIN]  = path_alloc(in,  RV9_MODE_READ,  &err);
+    if (in)  ct->paths[RV9_STDIN]  = path_alloc(in,  "", RV9_MODE_READ,  &err);
     if (out) {
-        ct->paths[RV9_STDOUT] = path_alloc(out, RV9_MODE_WRITE, &err);
+        ct->paths[RV9_STDOUT] = path_alloc(out, "", RV9_MODE_WRITE, &err);
         if (ct->paths[RV9_STDOUT]) {
             ct->paths[RV9_STDOUT]->refs++;
             ct->paths[RV9_STDERR] = ct->paths[RV9_STDOUT];
@@ -519,6 +580,12 @@ static int io_write_op(int path, const void *buf, uint32_t len)
     return (err == RV9_IO_OK) ? (int)done : -(int)err;
 }
 
+static int io_remove_op(const char *name)
+{
+    rv9_io_err_t err = rv9_io_remove(name);
+    return (err == RV9_IO_OK) ? 0 : -(int)err;
+}
+
 static int io_dup2_op(int from, int to)
 {
     rv9_io_err_t err = rv9_io_dup2(from, to);
@@ -530,7 +597,8 @@ static const rv9_mod_io_ops_t s_mod_io_ops = {
     .close = io_close_op,
     .read  = io_read_op,
     .write = io_write_op,
-    .dup2  = io_dup2_op,
+    .dup2   = io_dup2_op,
+    .remove = io_remove_op,
 };
 
 rv9_io_err_t rv9_io_init(void)

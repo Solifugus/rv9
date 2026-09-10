@@ -88,6 +88,8 @@ typedef struct rv9_proc {
     uint64_t          started_ms;
     rv9_sem_t         exited;
 
+    char              arg[64];        /* what fork was given, for env->arg */
+
     /* Set by rv9_proc_chain; acted on when the module returns. */
     char              chain_to[32];
     bool              chain_pending;

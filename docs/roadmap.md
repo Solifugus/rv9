@@ -112,18 +112,30 @@ to stop and enjoy it for a while before committing to the rest.**
 
 ---
 
-## Phase 5 — Storage
+## Phase 5 — Storage  ✅ RAM disk done, SD card pending
 
 **Goal:** persistence.
 
-- **RBF** — random block file manager
-- `sdspi` driver → `/sd0`, sharing the SPI bus with the LCD (bus arbitration
-  matters here; the display and card contend)
-- FAT first for interoperability with a desktop
-- Loading modules from SD as well as flash
-- *Optional, later:* a native filesystem, if FAT becomes annoying enough
+- **RBF** — done. Identification sector, allocation bitmap, directory,
+  file descriptors with segment lists. A directory is a file.
+- block driver interface — done: `geometry`, `read_blocks`, `write_blocks`,
+  separate from the character `read`/`write`
+- `ramdisk` driver → `/r0` — done, 64 KB
+- `dir`, `filetest`, `del` utilities, argument passing to modules — done
+- **`sdspi` driver → `/sd0` — not written.** Waiting on a microSD card to
+  test against. The file manager above it is already proven, so this is a
+  driver-shaped hole rather than an unknown.
+- Bus arbitration with the LCD is the interesting part when it comes: both
+  devices share SPI, and mediating that is the I/O manager's business rather
+  than each driver improvising.
+- Not done: a native filesystem beyond RBF, and loading modules from a
+  volume rather than the flash partition.
+- **Pipes did not land.** A PIPE file manager is straightforward, but shell
+  pipe syntax needs two processes with one blocking on the other's output,
+  and that deserves its own attention rather than being tacked on here.
 
-**Done when:** a module is loaded from the SD card and run.
+**Done when:** a module is loaded from a volume and run. Not yet — files
+work, but the loader still reads only the flash partition.
 
 ---
 

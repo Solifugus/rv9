@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     6
+#define RV9_MODULE_ABI     7
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -134,6 +134,12 @@ typedef struct {
      * clean up. The process simply continues as something else.
      */
     int       (*chain)(const char *module);
+
+    /* --- ABI 7: files, and passing arguments --- */
+    int       (*remove)(const char *name);
+    /* fork with an argument, which arrives as the child's env->arg. The
+       plain fork above stays for callers with nothing to say. */
+    int       (*fork_arg)(const char *module, int priority, const char *arg);
 } rv9_mod_env_t;
 
 /* ------------------------------------------------------------------ */
@@ -188,6 +194,19 @@ typedef int (*rv9_mod_entry_fn)(const rv9_mod_env_t *env);
 #define RV9_MODE_READ   (1u << 0)
 #define RV9_MODE_WRITE  (1u << 1)
 #define RV9_MODE_RW     (RV9_MODE_READ | RV9_MODE_WRITE)
+#define RV9_MODE_CREATE (1u << 2)   /* make it if absent, truncate if not */
+
+/*
+ * A directory is just a file whose records are these. Open a block device
+ * with no filename -- "/r0" rather than "/r0/notes" -- and reads return
+ * directory entries. This is ABI: modules read them.
+ */
+typedef struct __attribute__((packed)) {
+    char     name[28];
+    uint32_t size;
+} rv9_dirent_t;
+
+_Static_assert(sizeof(rv9_dirent_t) == 32, "directory entry must be 32 bytes");
 
 #define RV9_SIG_STOP  (1u << 0)
 #define RV9_SIG_USER1 (1u << 1)
@@ -262,6 +281,7 @@ typedef struct {
     int (*read)(int path, void *buf, uint32_t len);
     int (*write)(int path, const void *buf, uint32_t len);
     int (*dup2)(int from, int to);
+    int (*remove)(const char *name);
 } rv9_mod_io_ops_t;
 
 void rv9_mod_set_io_ops(const rv9_mod_io_ops_t *ops);
@@ -272,6 +292,7 @@ typedef struct {
     int (*wait)(int pid, int *status, uint32_t timeout_ms);
     int (*procs)(void *buf, uint32_t len);   /* fills rv9_sys_proc_t records */
     int (*chain)(const char *module);
+    int (*fork_arg)(const char *module, int priority, const char *arg);
 } rv9_mod_proc_ops_t;
 
 void rv9_mod_set_proc_ops(const rv9_mod_proc_ops_t *ops);

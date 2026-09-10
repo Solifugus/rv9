@@ -16,3 +16,5 @@
 rv9_io_err_t rv9_scf_register(void);
 rv9_io_err_t rv9_drv_uart_register(void);
 rv9_io_err_t rv9_drv_lcdcon_register(void);
+rv9_io_err_t rv9_rbf_register(void);
+rv9_io_err_t rv9_drv_ramdisk_register(void);

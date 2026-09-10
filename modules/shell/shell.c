@@ -44,10 +44,11 @@ static void help(const rv9_mod_env_t *env)
           "commands are modules; 'mdir' lists them\n"
           "  help              this text\n"
           "  exit              leave the shell\n"
-          "  <module> [> dev]  fork it, optionally redirected\n"
+          "  <module> [arg] [> dev]  fork it, optionally redirected\n"
           "\n"
-          "try: mdir, procs, free, echo, hello\n"
-          "     echo > /term\n");
+          "try: mdir, procs, free, dir, filetest\n"
+          "     dir /r0        echo > /term\n"
+          "     del /r0/notes.txt\n");
 }
 
 /*
@@ -57,7 +58,8 @@ static void help(const rv9_mod_env_t *env)
  * reference. The shell parks its own stdout, aims stdout at the target,
  * forks -- the child gets the target without knowing -- then puts it back.
  */
-static void run(const rv9_mod_env_t *env, const char *name, const char *target)
+static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
+                const char *target)
 {
     int redirected = 0;
 
@@ -78,7 +80,7 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *target)
         redirected = 1;
     }
 
-    int pid = env->fork(name, 8);
+    int pid = env->fork_arg(name, 8, arg);
     int status = 0;
 
     if (pid >= 0) {
@@ -105,7 +107,7 @@ __attribute__((section(".text.entry")))
 int rv9_module_entry(const rv9_mod_env_t *env)
 {
     if (env == NULL)                            return -1;
-    if (env->abi_version < 5)                   return -2;
+    if (env->abi_version < 7)                   return -2;
     if (env->read == NULL || env->fork == NULL) return -3;
 
     shell_statics_t *st = (shell_statics_t *)env->statics;
@@ -137,13 +139,16 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         if (m_eq(argv[0], "exit")) break;
         if (m_eq(argv[0], "help")) { help(env); continue; }
 
-        /* "cmd > /dev" -- pull the redirection off the end. */
+        /* "cmd arg > /dev" -- pull the redirection off the end, and pass
+           whatever is left as the module's argument. */
         const char *target = NULL;
+        const char *arg = NULL;
         for (int i = 1; i < argc; i++) {
             if (m_eq(argv[i], ">") && i + 1 < argc) {
                 target = argv[i + 1];
                 break;
             }
+            if (arg == NULL) arg = argv[i];
         }
 
         if (st->term_open) {
@@ -152,7 +157,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
             m_say(env, st->term, "\n");
         }
 
-        run(env, argv[0], target);
+        run(env, argv[0], arg, target);
     }
 
     if (st->term_open) env->close(st->term);

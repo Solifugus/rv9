@@ -128,6 +128,7 @@ static void proc_trampoline(void *arg)
     rv9_mod_env_t env;
     rv9_mod_env_init(&env, p->statics, h->static_size, p->pid);
     env.signals_take = env_signals_take;
+    env.arg          = p->arg[0] ? p->arg : NULL;
 
     rc = p->module->entry(&env);
 
@@ -289,6 +290,13 @@ static int proc_list_op(void *buf, uint32_t len)
     return (int)n;
 }
 
+static int proc_fork_arg_op(const char *module, int priority, const char *arg)
+{
+    rv9_pid_t pid = 0;
+    rv9_proc_err_t err = rv9_proc_fork(module, priority, arg, &pid);
+    return (err == RV9_PROC_OK) ? (int)pid : -(int)err;
+}
+
 static int proc_chain_op(const char *module)
 {
     return rv9_proc_chain(module) == RV9_PROC_OK ? 0 : -1;
@@ -299,6 +307,7 @@ static const rv9_mod_proc_ops_t s_mod_proc_ops = {
     .wait  = proc_wait_op,
     .procs = proc_list_op,
     .chain = proc_chain_op,
+    .fork_arg = proc_fork_arg_op,
 };
 
 rv9_proc_err_t rv9_proc_init(void)
@@ -334,8 +343,6 @@ rv9_pid_t rv9_proc_current_pid(void)
 rv9_proc_err_t rv9_proc_fork(const char *module_name, int priority,
                              const char *arg, rv9_pid_t *out_pid)
 {
-    (void)arg;   /* argument passing lands with the shell in phase 4 */
-
     if (module_name == NULL) return RV9_PROC_ERR_INVAL;
 
     rv9_mod_entry_t *mod = NULL;
@@ -382,6 +389,7 @@ rv9_proc_err_t rv9_proc_fork(const char *module_name, int priority,
     p->state              = RV9_PROC_ACTIVE;
     p->started_ms         = rv9_time_ms();
     strncpy(p->name, module_name, sizeof(p->name) - 1);
+    if (arg != NULL) strncpy(p->arg, arg, sizeof(p->arg) - 1);
 
     p->next = s_procs;
     s_procs = p;

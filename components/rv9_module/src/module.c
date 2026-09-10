@@ -398,6 +398,17 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
     }
 }
 
+static int env_remove(const char *name)
+{
+    return s_io_ops && s_io_ops->remove ? s_io_ops->remove(name) : -1;
+}
+
+static int env_fork_arg(const char *module, int priority, const char *arg)
+{
+    return s_proc_ops && s_proc_ops->fork_arg
+           ? s_proc_ops->fork_arg(module, priority, arg) : -1;
+}
+
 static int env_chain(const char *module)
 {
     return s_proc_ops && s_proc_ops->chain ? s_proc_ops->chain(module) : -1;
@@ -425,6 +436,8 @@ void rv9_mod_env_init(rv9_mod_env_t *env, void *statics,
     env->sysinfo      = env_sysinfo;
     env->dup2         = env_dup2;
     env->chain        = env_chain;
+    env->remove       = env_remove;
+    env->fork_arg     = env_fork_arg;
 }
 
 rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result)

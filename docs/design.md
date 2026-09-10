@@ -2,7 +2,7 @@
 
 A small modular operating system for RISC-V, in the spirit of Microware OS-9.
 
-Status: phases 0-4 complete — KAL on FreeRTOS (27/27 conformance tests
+Status: phases 0-5 complete — KAL on FreeRTOS (27/27 conformance tests
 passing on hardware), module format/directory/loader, and processes with
 priority aging, all verified on hardware. See docs/roadmap.md.
 
@@ -314,11 +314,50 @@ console to UART0, whose pins go nowhere on this board.
 | --- | --- | --- | --- |
 | `/term` | SCF | lcdcon | console on the ST7789 panel |
 | `/uart0` | SCF | uart | serial console |
-| `/sd0` | RBF | sdspi | FAT initially, native fs later |
+| `/r0` | RBF | ramdisk | 64 KB of memory; exists so RBF can be proven without a card |
+| `/sd0` | RBF | sdspi | not yet written |
 | `/n0` | NFM | wifi+lwIP | network as a path, not a socket API |
 
 `/term` on the LCD is the first milestone that will actually feel like an
 operating system.
+
+### Block devices and RBF
+
+Character drivers move bytes as they arrive; block drivers move whole
+sectors at an address. A driver is one kind or the other, and
+`rv9_driver_t` has separate entry points for each — `read`/`write` for
+character devices, `geometry`/`read_blocks`/`write_blocks` for block ones.
+Pretending one is the other is how storage stacks become unpleasant.
+
+RBF takes OS-9's structure and none of its encodings:
+
+| | |
+| --- | --- |
+| LSN 0 | identification sector: geometry, and where everything else is |
+| LSN 1.. | allocation bitmap, one bit per sector |
+| root | fixed-size directory entries: name, and a file descriptor sector |
+| fd sector | one per file: size, and a list of segments |
+| segment | a `(start sector, count)` run |
+
+The segment list is the part worth keeping. A FAT-style chain makes you walk
+the whole file to find its end; a segment list finds any offset in a handful
+of comparisons, and stays at one entry for a file that was written
+contiguously — which most are.
+
+**A directory is a file.** Opening `/r0` rather than `/r0/notes.txt` reads
+directory entries. That is not a special case in the I/O manager; it falls
+out of the design, and it is why `dir` is thirty lines with no knowledge of
+sectors, bitmaps or segments.
+
+The RAM disk exists so this could be built and proven without depending on
+an SD card driver, or on there being a card in the slot. When `sdspi`
+arrives, its descriptor names the same file manager over a different driver
+and nothing above changes. That is the claim the layering makes; the RAM
+disk is the cheap way to test it.
+
+One deliberate asymmetry: an unformatted RAM disk is formatted on sight,
+because it is empty every boot and there is nothing to lose. A real card
+must never be formatted without being asked.
 
 ### Redirection
 
