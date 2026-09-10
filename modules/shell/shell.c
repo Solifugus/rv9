@@ -18,10 +18,40 @@
 #define SAVE_PATH 5     /* spare slot used to park stdout during redirection */
 
 typedef struct {
-    char line[LINE_MAX];
+    char line[LINE_MAX];    /* chopped into tokens */
+    char raw[LINE_MAX];     /* kept whole, for multi-word arguments */
     int  term;
     char term_open;
 } shell_statics_t;
+
+/*
+ * The argument is the rest of the line, not just the next token.
+ *
+ * tokenize() chops the line into words, so passing argv[1] hands a module
+ * only the first of them -- which is how `wifi <ssid> <password>` arrived
+ * at the driver with an empty password and sent us hunting through WPA
+ * settings for a fault that was never there.
+ */
+static char *rest_of_line(char *raw, const char *redirect_target)
+{
+    char *p = raw;
+    while (*p && *p != ' ' && *p != '\t') p++;      /* past the command */
+    while (*p == ' ' || *p == '\t') p++;            /* to the first argument */
+    if (*p == '\0') return NULL;
+
+    /* Stop before any redirection, which is the shell's business. */
+    if (redirect_target != NULL) {
+        for (char *r = p; *r; r++) {
+            if (*r == '>') {
+                while (r > p && (r[-1] == ' ' || r[-1] == '\t')) r--;
+                *r = '\0';
+                break;
+            }
+        }
+    }
+
+    return (*p == '\0') ? NULL : p;
+}
 
 /* Split in place on whitespace. Returns the argument count. */
 static int tokenize(char *line, char *argv[], int max)
@@ -132,6 +162,9 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         st->line[n] = '\0';
         if (n == 0) continue;
 
+        /* Keep a whole copy before tokenize() chops the original. */
+        for (int i = 0; i <= n; i++) st->raw[i] = st->line[i];
+
         char *argv[ARG_MAX];
         int argc = tokenize(st->line, argv, ARG_MAX);
         if (argc == 0) continue;
@@ -142,14 +175,13 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         /* "cmd arg > /dev" -- pull the redirection off the end, and pass
            whatever is left as the module's argument. */
         const char *target = NULL;
-        const char *arg = NULL;
         for (int i = 1; i < argc; i++) {
             if (m_eq(argv[i], ">") && i + 1 < argc) {
                 target = argv[i + 1];
                 break;
             }
-            if (arg == NULL) arg = argv[i];
         }
+        const char *arg = rest_of_line(st->raw, target);
 
         if (st->term_open) {
             m_say(env, st->term, "> ");

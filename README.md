@@ -33,6 +33,12 @@ notes.txt                600
 rv9> nettest
 netecho: listening on /n0/listen/8042
 nettest: echoed 'the network is a path' over loopback
+rv9> wifi <ssid> <password>
+rv9> fetch example.com
+opening /n0/example.com/80
+HTTP/1.1 200 OK
+...
+--- 828 bytes
 ```
 
 ```

@@ -139,7 +139,7 @@ work, but the loader still reads only the flash partition.
 
 ---
 
-## Phase 6 — Network  ✅ loopback verified, association untested
+## Phase 6 — Network  ✅ done
 
 **Goal:** the network as a path, and the proof the I/O design was right.
 

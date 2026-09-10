@@ -35,6 +35,14 @@ int rv9_module_entry(const rv9_mod_env_t *env)
             m_num(env, RV9_STDOUT, (int32_t)((st.ip >> (8 * i)) & 0xFF));
         }
     }
+    if (st.reason) {
+        m_say(env, RV9_STDOUT, "\nlast reason ");
+        m_num(env, RV9_STDOUT, st.reason);
+        if (st.reason == 201) m_say(env, RV9_STDOUT, " (no such AP)");
+        else if (st.reason == 202) m_say(env, RV9_STDOUT, " (auth failed)");
+        else if (st.reason == 15)  m_say(env, RV9_STDOUT, " (4-way handshake timeout)");
+        else if (st.reason == 205) m_say(env, RV9_STDOUT, " (connection failed)");
+    }
     m_say(env, RV9_STDOUT, "\n");
     return 0;
 }
