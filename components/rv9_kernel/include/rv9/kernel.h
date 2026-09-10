@@ -92,11 +92,21 @@ struct rv9k_thread {
     rv9k_thread_t *next;
 };
 
+/*
+ * A queue of threads waiting for something. Threads are linked through
+ * their own `next` field, so a wait queue costs one pointer and no
+ * allocation -- which matters in a kernel that must be able to block a
+ * thread when memory is exhausted.
+ */
+typedef struct {
+    rv9k_thread_t *head;
+} rv9k_waitq_t;
+
 /* A counting semaphore, and the thing mutexes and queues are built from. */
 typedef struct {
-    int32_t        count;
-    int32_t        max;
-    rv9k_thread_t *waiters;
+    int32_t      count;
+    int32_t      max;
+    rv9k_waitq_t waiters;
 } rv9k_sem_t;
 
 /* Start the kernel. It is given nothing; time arrives via rv9k_tick(). */
@@ -179,12 +189,14 @@ void rv9k_mutex_unlock(rv9k_mutex_t *m);
  * no heap of its own and should not pretend otherwise.
  */
 typedef struct {
-    uint8_t  *storage;
-    uint32_t  capacity;      /* items */
-    uint32_t  item_size;
-    uint32_t  head;
-    uint32_t  tail;
-    uint32_t  count;
+    uint8_t     *storage;
+    uint32_t     capacity;      /* items */
+    uint32_t     item_size;
+    uint32_t     head;
+    uint32_t     tail;
+    uint32_t     count;
+    rv9k_waitq_t not_empty;     /* receivers waiting for an item */
+    rv9k_waitq_t not_full;      /* senders waiting for room */
 } rv9k_queue_t;
 
 void     rv9k_queue_init(rv9k_queue_t *q, void *storage, uint32_t capacity,
@@ -193,10 +205,42 @@ bool     rv9k_queue_send(rv9k_queue_t *q, const void *item, uint32_t timeout_ms)
 bool     rv9k_queue_recv(rv9k_queue_t *q, void *item, uint32_t timeout_ms);
 uint32_t rv9k_queue_count(const rv9k_queue_t *q);
 
+/* ------------------------------------------------------------------ */
+/* The kernel's own heap                                               */
+/*                                                                     */
+/* Given one region at init and asked no further questions. A kernel    */
+/* that owns the machine cannot borrow someone else's allocator, and    */
+/* until now this one did.                                             */
+/*                                                                     */
+/* No locking: the kernel is cooperative and single-core, none of these */
+/* functions reschedule, and the tick interrupt does not touch the      */
+/* heap. That reasoning is the lock. It stops being sufficient the      */
+/* moment either assumption changes, which is why it is written here.   */
+/* ------------------------------------------------------------------ */
+
+void  rv9k_heap_init(void *base, size_t bytes);
+void *rv9k_alloc(size_t bytes);
+void *rv9k_calloc(size_t count, size_t size);
+void  rv9k_free(void *ptr);
+
+typedef struct {
+    size_t   total;
+    size_t   free_bytes;
+    size_t   largest_free;   /* the number fragmentation ruins */
+    uint32_t blocks;
+    uint32_t free_blocks;
+} rv9k_heap_stats_t;
+
+void rv9k_heap_stats(rv9k_heap_stats_t *out);
+
 /* Introspection, for tests and for `procs` when this becomes the kernel. */
 int  rv9k_thread_count(void);
 const rv9k_thread_t *rv9k_thread_at(int index);
 uint64_t rv9k_switch_count(void);
+
+/* How many times a thread has blocked without a spin. Proof, for the
+   tests, that waiting costs nothing rather than burning the CPU. */
+uint64_t rv9k_block_count(void);
 
 #ifdef __cplusplus
 }

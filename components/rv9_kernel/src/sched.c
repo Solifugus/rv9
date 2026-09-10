@@ -18,12 +18,15 @@ extern void rv9_thread_trampoline(void);
 /* The trampoline jumps here if a thread returns from its entry point. */
 void rv9_thread_exited(void);
 
+static void reschedule(void);
+
 static rv9k_thread_t  s_threads[RV9K_MAX_THREADS];
 static rv9k_thread_t *s_current;
 static uint32_t      *s_host_sp;          /* whoever called rv9k_run */
 static volatile uint32_t s_ticks;         /* written only by the tick ISR */
 static uint32_t       s_last_age_tick;
 static uint64_t       s_switches;
+static uint64_t       s_blocks;
 static bool           s_running;
 
 /* Stack layout built for a thread that has never run. Mirrors exactly what
@@ -42,6 +45,7 @@ void rv9k_init(void)
     s_current       = NULL;
     s_last_age_tick = s_ticks;
     s_switches      = 0;
+    s_blocks        = 0;
     s_running       = false;
 }
 
@@ -150,6 +154,77 @@ static void age_threads(void)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Wait queues                                                         */
+/*                                                                     */
+/* A blocked thread is off the run queue entirely: the scheduler does   */
+/* not consider it, so waiting costs nothing. Before this, blocking was */
+/* a spin -- mark ready, reschedule, look again -- which was correct    */
+/* and burned the CPU of every thread that dared wait for anything.     */
+/* ------------------------------------------------------------------ */
+
+static void waitq_push(rv9k_waitq_t *wq, rv9k_thread_t *t)
+{
+    t->next = wq->head;
+    wq->head = t;
+}
+
+static void waitq_remove(rv9k_waitq_t *wq, rv9k_thread_t *t)
+{
+    rv9k_thread_t **pp = &wq->head;
+    while (*pp) {
+        if (*pp == t) { *pp = t->next; t->next = NULL; return; }
+        pp = &(*pp)->next;
+    }
+}
+
+/* Wake the highest-priority waiter; ties go to whoever waited longest,
+   which the list order gives us for free. */
+static rv9k_thread_t *waitq_pop_best(rv9k_waitq_t *wq)
+{
+    rv9k_thread_t *best = NULL;
+    for (rv9k_thread_t *t = wq->head; t; t = t->next) {
+        if (best == NULL || t->effective_priority > best->effective_priority) {
+            best = t;
+        }
+    }
+    if (best) {
+        waitq_remove(wq, best);
+        best->blocked_on   = NULL;
+        best->wake_at_tick = 0;
+        best->state        = RV9K_READY;
+    }
+    return best;
+}
+
+/*
+ * Block the running thread on a wait queue. Returns true if it was woken
+ * by a give, false if the timeout expired first.
+ */
+static bool block_on(rv9k_waitq_t *wq, uint32_t timeout_ms)
+{
+    if (s_current == NULL) return false;
+
+    rv9k_thread_t *self = s_current;
+
+    self->blocked_on   = wq;
+    self->wake_at_tick = (timeout_ms == 0) ? 0
+                       : now() + RV9K_MS_TO_TICKS(timeout_ms);
+    self->state        = RV9K_BLOCKED;
+    waitq_push(wq, self);
+    s_blocks++;
+
+    reschedule();
+
+    /* Awake again. If the timeout fired we are still on the queue. */
+    if (self->blocked_on == wq) {
+        waitq_remove(wq, self);
+        self->blocked_on = NULL;
+        return false;
+    }
+    return true;
+}
+
 /* Wake anything whose sleep has expired. */
 static void wake_sleepers(void)
 {
@@ -157,6 +232,14 @@ static void wake_sleepers(void)
     for (int i = 0; i < RV9K_MAX_THREADS; i++) {
         rv9k_thread_t *th = &s_threads[i];
         if (th->state == RV9K_SLEEPING &&
+            RV9K_TICK_REACHED(t, th->wake_at_tick)) {
+            th->state = RV9K_READY;
+            continue;
+        }
+
+        /* A blocked thread with a deadline that has passed comes back
+           runnable and discovers for itself that it timed out. */
+        if (th->state == RV9K_BLOCKED && th->wake_at_tick != 0 &&
             RV9K_TICK_REACHED(t, th->wake_at_tick)) {
             th->state = RV9K_READY;
         }
@@ -338,34 +421,26 @@ void rv9k_run(void)
 void rv9k_sem_init(rv9k_sem_t *sem, int32_t initial, int32_t max)
 {
     if (sem == NULL) return;
-    sem->count   = initial;
-    sem->max     = max;
-    sem->waiters = NULL;
+    sem->count        = initial;
+    sem->max          = max;
+    sem->waiters.head = NULL;
 }
 
 bool rv9k_sem_take(rv9k_sem_t *sem, uint32_t timeout_ms)
 {
     if (sem == NULL) return false;
 
-    uint32_t deadline = now() + RV9K_MS_TO_TICKS(timeout_ms);
-
     for (;;) {
         if (sem->count > 0) {
             sem->count--;
             return true;
         }
-        if (timeout_ms == 0) return false;
-        if (RV9K_TICK_REACHED(now(), deadline)) return false;
+        if (timeout_ms == 0 || s_current == NULL) return false;
 
-        /* No wait queue yet: spin through the scheduler, which is correct
-           if inefficient, and keeps the blocking path honest until the
-           timer interrupt arrives in step 2. */
-        if (s_current) {
-            s_current->state = RV9K_READY;
-            reschedule();
-        } else {
-            return false;
-        }
+        /* Sleep on the queue. Woken either by a give or by the deadline;
+           the loop then decides which by looking at the count again,
+           because a give can be taken by someone else in between. */
+        if (!block_on(&sem->waiters, timeout_ms)) return false;
     }
 }
 
@@ -373,6 +448,8 @@ void rv9k_sem_give(rv9k_sem_t *sem)
 {
     if (sem == NULL) return;
     if (sem->max <= 0 || sem->count < sem->max) sem->count++;
+
+    waitq_pop_best(&sem->waiters);
 }
 
 /* ------------------------------------------------------------------ */
@@ -431,6 +508,8 @@ void rv9k_queue_init(rv9k_queue_t *q, void *storage, uint32_t capacity,
     q->capacity  = capacity;
     q->item_size = item_size;
     q->head = q->tail = q->count = 0;
+    q->not_empty.head = NULL;
+    q->not_full.head  = NULL;
 }
 
 uint32_t rv9k_queue_count(const rv9k_queue_t *q)
@@ -442,29 +521,23 @@ bool rv9k_queue_send(rv9k_queue_t *q, const void *item, uint32_t timeout_ms)
 {
     if (q == NULL || item == NULL) return false;
 
-    uint32_t deadline = now() + RV9K_MS_TO_TICKS(timeout_ms);
-
     for (;;) {
         if (q->count < q->capacity) {
             copy_bytes(q->storage + (size_t)q->tail * q->item_size,
                        (const uint8_t *)item, q->item_size);
             q->tail = (q->tail + 1) % q->capacity;
             q->count++;
+            waitq_pop_best(&q->not_empty);
             return true;
         }
-        if (timeout_ms == 0 || RV9K_TICK_REACHED(now(), deadline)) return false;
-        if (s_current == NULL) return false;
-
-        s_current->state = RV9K_READY;
-        reschedule();
+        if (timeout_ms == 0 || s_current == NULL) return false;
+        if (!block_on(&q->not_full, timeout_ms)) return false;
     }
 }
 
 bool rv9k_queue_recv(rv9k_queue_t *q, void *item, uint32_t timeout_ms)
 {
     if (q == NULL || item == NULL) return false;
-
-    uint32_t deadline = now() + RV9K_MS_TO_TICKS(timeout_ms);
 
     for (;;) {
         if (q->count > 0) {
@@ -473,13 +546,11 @@ bool rv9k_queue_recv(rv9k_queue_t *q, void *item, uint32_t timeout_ms)
                        q->item_size);
             q->head = (q->head + 1) % q->capacity;
             q->count--;
+            waitq_pop_best(&q->not_full);
             return true;
         }
-        if (timeout_ms == 0 || RV9K_TICK_REACHED(now(), deadline)) return false;
-        if (s_current == NULL) return false;
-
-        s_current->state = RV9K_READY;
-        reschedule();
+        if (timeout_ms == 0 || s_current == NULL) return false;
+        if (!block_on(&q->not_empty, timeout_ms)) return false;
     }
 }
 
@@ -503,3 +574,4 @@ const rv9k_thread_t *rv9k_thread_at(int index)
 }
 
 uint64_t rv9k_switch_count(void) { return s_switches; }
+uint64_t rv9k_block_count(void)  { return s_blocks; }

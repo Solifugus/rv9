@@ -523,10 +523,38 @@ accepts. Building the second implementation is what forced the contract to
 be written down precisely, and writing it down precisely is what exposed
 the first implementation's mistake.
 
-What the native side still borrows: allocation. The kernel has no heap and
-does not pretend to — its queues take storage from the caller, and thread
-stacks come from an allocator passed in. A kernel that owns the machine
-will need its own allocator; it does not have one yet.
+## 9d. The kernel's heap, and blocking that costs nothing
+
+**Its own allocator.** A doubly-linked list of blocks in address order,
+first fit, splitting on allocation and coalescing *both ways* on free.
+Unglamorous and adequate: the kernel allocates thread stacks and small
+objects, not a workload that needs size classes. Blocks are linked
+physically rather than kept in a separate free list, so coalescing is O(1)
+and needs no search; the cost is that allocation walks every block. For a
+heap holding tens of objects that is the right trade, and the file says so
+along with what to do when it stops being.
+
+Coalescing both ways is the part that matters. One-sided coalescing looks
+correct and slowly kills a heap under churn, so the test allocates sixteen
+blocks, frees alternate ones, refills the gaps and frees everything —
+49132 bytes of 49148 come back as a single block.
+
+The only thing still borrowed is the *region* the heap sits in, which a
+kernel owning the machine takes from its boot information.
+
+**Blocking that costs nothing.** Wait queues thread through the threads'
+own `next` pointers, so blocking allocates nothing — which matters in a
+kernel that must still be able to block a thread when memory is exhausted.
+A blocked thread leaves the run queue entirely.
+
+Until now, blocking was a spin: mark ready, reschedule, look again.
+Correct, and it burned every cycle nobody else wanted. Measured after the
+change, with a consumer at *higher* priority than its producer so that
+spinning would dominate:
+
+```
+ran 160 ms; consumer used 0 ticks, blocked 8 times
+```
 
 ## 9. Migration to a native kernel
 

@@ -176,8 +176,13 @@ why it comes here and not earlier.
   hardware stack guard becomes ours to program.
   **Its acceptance test already passes**: the KAL contract is now a table of
   operations with two implementations behind it, and RV-9's kernel
-  satisfies all 23 checks. What remains for step 3 is boot and traps, not
-  whether the kernel works.
+  satisfies all 23 checks.
+  Also done, and both were prerequisites: the kernel's own allocator
+  (first fit, coalescing both ways) and real wait queues, so a blocked
+  thread leaves the run queue instead of spinning.
+  What remains for step 3 is genuinely just boot and traps: a startup path
+  that does not hand the machine to FreeRTOS, our own `mtvec`, and the
+  asynchronous preemption that trap entry makes possible.
 - **step 4** `wifi_osi_funcs_t`, so the radio blobs run on RV-9
 - **step 5** PMP isolation
 - run queues, priority aging, tick handling

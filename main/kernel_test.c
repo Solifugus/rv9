@@ -128,6 +128,168 @@ static bool tick_start(void)
                                     1000000 / RV9K_TICK_HZ) == ESP_OK;
 }
 
+/* ---- blocking must cost nothing ---- */
+
+#define PRODUCED 8
+#define GAP_MS   20
+
+typedef struct {
+    rv9k_queue_t   q;
+    uint32_t       storage[4];
+    volatile int   received;
+    volatile bool  done;
+} pipe_t;
+
+static void producer_thread(void *arg)
+{
+    pipe_t *p = (pipe_t *)arg;
+    for (uint32_t i = 0; i < PRODUCED; i++) {
+        rv9k_sleep_ms(GAP_MS);
+        rv9k_queue_send(&p->q, &i, 1000);
+    }
+    rv9k_exit();
+}
+
+static void consumer_thread(void *arg)
+{
+    pipe_t *p = (pipe_t *)arg;
+    for (int i = 0; i < PRODUCED; i++) {
+        uint32_t v = 0;
+        if (!rv9k_queue_recv(&p->q, &v, 1000)) break;
+        p->received++;
+    }
+    p->done = true;
+    rv9k_exit();
+}
+
+/*
+ * A consumer that waits on an empty queue should use no CPU at all while
+ * it waits. Before wait queues existed it "blocked" by rescheduling in a
+ * loop, which is correct and burns every cycle nobody else wants.
+ *
+ * The consumer is given the *higher* priority deliberately: if waiting
+ * spun, it would take almost the whole CPU.
+ */
+static bool blocking_tests(void)
+{
+    rv9k_init();
+
+    static pipe_t p;
+    p.received = 0;
+    p.done = false;
+    rv9k_queue_init(&p.q, p.storage, 4, sizeof(uint32_t));
+
+    rv9k_thread_t *cons = rv9k_thread_create(consumer_thread, &p, "consumer",
+                                             4096, 12, test_alloc);
+    rv9k_thread_t *prod = rv9k_thread_create(producer_thread, &p, "producer",
+                                             4096, 4, test_alloc);
+    if (cons == NULL || prod == NULL) return false;
+
+    uint32_t t0 = rv9k_ticks();
+    rv9k_run();
+    uint32_t elapsed = rv9k_ticks() - t0;
+
+    check(p.done && p.received == PRODUCED, "every item arrived");
+    check(rv9k_block_count() >= PRODUCED, "the consumer actually blocked");
+
+    ESP_LOGI(TAG, "  ran %lu ms; consumer used %lu ticks, blocked %llu times",
+             (unsigned long)elapsed, (unsigned long)cons->ran_ticks,
+             (unsigned long long)rv9k_block_count());
+
+    /* The run takes PRODUCED * GAP_MS of wall clock. A spinning waiter
+       would have consumed most of it. */
+    check(elapsed >= PRODUCED * GAP_MS - GAP_MS, "the run took real time");
+    check(cons->ran_ticks < elapsed / 4,
+          "waiting used almost no CPU");
+
+    return true;
+}
+
+/* ---- the kernel's own heap ---- */
+
+#define KERNEL_HEAP_BYTES (48 * 1024)
+
+static bool heap_tests(void)
+{
+    /*
+     * The region comes from the host for now. A kernel that owns the
+     * machine gets its region from the boot information instead; the
+     * allocator itself does not care where it came from.
+     */
+    static void *region;
+    if (region == NULL) {
+        region = rv9_alloc(KERNEL_HEAP_BYTES);
+        if (region == NULL) return false;
+    }
+    rv9k_heap_init(region, KERNEL_HEAP_BYTES);
+
+    rv9k_heap_stats_t st;
+    rv9k_heap_stats(&st);
+    check(st.free_bytes > KERNEL_HEAP_BYTES - 128, "heap starts nearly all free");
+    check(st.blocks == 1, "heap starts as one block");
+
+    void *a = rv9k_alloc(100);
+    void *b = rv9k_alloc(100);
+    void *c = rv9k_alloc(100);
+    check(a && b && c, "three allocations");
+    check(a != b && b != c, "allocations are distinct");
+
+    /* Writing to every byte catches a size that lies. */
+    for (int i = 0; i < 100; i++) ((uint8_t *)b)[i] = (uint8_t)i;
+    bool intact = true;
+    for (int i = 0; i < 100; i++) if (((uint8_t *)b)[i] != (uint8_t)i) intact = false;
+    check(intact, "an allocation holds what was written to it");
+
+    rv9k_heap_stats(&st);
+    size_t largest_when_split = st.largest_free;
+
+    /* Free the middle one: it must merge with neither neighbour. */
+    rv9k_free(b);
+    rv9k_heap_stats(&st);
+    check(st.free_blocks == 2, "freeing the middle leaves a hole, not a merge");
+
+    /* Now free its neighbours. Everything must come back together. */
+    rv9k_free(a);
+    rv9k_free(c);
+    rv9k_heap_stats(&st);
+    check(st.free_blocks == 1, "freeing the neighbours coalesces both ways");
+    check(st.largest_free > largest_when_split,
+          "coalescing restored the largest free block");
+
+    /* Reuse: the same space should serve again. */
+    void *d = rv9k_alloc(100);
+    check(d == a, "freed space is reused");
+    rv9k_free(d);
+
+    /* Zeroing, and overflow refusal. */
+    uint8_t *z = (uint8_t *)rv9k_calloc(64, 1);
+    bool zeroed = (z != NULL);
+    for (int i = 0; zeroed && i < 64; i++) if (z[i] != 0) zeroed = false;
+    check(zeroed, "calloc zeroes");
+    rv9k_free(z);
+    check(rv9k_calloc((size_t)-1, 2) == NULL, "calloc refuses to overflow");
+
+    /* Exhaustion must be a NULL, not a crash. */
+    check(rv9k_alloc(KERNEL_HEAP_BYTES * 2) == NULL,
+          "an impossible allocation returns NULL");
+
+    /* Churn: alloc and free in a pattern that fragments, then check the
+       heap comes back whole. This is the test that catches one-sided
+       coalescing, which looks fine until the heap slowly dies. */
+    void *ptrs[16];
+    for (int i = 0; i < 16; i++) ptrs[i] = rv9k_alloc(64 + i * 8);
+    for (int i = 0; i < 16; i += 2) { rv9k_free(ptrs[i]); ptrs[i] = NULL; }
+    for (int i = 0; i < 16; i += 2) ptrs[i] = rv9k_alloc(32);
+    for (int i = 0; i < 16; i++) rv9k_free(ptrs[i]);
+
+    rv9k_heap_stats(&st);
+    check(st.free_blocks == 1, "the heap is whole again after churn");
+    ESP_LOGI(TAG, "  heap: %u bytes, largest free %u after churn",
+             (unsigned)st.total, (unsigned)st.largest_free);
+
+    return true;
+}
+
 /* ---- the conformance suite, run inside an RV-9 thread ---- */
 
 static volatile int s_native_failures = -1;
@@ -256,6 +418,9 @@ bool rv9_kernel_selftest(void)
           "aging let the low-priority thread run at all");
     check(hi.units > lo.units * 2,
           "high priority still got much the larger share");
+
+    check(blocking_tests(), "blocking costs nothing");
+    check(heap_tests(), "the kernel's allocator works");
 
     /* And the real acceptance test: the KAL contract, unchanged, run
        against RV-9's own kernel. */
