@@ -11,6 +11,7 @@
 #define RV9_NET_SS_DISCONNECT (RV9_SS_DRIVER_BASE + 1)
 #define RV9_NET_GS_STATUS    (RV9_SS_DRIVER_BASE + 2)   /* rv9_net_status_t */
 #define RV9_NET_GS_SCAN      (RV9_SS_DRIVER_BASE + 3)   /* rv9_net_scan_t */
+#define RV9_NET_SS_FORGET    (RV9_SS_DRIVER_BASE + 4)   /* clear saved creds */
 
 #define RV9_NET_MAX_APS 12
 

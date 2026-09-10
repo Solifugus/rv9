@@ -18,8 +18,19 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     if (st == NULL || env->statics_size < sizeof(*st)) return -2;
 
     if (env->arg == NULL || env->arg[0] == '\0') {
-        m_say(env, RV9_STDOUT, "usage: wifi <ssid> <password>\n");
+        m_say(env, RV9_STDOUT, "usage: wifi <ssid> <password>\n"
+                               "       wifi forget\n");
         return -3;
+    }
+
+    if (m_eq(env->arg, "forget")) {
+        int fp = env->open("/n0", RV9_MODE_WRITE);
+        if (fp < 0) return -4;
+        int frc = env->setstat(fp, RV9_NET_SS_FORGET, 0);
+        env->close(fp);
+        m_say(env, RV9_STDOUT, frc < 0 ? "could not forget\n"
+                                       : "forgot the saved network\n");
+        return frc < 0 ? -5 : 0;
     }
 
     /* Split the argument on its first space. */
@@ -45,6 +56,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 
     m_say(env, RV9_STDOUT, "associating with ");
     m_say(env, RV9_STDOUT, st->creds.ssid);
-    m_say(env, RV9_STDOUT, "; check with netstat\n");
+    m_say(env, RV9_STDOUT, "; check with netstat\n"
+                           "saved to flash; it will reconnect on boot\n");
     return 0;
 }

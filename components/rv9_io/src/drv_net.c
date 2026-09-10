@@ -20,6 +20,7 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 
 static const char *TAG = "rv9-net";
 
@@ -39,6 +40,57 @@ typedef struct {
 } net_t;
 
 static net_t *s_net;      /* the event handlers need it; one device only */
+
+/*
+ * Credentials live in NVS on the board's own flash -- not in a source
+ * file, not in a descriptor, and not in the repository. `idf.py
+ * erase-flash` clears them, as does `wifi forget`.
+ */
+#define NVS_NAMESPACE "rv9net"
+#define NVS_KEY_SSID  "ssid"
+#define NVS_KEY_PASS  "pass"
+
+static bool creds_load(rv9_net_creds_t *creds)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
+
+    size_t ssid_len = sizeof(creds->ssid);
+    size_t pass_len = sizeof(creds->pass);
+    bool ok = nvs_get_str(h, NVS_KEY_SSID, creds->ssid, &ssid_len) == ESP_OK &&
+              nvs_get_str(h, NVS_KEY_PASS, creds->pass, &pass_len) == ESP_OK;
+
+    nvs_close(h);
+    return ok && creds->ssid[0] != '\0';
+}
+
+static void creds_save(const rv9_net_creds_t *creds)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "cannot open NVS to remember this network");
+        return;
+    }
+
+    if (nvs_set_str(h, NVS_KEY_SSID, creds->ssid) == ESP_OK &&
+        nvs_set_str(h, NVS_KEY_PASS, creds->pass) == ESP_OK &&
+        nvs_commit(h) == ESP_OK) {
+        ESP_LOGI(TAG, "remembered '%s'", creds->ssid);
+    }
+    nvs_close(h);
+}
+
+static void creds_forget(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+
+    nvs_erase_key(h, NVS_KEY_SSID);
+    nvs_erase_key(h, NVS_KEY_PASS);
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "forgot the saved network");
+}
 
 #define MAX_RETRIES 5
 
@@ -99,6 +151,9 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
     ESP_LOGI(TAG, "up: " IPSTR, IP2STR(&e->ip_info.ip));
 }
 
+static rv9_io_err_t net_connect(net_t *n, const rv9_net_creds_t *creds,
+                                bool remember);
+
 static rv9_io_err_t net_init(rv9_dev_t *dev)
 {
     net_t *n = rv9_calloc(1, sizeof(*n));
@@ -120,12 +175,41 @@ static rv9_io_err_t net_init(rv9_dev_t *dev)
         return RV9_IO_ERR_IO;
     }
 
+    /*
+     * NVS has to be up before anything reads it, and before the WiFi driver
+     * initialises -- it keeps radio calibration there. Doing it here rather
+     * than at first connect means the saved network can be read at boot,
+     * which is the whole point of saving it.
+     */
+    esp_err_t nvs = nvs_flash_init();
+    if (nvs == ESP_ERR_NVS_NO_FREE_PAGES ||
+        nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "erasing NVS and retrying");
+        nvs_flash_erase();
+        nvs = nvs_flash_init();
+    }
+    if (nvs != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_flash_init: %s", esp_err_to_name(nvs));
+        rv9_free(n);
+        return RV9_IO_ERR_IO;
+    }
+
     n->state = RV9_NET_DOWN;
     n->band_opt = (uint8_t)dev->opt[OPT_BAND];
     s_net = n;
     dev->drv_state = n;
 
-    ESP_LOGI(TAG, "TCP/IP up; loopback available, radio idle");
+    /* If a network was remembered, start associating now rather than
+       waiting to be asked. The call returns as soon as the attempt is
+       under way; netstat shows how it went. */
+    rv9_net_creds_t saved;
+    if (creds_load(&saved)) {
+        ESP_LOGI(TAG, "reconnecting to remembered network '%s'", saved.ssid);
+        net_connect(n, &saved, false);
+    } else {
+        ESP_LOGI(TAG, "TCP/IP up; loopback available, radio idle");
+    }
+
     return RV9_IO_OK;
 }
 
@@ -148,25 +232,6 @@ static rv9_io_err_t net_wifi_up(net_t *n)
 {
     if (n->wifi_started) return RV9_IO_OK;
     {
-        /*
-         * The WiFi driver keeps calibration data in NVS and refuses to
-         * initialise without it. Nothing else in RV-9 needs NVS, so this is
-         * the only place it comes up -- and it is the kind of dependency
-         * that fails silently if you do not check return codes, which is
-         * exactly how it failed the first time.
-         */
-        esp_err_t nvs = nvs_flash_init();
-        if (nvs == ESP_ERR_NVS_NO_FREE_PAGES ||
-            nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-            ESP_LOGW(TAG, "erasing NVS and retrying");
-            nvs_flash_erase();
-            nvs = nvs_flash_init();
-        }
-        if (nvs != ESP_OK) {
-            ESP_LOGE(TAG, "nvs_flash_init: %s", esp_err_to_name(nvs));
-            return RV9_IO_ERR_IO;
-        }
-
         esp_netif_create_default_wifi_sta();
 
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -250,7 +315,8 @@ static rv9_io_err_t net_scan(net_t *n, rv9_net_scan_t *out)
     return RV9_IO_OK;
 }
 
-static rv9_io_err_t net_connect(net_t *n, const rv9_net_creds_t *creds)
+static rv9_io_err_t net_connect(net_t *n, const rv9_net_creds_t *creds,
+                                bool remember)
 {
     rv9_io_err_t err = net_wifi_up(n);
     if (err != RV9_IO_OK) return err;
@@ -299,6 +365,8 @@ static rv9_io_err_t net_connect(net_t *n, const rv9_net_creds_t *creds)
 
     TRY(esp_wifi_connect());
 
+    if (remember) creds_save(creds);
+
     ESP_LOGI(TAG, "associating with '%s'", n->ssid);
     return RV9_IO_OK;
 }
@@ -311,7 +379,11 @@ static rv9_io_err_t net_setstat(rv9_dev_t *dev, uint32_t code, void *arg)
     switch (code) {
     case RV9_NET_SS_CONNECT:
         if (arg == NULL) return RV9_IO_ERR_INVAL;
-        return net_connect(n, (const rv9_net_creds_t *)arg);
+        return net_connect(n, (const rv9_net_creds_t *)arg, true);
+
+    case RV9_NET_SS_FORGET:
+        creds_forget();
+        return RV9_IO_OK;
 
     case RV9_NET_SS_DISCONNECT:
         if (n->wifi_started) {
