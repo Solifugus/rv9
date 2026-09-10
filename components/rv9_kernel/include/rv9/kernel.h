@@ -46,9 +46,18 @@ extern "C" {
 #define RV9K_PRIO_MIN      0
 #define RV9K_PRIO_MAX      15
 
+/*
+ * The kernel's clock is its own tick and nothing else. Time is counted in
+ * ticks, sleeps are measured in ticks, and aging happens every so many
+ * ticks. Nothing outside is consulted -- an interrupt calls rv9k_tick()
+ * and that is the entire dependency.
+ */
+#define RV9K_TICK_HZ          1000
+#define RV9K_MS_TO_TICKS(ms)  ((ms) * RV9K_TICK_HZ / 1000)
+
 /* Aging, matching the policy proven in phase 2. */
-#define RV9K_AGE_MAX       10
-#define RV9K_AGE_PERIOD_MS 20
+#define RV9K_AGE_MAX          10
+#define RV9K_AGE_PERIOD_TICKS 20
 
 typedef enum {
     RV9K_DEAD = 0,
@@ -73,10 +82,11 @@ struct rv9k_thread {
     int            age;
     int            effective_priority;
 
-    uint64_t       wake_at_ms;      /* when sleeping */
+    uint32_t       wake_at_tick;    /* when sleeping */
     void          *blocked_on;      /* which primitive, when blocked */
 
-    uint64_t       ran_for_ms;      /* accounting, and proof aging works */
+    uint32_t       ran_ticks;       /* accounting: CPU actually received */
+    uint32_t       entered_tick;    /* when this thread last got the CPU */
     uint64_t       last_ran_seq;    /* selection order, for round-robin */
 
     rv9k_thread_t *next;
@@ -89,8 +99,46 @@ typedef struct {
     rv9k_thread_t *waiters;
 } rv9k_sem_t;
 
-/* Start the kernel. `now_ms` is the only thing it is given from outside. */
-void rv9k_init(uint64_t (*now_ms)(void));
+/* Start the kernel. It is given nothing; time arrives via rv9k_tick(). */
+void rv9k_init(void);
+
+/*
+ * The kernel's clock.
+ *
+ * rv9k_tick() advances it and does nothing else; everything the tick
+ * implies -- waking sleepers, aging, deciding a switch is due -- happens
+ * later in thread context where the thread table can be touched safely.
+ *
+ * rv9k_tick_ref() hands out the counter's address so that whoever owns the
+ * timer can increment it directly from an interrupt handler, without
+ * calling into the kernel at all. On this hardware that matters: interrupt
+ * handlers may run while the flash cache is disabled, and code that lives
+ * in flash faults if it is called then. Keeping the kernel out of
+ * interrupt context entirely is simpler than annotating it to survive
+ * being there.
+ *
+ * The counter is 32 bits so that an increment is a single store on a
+ * 32-bit machine and a reader can never see half of one. It wraps after
+ * about 49 days at 1 kHz; every comparison below is written to survive
+ * that.
+ *
+ * True asynchronous preemption -- interrupting a thread and resuming a
+ * different one -- needs the trap vector, and arrives with step 3.
+ */
+void rv9k_tick(void);
+volatile uint32_t *rv9k_tick_ref(void);
+
+uint32_t rv9k_ticks(void);
+
+/* Wraparound-safe "has `deadline` arrived?" */
+#define RV9K_TICK_REACHED(now, deadline) ((int32_t)((now) - (deadline)) >= 0)
+
+/*
+ * A cheap place for a thread to be preempted. Returns immediately unless
+ * the clock has moved since this thread was last scheduled, in which case
+ * the scheduler gets a chance to pick someone else.
+ */
+void rv9k_preempt_point(void);
 
 rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
                                   size_t stack_bytes, int priority,
@@ -101,6 +149,7 @@ void rv9k_run(void);
 
 void rv9k_yield(void);
 void rv9k_sleep_ms(uint32_t ms);
+void rv9k_sleep_ticks(uint32_t ticks);
 void rv9k_exit(void);
 
 rv9k_thread_t *rv9k_self(void);

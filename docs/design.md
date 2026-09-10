@@ -2,7 +2,7 @@
 
 A small modular operating system for RISC-V, in the spirit of Microware OS-9.
 
-Status: phases 0-6 complete, phase 7 step 1 done — KAL on FreeRTOS (27/27 conformance tests
+Status: phases 0-6 complete, phase 7 steps 1-2 done — KAL on FreeRTOS (27/27 conformance tests
 passing on hardware), module format/directory/loader, and processes with
 priority aging, all verified on hardware. See docs/roadmap.md.
 
@@ -449,6 +449,51 @@ Doing step 1 as a guest is deliberate: the context switch and scheduler
 were proven while something known-good still held the machine up. The
 alternative — bringing up a scheduler with no working system to compare
 against — is how these projects stall.
+
+## 9b. The native kernel, step 2 — the tick
+
+The kernel's clock is its own tick and nothing else. Time is counted in
+ticks, sleeps are measured in ticks, aging happens every twenty of them.
+Nothing outside is consulted.
+
+**The kernel has no code that runs in interrupt context.** `rv9k_tick_ref()`
+hands out the counter's address and whoever owns the timer increments it
+directly from its handler. That is not fastidiousness: on this hardware an
+interrupt may arrive while the flash cache is disabled — the WiFi driver
+writes NVS — and anything living in flash is unreachable while it is. A
+handler that called into the kernel faulted with a cache error the moment
+the radio was used. Keeping the kernel out of interrupt context is simpler
+than annotating it to survive being there.
+
+The counter is 32 bits so an increment is one store on a 32-bit machine and
+a reader can never see half of one. It wraps after about 49 days at 1 kHz,
+and every comparison is written to survive that (`RV9K_TICK_REACHED`).
+
+Measured on hardware — two CPU-bound threads at priority 12 and 4, over
+300 ms, with the kernel doing its own accounting:
+
+| | |
+| --- | --- |
+| tick accuracy | 49 ticks in 50 ms |
+| CPU charged | high 270 ticks, low 30 ticks |
+| switches | 24 over 300 ms |
+
+The switch count is the interesting one. Threads no longer yield on every
+loop iteration; they offer a preemption point, and a switch happens only
+when the clock says one is due. The scheduler's cadence comes from the
+timer rather than from how often a thread happens to be polite.
+
+### What step 2 deliberately did not do
+
+Threads still choose *where* they can be preempted. True asynchronous
+preemption — interrupting a thread mid-instruction-stream and resuming a
+different one — requires the interrupt to return into another thread with a
+full register frame, which means owning the trap vector. ESP-IDF owns
+`mtvec` while RV-9 is a guest.
+
+Fighting the host for it would be fragile and is unnecessary: step 3 takes
+the CPU outright, and the trap vector comes with it. Doing preemption
+properly there is less work than doing it improperly here.
 
 ## 9. Migration to a native kernel
 

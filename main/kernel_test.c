@@ -14,6 +14,8 @@
 #include "rv9/kal.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_attr.h"
 
 static const char *TAG = "kern-test";
 
@@ -61,22 +63,69 @@ static void counter_thread(void *arg)
  */
 typedef struct {
     volatile uint32_t units;
-    uint64_t          deadline;
+    uint32_t          deadline;
 } burner_t;
 
 static void burner_thread(void *arg)
 {
     burner_t *b = (burner_t *)arg;
 
-    while (rv9_time_ms() < b->deadline) {
+    while (!RV9K_TICK_REACHED(rv9k_ticks(), b->deadline)) {
         volatile uint32_t acc = 0;
         for (uint32_t i = 0; i < 1500; i++) acc += i;
         b->units++;
-        rv9k_yield();      /* cooperative until step 2 brings the timer */
+
+        /* Not a yield. This switches only when the tick says a switch is
+           due, so the scheduler's cadence comes from the clock rather than
+           from how often a thread happens to be polite. */
+        rv9k_preempt_point();
     }
 }
 
 static void *test_alloc(size_t n) { return rv9_alloc(n); }
+
+/* ---- the kernel's tick ---- */
+
+static esp_timer_handle_t   s_tick_timer;
+static volatile uint32_t   *s_tick_ref;
+
+/*
+ * IRAM_ATTR, and it calls nothing.
+ *
+ * An interrupt handler here may run while the flash cache is disabled --
+ * the WiFi driver writes NVS, and anything in flash is unreachable while
+ * it does. A handler that called into the kernel faulted with a cache
+ * error the moment the radio was used. Incrementing the counter directly
+ * keeps every instruction in RAM.
+ */
+static void IRAM_ATTR tick_isr(void *arg)
+{
+    (void)arg;
+    if (s_tick_ref) (*s_tick_ref)++;
+}
+
+/*
+ * Dispatched from the interrupt, not from a task. The host scheduler is
+ * suspended while RV-9's scheduler drives, so a task-dispatched callback
+ * would simply never run -- the kernel's clock would stop precisely when
+ * it was needed.
+ */
+static bool tick_start(void)
+{
+    if (s_tick_timer != NULL) return true;
+
+    const esp_timer_create_args_t args = {
+        .callback        = tick_isr,
+        .dispatch_method = ESP_TIMER_ISR,
+        .name            = "rv9k-tick",
+    };
+
+    s_tick_ref = rv9k_tick_ref();
+
+    if (esp_timer_create(&args, &s_tick_timer) != ESP_OK) return false;
+    return esp_timer_start_periodic(s_tick_timer,
+                                    1000000 / RV9K_TICK_HZ) == ESP_OK;
+}
 
 bool rv9_kernel_selftest(void)
 {
@@ -86,8 +135,16 @@ bool rv9_kernel_selftest(void)
 
     ESP_LOGI(TAG, "native kernel tests");
 
+    check(tick_start(), "kernel tick running from a timer interrupt");
+
+    uint32_t t0 = rv9k_ticks();
+    rv9_task_delay_ms(50);
+    check((uint32_t)(rv9k_ticks() - t0) >= 40, "the tick advances on its own");
+    ESP_LOGI(TAG, "  %lu ticks in 50 ms",
+             (unsigned long)(rv9k_ticks() - t0));
+
     /* --- threads run at all, and alternate --- */
-    rv9k_init(rv9_time_ms);
+    rv9k_init();
 
     static counter_t a, b;
     a = (counter_t){ .limit = 50 };
@@ -125,10 +182,10 @@ bool rv9_kernel_selftest(void)
     check(a.order <= 2 && b.order <= 2, "equal priorities interleaved");
 
     /* --- priority is respected, and aging prevents starvation --- */
-    rv9k_init(rv9_time_ms);
+    rv9k_init();
 
     static burner_t hi, lo;
-    uint64_t deadline = rv9_time_ms() + 300;
+    uint32_t deadline = rv9k_ticks() + RV9K_MS_TO_TICKS(300);
     hi = (burner_t){ .deadline = deadline };
     lo = (burner_t){ .deadline = deadline };
 
@@ -144,6 +201,14 @@ bool rv9_kernel_selftest(void)
 
     ESP_LOGI(TAG, "  high priority did %lu units, low did %lu",
              (unsigned long)hi.units, (unsigned long)lo.units);
+    ESP_LOGI(TAG, "  cpu charged: high %lu ticks, low %lu ticks",
+             (unsigned long)th->ran_ticks, (unsigned long)tl->ran_ticks);
+
+    /* Switching should now follow the clock, not the loop count. Roughly
+       one switch per tick or two, over 300 ms -- not thousands. */
+    uint64_t sw = rv9k_switch_count();
+    ESP_LOGI(TAG, "  %llu switches over 300 ms", (unsigned long long)sw);
+    check(sw > 10 && sw < 2000, "switch rate follows the tick, not the loop");
 
     check(hi.units > 0 && lo.units > 0,
           "aging let the low-priority thread run at all");

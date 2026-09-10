@@ -21,8 +21,8 @@ void rv9_thread_exited(void);
 static rv9k_thread_t  s_threads[RV9K_MAX_THREADS];
 static rv9k_thread_t *s_current;
 static uint32_t      *s_host_sp;          /* whoever called rv9k_run */
-static uint64_t     (*s_now_ms)(void);
-static uint64_t       s_last_age_ms;
+static volatile uint32_t s_ticks;         /* written only by the tick ISR */
+static uint32_t       s_last_age_tick;
 static uint64_t       s_switches;
 static bool           s_running;
 
@@ -33,20 +33,30 @@ static bool           s_running;
 #define CTX_S0    1
 #define CTX_S1    2
 
-void rv9k_init(uint64_t (*now_ms)(void))
+void rv9k_init(void)
 {
     for (int i = 0; i < RV9K_MAX_THREADS; i++) {
         s_threads[i].state = RV9K_DEAD;
         s_threads[i].next  = NULL;
     }
-    s_current     = NULL;
-    s_now_ms      = now_ms;
-    s_last_age_ms = now_ms ? now_ms() : 0;
-    s_switches    = 0;
-    s_running     = false;
+    s_current       = NULL;
+    s_last_age_tick = s_ticks;
+    s_switches      = 0;
+    s_running       = false;
 }
 
-static uint64_t now(void) { return s_now_ms ? s_now_ms() : 0; }
+/*
+ * The whole of what an interrupt does. One counter, one word, no locking
+ * and no decisions -- everything the tick implies is worked out later in
+ * thread context, where the thread table can be touched safely.
+ */
+void rv9k_tick(void) { s_ticks++; }
+
+volatile uint32_t *rv9k_tick_ref(void) { return &s_ticks; }
+
+uint32_t rv9k_ticks(void) { return s_ticks; }
+
+static uint32_t now(void) { return s_ticks; }
 
 rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
                                   size_t stack_bytes, int priority,
@@ -96,9 +106,10 @@ rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
     t->effective_priority = priority;
     t->age                = 0;
     t->state              = RV9K_READY;
-    t->wake_at_ms         = 0;
+    t->wake_at_tick       = 0;
     t->blocked_on         = NULL;
-    t->ran_for_ms         = 0;
+    t->ran_ticks          = 0;
+    t->entered_tick       = 0;
     t->last_ran_seq       = 0;
 
     return t;
@@ -110,9 +121,9 @@ rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
 
 static void age_threads(void)
 {
-    uint64_t t = now();
-    if (t - s_last_age_ms < RV9K_AGE_PERIOD_MS) return;
-    s_last_age_ms = t;
+    uint32_t t = now();
+    if ((uint32_t)(t - s_last_age_tick) < RV9K_AGE_PERIOD_TICKS) return;
+    s_last_age_tick = t;
 
     rv9k_thread_t *top = NULL;
     for (int i = 0; i < RV9K_MAX_THREADS; i++) {
@@ -142,10 +153,11 @@ static void age_threads(void)
 /* Wake anything whose sleep has expired. */
 static void wake_sleepers(void)
 {
-    uint64_t t = now();
+    uint32_t t = now();
     for (int i = 0; i < RV9K_MAX_THREADS; i++) {
         rv9k_thread_t *th = &s_threads[i];
-        if (th->state == RV9K_SLEEPING && t >= th->wake_at_ms) {
+        if (th->state == RV9K_SLEEPING &&
+            RV9K_TICK_REACHED(t, th->wake_at_tick)) {
             th->state = RV9K_READY;
         }
     }
@@ -213,9 +225,14 @@ static void reschedule(void)
         if (prev->state == RV9K_RUNNING) return;   /* still the best choice */
     }
 
-    if (prev && prev->state == RV9K_RUNNING) prev->state = RV9K_READY;
+    if (prev) {
+        /* Charge the outgoing thread for the CPU it actually received. */
+        prev->ran_ticks += (uint32_t)(now() - prev->entered_tick);
+        if (prev->state == RV9K_RUNNING) prev->state = RV9K_READY;
+    }
 
     next->state        = RV9K_RUNNING;
+    next->entered_tick = now();
     s_switches++;
     next->last_ran_seq = s_switches;
     s_current          = next;
@@ -232,12 +249,26 @@ void rv9k_yield(void)
     if (s_current) reschedule();
 }
 
-void rv9k_sleep_ms(uint32_t ms)
+void rv9k_sleep_ticks(uint32_t ticks)
 {
     if (s_current == NULL) return;
 
-    s_current->wake_at_ms = now() + ms;
-    s_current->state      = RV9K_SLEEPING;
+    s_current->wake_at_tick = now() + ticks;
+    s_current->state        = RV9K_SLEEPING;
+    reschedule();
+}
+
+void rv9k_sleep_ms(uint32_t ms) { rv9k_sleep_ticks(RV9K_MS_TO_TICKS(ms)); }
+
+/*
+ * Preemption, taken at a point of the thread's choosing rather than forced
+ * on it. If the clock has not moved since this thread was scheduled there
+ * is nothing to decide, so the common case is one comparison.
+ */
+void rv9k_preempt_point(void)
+{
+    if (s_current == NULL) return;
+    if (s_ticks == s_current->entered_tick) return;
     reschedule();
 }
 
@@ -288,6 +319,7 @@ void rv9k_run(void)
         }
 
         next->state        = RV9K_RUNNING;
+        next->entered_tick = now();
         s_switches++;
         next->last_ran_seq = s_switches;
         s_current          = next;
@@ -315,7 +347,7 @@ bool rv9k_sem_take(rv9k_sem_t *sem, uint32_t timeout_ms)
 {
     if (sem == NULL) return false;
 
-    uint64_t deadline = now() + timeout_ms;
+    uint32_t deadline = now() + RV9K_MS_TO_TICKS(timeout_ms);
 
     for (;;) {
         if (sem->count > 0) {
@@ -323,7 +355,7 @@ bool rv9k_sem_take(rv9k_sem_t *sem, uint32_t timeout_ms)
             return true;
         }
         if (timeout_ms == 0) return false;
-        if (now() >= deadline) return false;
+        if (RV9K_TICK_REACHED(now(), deadline)) return false;
 
         /* No wait queue yet: spin through the scheduler, which is correct
            if inefficient, and keeps the blocking path honest until the

@@ -158,14 +158,20 @@ why it comes here and not earlier.
 
 ---
 
-## Phase 7 — The native kernel  ◐ step 1 of 5 done
+## Phase 7 — The native kernel  ◐ steps 1-2 of 5 done
 
 **Goal:** remove FreeRTOS. The year-of-evenings phase.
 
 - **step 1 ✅** context switch (RV32I assembly), run queues, priority with
   aging, semaphores, and tests passing on hardware. Runs as a guest inside
   one host task; threads switch cooperatively.
-- **step 2** our own timer interrupt, so preemption needs no cooperation
+- **step 2 ✅** the kernel's own tick, from a timer interrupt that fires
+  even with the host scheduler suspended. Time, sleeps, aging and CPU
+  accounting all run on it. The kernel has no code in interrupt context at
+  all -- the handler increments the counter directly, because a handler in
+  flash faults when the cache is off. Preemption is taken at points a
+  thread offers; asynchronous preemption needs the trap vector and comes
+  with step 3.
 - **step 3** own the CPU from reset; the host scheduler goes away, and the
   hardware stack guard becomes ours to program
 - **step 4** `wifi_osi_funcs_t`, so the radio blobs run on RV-9
