@@ -169,21 +169,47 @@ static void term_banner(void)
     ESP_LOGI(TAG, "banner written to /term");
 }
 
-static void phase4_shell(void)
+/*
+ * init: run a shell, and keep running one.
+ *
+ * Two things this fixes, both of which showed up the moment a human used it
+ * rather than a test script.
+ *
+ * The kernel log and the shell share one serial line, so routine INFO
+ * messages landed in the middle of the shell's output and mangled its
+ * tables. While the shell owns the console it gets it to itself; warnings
+ * and errors still come through, because those you want to see even if they
+ * arrive mid-line.
+ *
+ * And exiting the only shell used to strand the board. Now it comes back,
+ * the way init has always worked.
+ *
+ * TODO: better still would be sending the kernel log to /term and leaving
+ * the serial line entirely to the shell -- two devices, two purposes. That
+ * needs a log path that cannot deadlock against the I/O manager it logs
+ * through, so it waits for a phase with time to do it properly.
+ */
+static void init_shell_loop(void)
 {
-    ESP_LOGI(TAG, "starting shell on /uart0");
+    ESP_LOGI(TAG, "starting shell on /uart0 (log quiet while it runs)");
 
-    rv9_pid_t pid = 0;
-    if (rv9_proc_fork("shell", RV9_PRIO_NORMAL, NULL, &pid) != RV9_PROC_OK) {
-        ESP_LOGE(TAG, "could not start shell");
-        return;
+    for (;;) {
+        esp_log_level_set("*", ESP_LOG_WARN);
+
+        rv9_pid_t pid = 0;
+        if (rv9_proc_fork("shell", RV9_PRIO_NORMAL, NULL, &pid) != RV9_PROC_OK) {
+            esp_log_level_set("*", ESP_LOG_INFO);
+            ESP_LOGE(TAG, "could not start shell; giving up");
+            return;
+        }
+
+        int status = 0;
+        rv9_proc_wait(pid, &status, RV9_WAIT_FOREVER);
+
+        esp_log_level_set("*", ESP_LOG_INFO);
+        ESP_LOGI(TAG, "shell exited with %d, restarting", status);
+        rv9_task_delay_ms(300);
     }
-
-    /* The shell owns the console from here. Waiting forever is right: when
-       it exits, the system has nothing left to do. */
-    int status = 0;
-    rv9_proc_wait(pid, &status, RV9_WAIT_FOREVER);
-    ESP_LOGI(TAG, "shell exited with %d", status);
 }
 
 static void phase3_demo(void)
@@ -337,24 +363,6 @@ static void phase2_demo(void)
     }
 }
 
-/* Placeholder for the process manager. For now it just proves the system
-   keeps running and reports heap drift, which is the number that will matter
-   most once WiFi arrives. */
-static void heartbeat_task(void *arg)
-{
-    (void)arg;
-    uint32_t beat = 0;
-
-    for (;;) {
-        rv9_task_delay_ms(10000);
-        ESP_LOGI(TAG, "alive %lus, heap %u free, %u low water",
-                 (unsigned long)(rv9_time_ms() / 1000),
-                 (unsigned)rv9_heap_free(),
-                 (unsigned)rv9_heap_low_water());
-        beat++;
-    }
-}
-
 /*
  * The system runs here rather than in app_main, because it forks processes
  * and must outrank them. app_main sits at the host kernel's default
@@ -372,13 +380,7 @@ static void rv9_init_task(void *arg)
 
     phase2_demo();
     phase3_demo();
-    phase4_shell();
-
-    rv9_err_t err = rv9_task_create(heartbeat_task, "rv9-heartbeat", 3072,
-                                    NULL, RV9_PRIO_LOW, NULL);
-    if (err != RV9_OK) {
-        ESP_LOGE(TAG, "could not start heartbeat: %s", rv9_strerror(err));
-    }
+    init_shell_loop();
 
     rv9_task_delete(NULL);
 }
