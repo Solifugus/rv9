@@ -9,6 +9,7 @@
  * on FreeRTOS, now produced by RV-9's own scheduler.
  */
 #include "kernel_test.h"
+#include "conformance.h"
 
 #include "rv9/kernel.h"
 #include "rv9/kal.h"
@@ -127,6 +128,47 @@ static bool tick_start(void)
                                     1000000 / RV9K_TICK_HZ) == ESP_OK;
 }
 
+/* ---- the conformance suite, run inside an RV-9 thread ---- */
+
+static volatile int s_native_failures = -1;
+
+static void conformance_thread(void *arg)
+{
+    (void)arg;
+    s_native_failures = rv9_conformance_run(rv9_ops_native());
+    rv9k_exit();
+}
+
+/*
+ * Run the KAL contract against the native kernel.
+ *
+ * The suite runs as an RV-9 thread, because its blocking calls reschedule
+ * and rescheduling only means anything to a thread the kernel is running.
+ * A 16 KB stack because the logging inside it is not frugal.
+ *
+ * The host scheduler is *not* held here: the suite logs as it goes, and
+ * logging writes to the console driver, which needs its own task to run.
+ */
+static bool native_conformance(void)
+{
+    rv9k_init();
+    s_native_failures = -1;
+
+    if (rv9k_thread_create(conformance_thread, NULL, "conformance",
+                           16384, 8, test_alloc) == NULL) {
+        ESP_LOGE(TAG, "could not start the conformance thread");
+        return false;
+    }
+
+    rv9k_run();
+
+    if (s_native_failures < 0) {
+        ESP_LOGE(TAG, "conformance thread did not finish");
+        return false;
+    }
+    return s_native_failures == 0;
+}
+
 bool rv9_kernel_selftest(void)
 {
     s_passed = 0;
@@ -214,6 +256,10 @@ bool rv9_kernel_selftest(void)
           "aging let the low-priority thread run at all");
     check(hi.units > lo.units * 2,
           "high priority still got much the larger share");
+
+    /* And the real acceptance test: the KAL contract, unchanged, run
+       against RV-9's own kernel. */
+    check(native_conformance(), "KAL contract satisfied by the RV-9 kernel");
 
     if (s_failed == 0) ESP_LOGI(TAG, "%d passed, 0 failed", s_passed);
     else               ESP_LOGE(TAG, "%d passed, %d FAILED", s_passed, s_failed);

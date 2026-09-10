@@ -154,43 +154,81 @@ rv9_err_t rv9_sem_give_from_isr(rv9_sem_t sem, bool *higher_prio_woken)
 
 /* ---------------- mutexes ---------------- */
 
-rv9_err_t rv9_mutex_create(rv9_mutex_t *out_mutex)
+/*
+ * A recursive mutex must be taken with the recursive calls; the ordinary
+ * ones block it against itself. Which handle it is cannot be recovered
+ * from the handle, so the mutex remembers.
+ *
+ * This was wrong from phase 0 until the conformance suite grew a test that
+ * actually locked a recursive mutex twice. The old suite only checked that
+ * one could be created.
+ */
+typedef struct {
+    SemaphoreHandle_t handle;
+    bool              recursive;
+} kal_mutex_t;
+
+static rv9_err_t mutex_make(rv9_mutex_t *out_mutex, bool recursive)
 {
     if (out_mutex == NULL) return RV9_ERR_INVAL;
-    SemaphoreHandle_t h = xSemaphoreCreateMutex();
-    if (h == NULL) return RV9_ERR_NOMEM;
 
-    *out_mutex = (rv9_mutex_t)h;
+    kal_mutex_t *m = (kal_mutex_t *)malloc(sizeof(*m));
+    if (m == NULL) return RV9_ERR_NOMEM;
+
+    m->handle = recursive ? xSemaphoreCreateRecursiveMutex()
+                          : xSemaphoreCreateMutex();
+    m->recursive = recursive;
+
+    if (m->handle == NULL) {
+        free(m);
+        return RV9_ERR_NOMEM;
+    }
+
+    *out_mutex = (rv9_mutex_t)m;
     return RV9_OK;
+}
+
+rv9_err_t rv9_mutex_create(rv9_mutex_t *out_mutex)
+{
+    return mutex_make(out_mutex, false);
 }
 
 rv9_err_t rv9_mutex_create_recursive(rv9_mutex_t *out_mutex)
 {
-    if (out_mutex == NULL) return RV9_ERR_INVAL;
-    SemaphoreHandle_t h = xSemaphoreCreateRecursiveMutex();
-    if (h == NULL) return RV9_ERR_NOMEM;
-
-    *out_mutex = (rv9_mutex_t)h;
-    return RV9_OK;
+    return mutex_make(out_mutex, true);
 }
 
 void rv9_mutex_destroy(rv9_mutex_t mutex)
 {
-    if (mutex) vSemaphoreDelete((SemaphoreHandle_t)mutex);
+    kal_mutex_t *m = (kal_mutex_t *)mutex;
+    if (m == NULL) return;
+
+    vSemaphoreDelete(m->handle);
+    free(m);
 }
 
 rv9_err_t rv9_mutex_lock(rv9_mutex_t mutex, uint32_t timeout_ms)
 {
-    if (mutex == NULL) return RV9_ERR_INVAL;
-    return xSemaphoreTake((SemaphoreHandle_t)mutex, timeout_to_ticks(timeout_ms))
-           == pdTRUE ? RV9_OK : RV9_ERR_TIMEOUT;
+    kal_mutex_t *m = (kal_mutex_t *)mutex;
+    if (m == NULL) return RV9_ERR_INVAL;
+
+    TickType_t ticks = timeout_to_ticks(timeout_ms);
+    BaseType_t ok = m->recursive
+                  ? xSemaphoreTakeRecursive(m->handle, ticks)
+                  : xSemaphoreTake(m->handle, ticks);
+
+    return ok == pdTRUE ? RV9_OK : RV9_ERR_TIMEOUT;
 }
 
 rv9_err_t rv9_mutex_unlock(rv9_mutex_t mutex)
 {
-    if (mutex == NULL) return RV9_ERR_INVAL;
-    return xSemaphoreGive((SemaphoreHandle_t)mutex) == pdTRUE
-           ? RV9_OK : RV9_ERR_INVAL;
+    kal_mutex_t *m = (kal_mutex_t *)mutex;
+    if (m == NULL) return RV9_ERR_INVAL;
+
+    BaseType_t ok = m->recursive ? xSemaphoreGiveRecursive(m->handle)
+                                 : xSemaphoreGive(m->handle);
+
+    return ok == pdTRUE ? RV9_OK : RV9_ERR_INVAL;
 }
 
 /* ---------------- queues ---------------- */

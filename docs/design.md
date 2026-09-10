@@ -2,7 +2,8 @@
 
 A small modular operating system for RISC-V, in the spirit of Microware OS-9.
 
-Status: phases 0-6 complete, phase 7 steps 1-2 done — KAL on FreeRTOS (27/27 conformance tests
+Status: phases 0-6 complete; phase 7 steps 1-2 done and the KAL
+contract satisfied by RV-9's own kernel — KAL on FreeRTOS (27/27 conformance tests
 passing on hardware), module format/directory/loader, and processes with
 priority aging, all verified on hardware. See docs/roadmap.md.
 
@@ -494,6 +495,38 @@ full register frame, which means owning the trap vector. ESP-IDF owns
 Fighting the host for it would be fragile and is unnecessary: step 3 takes
 the CPU outright, and the trap vector comes with it. Doing preemption
 properly there is less work than doing it improperly here.
+
+## 9c. The contract, satisfied by both kernels
+
+Phase 0 said the conformance suite would become the acceptance test for the
+native kernel. A suite that calls one implementation directly cannot do
+that, so it now takes the implementation as an argument: `kal_ops_t` is the
+contract, and there are two of them.
+
+```
+[freertos]   23 passed, 0 failed     the reference
+[rv9-kernel] 23 passed, 0 failed     RV-9's own kernel
+```
+
+Same test code, same assertions, two kernels. The native side runs inside
+an RV-9 thread, because its blocking calls reschedule and rescheduling only
+means something to a thread the kernel is running.
+
+**The suite immediately found a bug in the reference.** `rv9_mutex_lock`
+used FreeRTOS's ordinary take on recursive mutexes, which blocks them
+against themselves — so a recursive lock deadlocked until it timed out.
+That had been wrong since phase 0. The old suite checked only that a
+recursive mutex could be *created*; it never locked one twice.
+
+This is the argument for writing the acceptance test before the thing it
+accepts. Building the second implementation is what forced the contract to
+be written down precisely, and writing it down precisely is what exposed
+the first implementation's mistake.
+
+What the native side still borrows: allocation. The kernel has no heap and
+does not pretend to — its queues take storage from the caller, and thread
+stacks come from an allocator passed in. A kernel that owns the machine
+will need its own allocator; it does not have one yet.
 
 ## 9. Migration to a native kernel
 

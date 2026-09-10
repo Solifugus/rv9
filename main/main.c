@@ -14,6 +14,7 @@
 #include "rv9/io_builtin.h"
 #include "kal_selftest.h"
 #include "kernel_test.h"
+#include "conformance.h"
 
 #define RV9_RUN_KERNEL_TEST 1
 
@@ -406,6 +407,10 @@ void app_main(void)
         ESP_LOGE(TAG, "KAL self-test failed -- not proceeding");
         return;
     }
+
+    /* The same contract, against the implementation everything runs on.
+       This is the reference the native kernel is measured against. */
+    rv9_conformance_run(rv9_ops_freertos());
 
     ESP_LOGI(TAG, "KAL is sound.");
 

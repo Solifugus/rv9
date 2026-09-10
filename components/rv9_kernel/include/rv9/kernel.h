@@ -159,6 +159,40 @@ void rv9k_sem_init(rv9k_sem_t *sem, int32_t initial, int32_t max);
 bool rv9k_sem_take(rv9k_sem_t *sem, uint32_t timeout_ms);
 void rv9k_sem_give(rv9k_sem_t *sem);
 
+/*
+ * A mutex is a binary semaphore that remembers its owner, so that a
+ * recursive lock does not deadlock against itself.
+ */
+typedef struct {
+    rv9k_sem_t     sem;
+    rv9k_thread_t *owner;
+    uint32_t       depth;
+} rv9k_mutex_t;
+
+void rv9k_mutex_init(rv9k_mutex_t *m);
+bool rv9k_mutex_lock(rv9k_mutex_t *m, uint32_t timeout_ms);
+void rv9k_mutex_unlock(rv9k_mutex_t *m);
+
+/*
+ * A fixed-capacity ring of fixed-size items. The storage belongs to the
+ * caller, which keeps the kernel out of the allocation business -- it has
+ * no heap of its own and should not pretend otherwise.
+ */
+typedef struct {
+    uint8_t  *storage;
+    uint32_t  capacity;      /* items */
+    uint32_t  item_size;
+    uint32_t  head;
+    uint32_t  tail;
+    uint32_t  count;
+} rv9k_queue_t;
+
+void     rv9k_queue_init(rv9k_queue_t *q, void *storage, uint32_t capacity,
+                         uint32_t item_size);
+bool     rv9k_queue_send(rv9k_queue_t *q, const void *item, uint32_t timeout_ms);
+bool     rv9k_queue_recv(rv9k_queue_t *q, void *item, uint32_t timeout_ms);
+uint32_t rv9k_queue_count(const rv9k_queue_t *q);
+
 /* Introspection, for tests and for `procs` when this becomes the kernel. */
 int  rv9k_thread_count(void);
 const rv9k_thread_t *rv9k_thread_at(int index);

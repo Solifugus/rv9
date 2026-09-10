@@ -173,7 +173,11 @@ why it comes here and not earlier.
   thread offers; asynchronous preemption needs the trap vector and comes
   with step 3.
 - **step 3** own the CPU from reset; the host scheduler goes away, and the
-  hardware stack guard becomes ours to program
+  hardware stack guard becomes ours to program.
+  **Its acceptance test already passes**: the KAL contract is now a table of
+  operations with two implementations behind it, and RV-9's kernel
+  satisfies all 23 checks. What remains for step 3 is boot and traps, not
+  whether the kernel works.
 - **step 4** `wifi_osi_funcs_t`, so the radio blobs run on RV-9
 - **step 5** PMP isolation
 - run queues, priority aging, tick handling

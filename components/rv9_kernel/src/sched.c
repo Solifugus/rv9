@@ -376,6 +376,114 @@ void rv9k_sem_give(rv9k_sem_t *sem)
 }
 
 /* ------------------------------------------------------------------ */
+/* Mutexes                                                             */
+/* ------------------------------------------------------------------ */
+
+void rv9k_mutex_init(rv9k_mutex_t *m)
+{
+    if (m == NULL) return;
+    rv9k_sem_init(&m->sem, 1, 1);
+    m->owner = NULL;
+    m->depth = 0;
+}
+
+bool rv9k_mutex_lock(rv9k_mutex_t *m, uint32_t timeout_ms)
+{
+    if (m == NULL) return false;
+
+    /* Already ours: count the nesting rather than deadlock on ourselves. */
+    if (m->owner != NULL && m->owner == s_current) {
+        m->depth++;
+        return true;
+    }
+
+    if (!rv9k_sem_take(&m->sem, timeout_ms)) return false;
+
+    m->owner = s_current;
+    m->depth = 1;
+    return true;
+}
+
+void rv9k_mutex_unlock(rv9k_mutex_t *m)
+{
+    if (m == NULL || m->depth == 0) return;
+
+    if (--m->depth > 0) return;
+
+    m->owner = NULL;
+    rv9k_sem_give(&m->sem);
+}
+
+/* ------------------------------------------------------------------ */
+/* Queues                                                              */
+/* ------------------------------------------------------------------ */
+
+static void copy_bytes(uint8_t *dst, const uint8_t *src, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) dst[i] = src[i];
+}
+
+void rv9k_queue_init(rv9k_queue_t *q, void *storage, uint32_t capacity,
+                     uint32_t item_size)
+{
+    if (q == NULL) return;
+    q->storage   = (uint8_t *)storage;
+    q->capacity  = capacity;
+    q->item_size = item_size;
+    q->head = q->tail = q->count = 0;
+}
+
+uint32_t rv9k_queue_count(const rv9k_queue_t *q)
+{
+    return q ? q->count : 0;
+}
+
+bool rv9k_queue_send(rv9k_queue_t *q, const void *item, uint32_t timeout_ms)
+{
+    if (q == NULL || item == NULL) return false;
+
+    uint32_t deadline = now() + RV9K_MS_TO_TICKS(timeout_ms);
+
+    for (;;) {
+        if (q->count < q->capacity) {
+            copy_bytes(q->storage + (size_t)q->tail * q->item_size,
+                       (const uint8_t *)item, q->item_size);
+            q->tail = (q->tail + 1) % q->capacity;
+            q->count++;
+            return true;
+        }
+        if (timeout_ms == 0 || RV9K_TICK_REACHED(now(), deadline)) return false;
+        if (s_current == NULL) return false;
+
+        s_current->state = RV9K_READY;
+        reschedule();
+    }
+}
+
+bool rv9k_queue_recv(rv9k_queue_t *q, void *item, uint32_t timeout_ms)
+{
+    if (q == NULL || item == NULL) return false;
+
+    uint32_t deadline = now() + RV9K_MS_TO_TICKS(timeout_ms);
+
+    for (;;) {
+        if (q->count > 0) {
+            copy_bytes((uint8_t *)item,
+                       q->storage + (size_t)q->head * q->item_size,
+                       q->item_size);
+            q->head = (q->head + 1) % q->capacity;
+            q->count--;
+            return true;
+        }
+        if (timeout_ms == 0 || RV9K_TICK_REACHED(now(), deadline)) return false;
+        if (s_current == NULL) return false;
+
+        s_current->state = RV9K_READY;
+        reschedule();
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Introspection                                                       */
 /* ------------------------------------------------------------------ */
 
