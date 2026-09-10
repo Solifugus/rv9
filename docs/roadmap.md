@@ -158,11 +158,19 @@ why it comes here and not earlier.
 
 ---
 
-## Phase 7 — The native kernel
+## Phase 7 — The native kernel  ◐ step 1 of 5 done
 
 **Goal:** remove FreeRTOS. The year-of-evenings phase.
 
-- RV-9 scheduler: context switch, run queues, priority aging, tick handling
+- **step 1 ✅** context switch (RV32I assembly), run queues, priority with
+  aging, semaphores, and tests passing on hardware. Runs as a guest inside
+  one host task; threads switch cooperatively.
+- **step 2** our own timer interrupt, so preemption needs no cooperation
+- **step 3** own the CPU from reset; the host scheduler goes away, and the
+  hardware stack guard becomes ours to program
+- **step 4** `wifi_osi_funcs_t`, so the radio blobs run on RV-9
+- **step 5** PMP isolation
+- run queues, priority aging, tick handling
 - Native timers, native allocator
 - KAL native backend, satisfying the same interface phases 0-6 proved correct
 - `wifi_osi_funcs_t` implemented against RV-9 primitives — the blobs never know

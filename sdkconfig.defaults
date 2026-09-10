@@ -27,3 +27,14 @@ CONFIG_ESP_TASK_WDT_INIT=n
 # nowhere on this board, and RV-9 needs the USB link for input as well as
 # output -- it is the only terminal the board has.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# The C5 has a hardware stack guard that faults when the stack pointer
+# leaves the running task's registered range. RV-9's own scheduler switches
+# to thread stacks the host kernel has never registered, so the first
+# context switch trips it.
+#
+# This is not a protection RV-9 is giving up -- it is the same class of
+# mechanism RV-9 wants for itself. While the kernel is a guest it cannot
+# describe its stacks to a guard the host owns; once it owns the CPU
+# (phase 7 step 3) it programs the guard per thread, and PMP after that.
+CONFIG_ESP_SYSTEM_HW_STACK_GUARD=n

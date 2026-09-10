@@ -2,7 +2,7 @@
 
 A small modular operating system for RISC-V, in the spirit of Microware OS-9.
 
-Status: phases 0-6 complete — KAL on FreeRTOS (27/27 conformance tests
+Status: phases 0-6 complete, phase 7 step 1 done — KAL on FreeRTOS (27/27 conformance tests
 passing on hardware), module format/directory/loader, and processes with
 priority aging, all verified on hardware. See docs/roadmap.md.
 
@@ -401,6 +401,54 @@ the proof that the I/O abstraction was designed correctly rather than shaped
 around one device.
 
 ---
+
+## 9a. The native kernel, step 1 — done
+
+The context switch (`components/rv9_kernel/src/switch.S`) saves the
+callee-saved registers of the running thread, records its stack pointer,
+loads another's, and returns — into the other thread. Caller-saved
+registers are absent because the ABI already declares them dead across a
+call, and this *is* a call: the calling convention does half the work.
+
+A new thread's stack is built so the first switch into it "returns" into a
+trampoline, with the entry point in `s0` and the argument in `s1`. Those are
+callee-saved, so starting a thread and resuming one take exactly the same
+path.
+
+The scheduler implements the phase 2 policy directly instead of steering
+another kernel's priorities. Measured on hardware, two CPU-bound threads at
+priority 12 and 4, both stopping at one shared deadline:
+
+| | RV-9 scheduler | FreeRTOS (phase 2) |
+| --- | --- | --- |
+| high priority | 5409 units | 2253 units |
+| low priority | 601 units | 385 units |
+
+Same shape: the urgent work dominates, the low-priority thread is never
+starved. The policy survived being reimplemented, which is the point of
+having written it down.
+
+### What running as a guest cost
+
+Two mechanisms had to be turned off, and both are things RV-9 wants for
+itself later rather than things it is giving up:
+
+**The hardware stack guard.** The C5 faults when the stack pointer leaves
+the running task's registered range, and RV-9's threads run on stacks the
+host has never registered — so the very first context switch tripped it.
+While the kernel is a guest it cannot describe its stacks to a guard the
+host owns. Step 3 programs that guard per thread; step 5 adds PMP.
+
+**Host preemption during a switch.** `rv9_sched_lock()` holds the host
+scheduler still while ours drives, because a host context switch taken
+while the stack pointer is on a foreign stack saves a context it cannot
+account for. One line on the native backend, and unnecessary once RV-9
+owns the CPU.
+
+Doing step 1 as a guest is deliberate: the context switch and scheduler
+were proven while something known-good still held the machine up. The
+alternative — bringing up a scheduler with no working system to compare
+against — is how these projects stall.
 
 ## 9. Migration to a native kernel
 

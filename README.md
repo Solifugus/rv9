@@ -14,7 +14,8 @@ passing on hardware); modules built, verified, loaded and run from flash;
 processes with OS-9-style priority aging, measured starvation-free; unified
 I/O with SCF, a UART driver, and a text console on the ST7789 panel; and a
 shell where every command is a loadable module; and RBF storage with
-segment-list files on a RAM disk; and the network as a path.
+segment-list files on a RAM disk; the network as a path; and RV-9's own
+context switch and scheduler running its threads (phase 7, step 1 of 5).
 
 ```
 rv9> mdir

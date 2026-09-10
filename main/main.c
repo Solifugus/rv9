@@ -13,6 +13,9 @@
 #include "rv9/io.h"
 #include "rv9/io_builtin.h"
 #include "kal_selftest.h"
+#include "kernel_test.h"
+
+#define RV9_RUN_KERNEL_TEST 1
 
 #include "esp_chip_info.h"
 #include "esp_flash.h"
@@ -376,6 +379,12 @@ static void phase2_demo(void)
 static void rv9_init_task(void *arg)
 {
     (void)arg;
+
+    /* Phase 7 step 1: prove the native kernel's context switch and
+       scheduler while the host kernel is still holding the machine up. */
+#if RV9_RUN_KERNEL_TEST
+    rv9_kernel_selftest();
+#endif
 
     rv9_mod_dir_init();
     mdir();

@@ -156,6 +156,23 @@ void rv9_critical_enter(void);
 void rv9_critical_exit(void);
 
 /* ------------------------------------------------------------------ */
+/* Scheduler lock                                                      */
+/*                                                                     */
+/* Stop other threads from being scheduled, without disabling          */
+/* interrupts. Weaker than a critical section and safe to hold for      */
+/* longer, but no blocking call may be made while it is held.          */
+/*                                                                     */
+/* RV-9's own scheduler needs this while it is a guest: its threads run */
+/* on stacks the host kernel knows nothing about, and a host context    */
+/* switch taken while the stack pointer is one of those is a very bad   */
+/* afternoon. The native backend implements it in one line, and step 3  */
+/* of phase 7 removes the need entirely.                               */
+/* ------------------------------------------------------------------ */
+
+void rv9_sched_lock(void);
+void rv9_sched_unlock(void);
+
+/* ------------------------------------------------------------------ */
 /* Instruction stream synchronisation                                  */
 /*                                                                     */
 /* Call after writing code into memory and before jumping to it. On    */

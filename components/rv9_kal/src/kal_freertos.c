@@ -292,6 +292,11 @@ static portMUX_TYPE s_rv9_lock = portMUX_INITIALIZER_UNLOCKED;
 void rv9_critical_enter(void) { portENTER_CRITICAL(&s_rv9_lock); }
 void rv9_critical_exit(void)  { portEXIT_CRITICAL(&s_rv9_lock); }
 
+/* ---------------- scheduler lock ---------------- */
+
+void rv9_sched_lock(void)   { vTaskSuspendAll(); }
+void rv9_sched_unlock(void) { (void)xTaskResumeAll(); }
+
 /* ---------------- instruction sync ---------------- */
 
 void rv9_isync(void)
