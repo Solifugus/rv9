@@ -262,6 +262,10 @@ control layer is late if it is late.
   bytes. `pin`, `pwm`, `adc` utilities convert text at the shell.
 - USB pins (13, 14) are reserved: a driver that can disconnect the operator
   should refuse to.
+- **`/tsens` — the die temperature, done.** 45-46 C with radio and
+  backlight on; the input a thermal-throttling decision needs.
+- Not done: LCD backlight brightness as a descriptor option. It has been
+  on at full since phase 3 and is a real contributor to board temperature.
 - Not done: I2C and SPI as devices, which is what most sensors want.
 - Not done: interrupt-driven inputs — a pin change releasing a process.
   That is the same mechanism aperiodic real-time needs, and doing both at

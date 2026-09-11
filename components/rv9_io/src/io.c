@@ -15,8 +15,11 @@
 
 static const char *TAG = "rv9-io";
 
-#define MAX_FILEMGRS 4
-#define MAX_DRIVERS  8
+/* Room to grow. These were sized to what existed at the time, and the
+   moment a ninth driver appeared its registration failed -- silently,
+   because the caller ignored the error. */
+#define MAX_FILEMGRS 8
+#define MAX_DRIVERS  16
 
 static const rv9_filemgr_t *s_filemgrs[MAX_FILEMGRS];
 static const rv9_driver_t  *s_drivers[MAX_DRIVERS];
@@ -72,6 +75,9 @@ rv9_io_err_t rv9_io_register_filemgr(const rv9_filemgr_t *fm)
         }
         if (strcmp(s_filemgrs[i]->name, fm->name) == 0) return RV9_IO_ERR_EXISTS;
     }
+
+    ESP_LOGE(TAG, "no room for file manager '%s': %d already registered",
+             fm->name, MAX_FILEMGRS);
     return RV9_IO_ERR_NOMEM;
 }
 
@@ -87,6 +93,9 @@ rv9_io_err_t rv9_io_register_driver(const rv9_driver_t *drv)
         }
         if (strcmp(s_drivers[i]->name, drv->name) == 0) return RV9_IO_ERR_EXISTS;
     }
+
+    ESP_LOGE(TAG, "no room for driver '%s': %d already registered",
+             drv->name, MAX_DRIVERS);
     return RV9_IO_ERR_NOMEM;
 }
 

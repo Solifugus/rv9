@@ -943,6 +943,22 @@ harder to reach than a mistyped pin number — the principle being that **a
 driver able to disconnect the operator should refuse to unless asked very
 deliberately.**
 
+### The die temperature is a device too
+
+```
+rv9> temp 6
+46.20 C   46.20 C   45.20 C   45.20 C
+range 45 to 46 C over 6 s
+```
+
+"The chip feels warm" is not a measurement and a robot cannot feel
+anything. `/tsens/0` reads hundredths of a degree; 45-46 C with the radio
+associated, the CPU at 240 MHz and the LCD backlight on is ordinary for
+this part, and a flat trend is the thing that says nothing is running away.
+
+For a system that will end up in an enclosure with its radio on, this is
+the input a thermal-throttling decision needs, and it costs one driver.
+
 ### And one bug that was not the driver's
 
 Every pin reported a mismatch: written 1, reads 0. The driver was correct
@@ -954,6 +970,16 @@ written to.
 
 Ignoring a return value turned a correct refusal into what looked like
 broken hardware for several rounds of debugging.
+
+It then happened again within the hour. `MAX_DRIVERS` was 8, sized to what
+existed when it was written; `tsens` was the ninth, its registration failed
+with "no room", and the caller discarded the error. The symptom appeared
+three layers away as a descriptor that could not find its driver.
+
+Both registries now say so loudly and have headroom, and every
+registration in `io_bringup` is checked. **A registration that fails is a
+device that will not exist: complain where it happens, not where it is
+missed.**
 
 ## 9. Migration to a native kernel
 

@@ -185,18 +185,37 @@ static void io_bringup(void)
         return;
     }
 
-    rv9_scf_register();
-    rv9_rbf_register();
-    rv9_nfm_register();
-    rv9_pio_register();
-    rv9_drv_uart_register();
-    rv9_drv_lcdcon_register();
-    rv9_drv_ramdisk_register();
-    rv9_drv_flashdisk_register();
-    rv9_drv_net_register();
-    rv9_drv_gpio_register();
-    rv9_drv_pwm_register();
-    rv9_drv_adc_register();
+    /*
+     * Check every registration.
+     *
+     * These used to be called and discarded, so when the driver table
+     * filled up the ninth driver failed silently and only turned up later
+     * as a descriptor that could not find it. A registration that fails is
+     * a device that will not exist; say so now, not three layers away.
+     */
+    #define REGISTER(call)                                                  \
+        do {                                                                \
+            rv9_io_err_t _e = (call);                                       \
+            if (_e != RV9_IO_OK) {                                          \
+                ESP_LOGE(TAG, "%s failed: %s", #call, rv9_io_strerror(_e)); \
+            }                                                               \
+        } while (0)
+
+    REGISTER(rv9_scf_register());
+    REGISTER(rv9_rbf_register());
+    REGISTER(rv9_nfm_register());
+    REGISTER(rv9_pio_register());
+    REGISTER(rv9_drv_uart_register());
+    REGISTER(rv9_drv_lcdcon_register());
+    REGISTER(rv9_drv_ramdisk_register());
+    REGISTER(rv9_drv_flashdisk_register());
+    REGISTER(rv9_drv_net_register());
+    REGISTER(rv9_drv_gpio_register());
+    REGISTER(rv9_drv_pwm_register());
+    REGISTER(rv9_drv_adc_register());
+    REGISTER(rv9_drv_tsens_register());
+
+    #undef REGISTER
 
     int n = rv9_io_attach_from_modules();
     ESP_LOGI(TAG, "%d device%s attached from descriptor modules",
