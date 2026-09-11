@@ -123,6 +123,74 @@ bool rv9_sched_ages(void);
 void rv9_preempt_point(void);
 
 /* ------------------------------------------------------------------ */
+/* Locks usable from any context                                        */
+/*                                                                     */
+/* A mutex (above) is a scheduling object: it blocks the caller in      */
+/* whichever scheduler the caller belongs to. That is correct and       */
+/* useless for data shared between RV-9 threads and host-scheduled      */
+/* work -- a real-time process, or a driver's own task -- because       */
+/* those belong to different schedulers.                                */
+/*                                                                     */
+/* A lock works from either. Use it for structures both worlds touch:   */
+/* the process table, the path tables, driver state. Hold it briefly    */
+/* and never block inside it: an RV-9 thread waiting on one stalls the  */
+/* whole cooperative kernel until it is released.                       */
+/* ------------------------------------------------------------------ */
+
+typedef struct rv9_lock *rv9_lock_t;
+
+rv9_err_t rv9_lock_create(rv9_lock_t *out_lock);
+void      rv9_lock_destroy(rv9_lock_t lock);
+void      rv9_lock_acquire(rv9_lock_t lock);
+void      rv9_lock_release(rv9_lock_t lock);
+
+/* ------------------------------------------------------------------ */
+/* Real-time tasks                                                     */
+/*                                                                     */
+/* A class of task that is late if it is late. These do not run on      */
+/* RV-9's cooperative scheduler -- a control loop cannot depend on      */
+/* every other thread being polite -- but on a preemptive scheduler at  */
+/* the top of the priority order, released by a hardware timer.         */
+/*                                                                     */
+/* The shape is the one the native implementation will have when RV-9   */
+/* owns the machine, so control code written against this API does not  */
+/* get rewritten when the kernel underneath grows up.                   */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    uint32_t period_us;
+    uint64_t activations;
+    uint64_t overruns;        /* periods that elapsed while still working */
+    uint32_t max_jitter_us;   /* worst lateness of a release */
+    uint32_t max_exec_us;     /* worst time spent in one activation */
+    uint32_t last_exec_us;
+} rv9_rt_stats_t;
+
+rv9_err_t rv9_task_create_rt(rv9_task_fn fn, const char *name,
+                             size_t stack_bytes, void *arg,
+                             rv9_task_t *out_task);
+
+/* Called by the task itself, once, before its loop. */
+rv9_err_t rv9_rt_declare(uint32_t period_us);
+
+/*
+ * Sleep until the next period. Returns how many periods were missed while
+ * the caller was still working -- 0 when on time, negative on error.
+ *
+ * A missed deadline is reported rather than absorbed. A control loop that
+ * silently falls behind is worse than one that stops, because it looks
+ * correct right up until something hits something.
+ */
+int rv9_rt_wait(void);
+
+/* Give up the period and the timer. A real-time process that ends without
+   this leaves its slot occupied, and the next one cannot declare. */
+void rv9_rt_release(void);
+
+rv9_err_t rv9_rt_stats(rv9_rt_stats_t *out);
+rv9_err_t rv9_rt_stats_by_index(int index, rv9_rt_stats_t *out, bool *valid);
+
+/* ------------------------------------------------------------------ */
 /* Counting semaphores                                                 */
 /* ------------------------------------------------------------------ */
 

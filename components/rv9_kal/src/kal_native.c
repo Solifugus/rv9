@@ -191,13 +191,62 @@ rv9_err_t rv9_task_create(rv9_task_fn fn, const char *name, size_t stack_bytes,
 
 void rv9_task_delete(rv9_task_t task)
 {
-    if (task == NULL) rv9k_exit();
-    else              rv9k_thread_kill((rv9k_thread_t *)task);
+    if (task != NULL) {
+        rv9k_thread_kill((rv9k_thread_t *)task);
+        return;
+    }
+
+    /*
+     * Ending oneself, whichever scheduler one belongs to.
+     *
+     * A real-time process runs as a host task, and asking RV-9's kernel to
+     * end it does nothing -- so the task function returned, which FreeRTOS
+     * treats as a fatal error, correctly. The same oversight as delays:
+     * not every caller of the KAL is an RV-9 thread.
+     */
+    if (rv9k_self() != NULL) rv9k_exit();
+    else                     vTaskDelete(NULL);
 }
 
-rv9_task_t rv9_task_self(void) { return (rv9_task_t)rv9k_self(); }
-void       rv9_task_yield(void) { rv9k_yield(); }
-void       rv9_task_delay_ms(uint32_t ms) { rv9k_sleep_ms(ms); }
+/*
+ * Who is running, in whichever scheduler owns them.
+ *
+ * A real-time process is a host task, so returning only RV-9's notion of
+ * "current thread" left it with no identity at all: the process manager
+ * could not match it to a process, so it had no pid, no path table and no
+ * output. It ran perfectly and silently into the void.
+ *
+ * Handles from the two schedulers are distinct objects, so one comparison
+ * serves both.
+ */
+rv9_task_t rv9_task_self(void)
+{
+    rv9k_thread_t *t = rv9k_self();
+    if (t != NULL) return (rv9_task_t)t;
+    return (rv9_task_t)xTaskGetCurrentTaskHandle();
+}
+
+/*
+ * Not every caller is an RV-9 thread. Real-time processes and driver tasks
+ * run on the host's scheduler, and asking RV-9's kernel to sleep them does
+ * nothing at all -- which, at real-time priority, is a busy loop that stops
+ * the machine. Fall back to the host for callers it does not own.
+ */
+void rv9_task_yield(void)
+{
+    if (rv9k_self() != NULL) rv9k_yield();
+    else                     taskYIELD();
+}
+
+void rv9_task_delay_ms(uint32_t ms)
+{
+    if (rv9k_self() != NULL) {
+        rv9k_sleep_ms(ms);
+    } else {
+        TickType_t t = pdMS_TO_TICKS(ms);
+        vTaskDelay(t ? t : 1);
+    }
+}
 
 rv9_err_t rv9_task_priority_set(rv9_task_t task, int priority)
 {

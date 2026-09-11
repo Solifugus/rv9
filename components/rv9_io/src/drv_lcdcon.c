@@ -134,7 +134,7 @@ typedef struct {
     int       cx, cy;
     uint16_t *rowbuf;        /* one text row of pixels, w x ch */
 
-    rv9_mutex_t lock;
+    rv9_lock_t lock;
 } lcdcon_t;
 
 static inline char *cell(lcdcon_t *c, int row, int col)
@@ -281,7 +281,7 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
     c->rowbuf = rv9_alloc_dma((size_t)c->w * c->ch * sizeof(uint16_t));
 
     if (c->grid == NULL || c->dirty == NULL || c->rowbuf == NULL ||
-        rv9_mutex_create(&c->lock) != RV9_OK) {
+        rv9_lock_create(&c->lock) != RV9_OK) {
         rv9_free(c->grid);
         rv9_free(c->dirty);
         rv9_free(c->rowbuf);
@@ -381,10 +381,10 @@ static rv9_io_err_t lcdcon_write(rv9_dev_t *dev, const void *buf, size_t len,
 
     const char *s = (const char *)buf;
 
-    rv9_mutex_lock(c->lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(c->lock);
     for (size_t i = 0; i < len; i++) putch(c, s[i]);
     flush(c);
-    rv9_mutex_unlock(c->lock);
+    rv9_lock_release(c->lock);
 
     if (done) *done = len;
     return RV9_IO_OK;
@@ -400,12 +400,12 @@ static rv9_io_err_t lcdcon_setstat(rv9_dev_t *dev, uint32_t code, void *arg)
 
     if (code != LCDCON_SS_CLEAR) return RV9_IO_ERR_UNSUPPORTED;
 
-    rv9_mutex_lock(c->lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(c->lock);
     memset(c->grid, ' ', (size_t)c->cols * c->rows);
     c->cx = c->cy = 0;
     for (int r = 0; r < c->rows; r++) c->dirty[r] = true;
     flush(c);
-    rv9_mutex_unlock(c->lock);
+    rv9_lock_release(c->lock);
 
     return RV9_IO_OK;
 }

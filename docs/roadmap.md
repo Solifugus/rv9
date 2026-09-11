@@ -213,6 +213,28 @@ useful, working preparation, but preparation.*
 
 ---
 
+## Phase 8 — Real-time  ◐ periodic processes done
+
+Driven by a real use: RV-9 as a target for autonomous systems, where the
+control layer is late if it is late.
+
+- **Periodic real-time processes — done.** `rt <module> [period_us]`, or
+  `rv9_proc_fork_rt()`. Preemptive, above everything, released by a
+  hardware timer. Measured: 27 µs worst jitter at 1 kHz, 7 µs at 5 kHz,
+  no overruns, with WiFi up and the shell running.
+- **Timing is reported to the application** via `env->rt_stats()`, because
+  a control loop that cannot see its own jitter cannot report that it has
+  stopped being trustworthy.
+- Not done: aperiodic (event-triggered) real-time processes, which is what
+  a reactive layer wants — an interrupt or a message releasing a process
+  with the same latency guarantee as a period does.
+- Not done: bounded-latency I/O for real-time processes. Writing to a
+  device from a control loop currently takes the same locks as everyone
+  else.
+- Not done: priority inheritance on `rv9_lock_t`. A low-priority thread
+  holding a lock a real-time process wants is the classic inversion, and
+  the current answer is only that critical sections are short.
+
 ## Sequencing notes
 
 - **Phases 0-4 never need rewriting.** They sit above the KAL, so phase 7

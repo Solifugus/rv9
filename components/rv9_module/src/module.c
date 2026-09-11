@@ -28,7 +28,7 @@ static const char *TAG = "rv9-mod";
 
 static const esp_partition_t *s_store;
 static rv9_mod_entry_t       *s_dir;
-static rv9_mutex_t            s_lock;
+static rv9_lock_t            s_lock;
 
 const char *rv9_mod_strerror(rv9_mod_err_t err)
 {
@@ -90,7 +90,7 @@ static void dir_append(rv9_mod_entry_t *entry)
 
 int rv9_mod_dir_init(void)
 {
-    if (s_lock == NULL && rv9_mutex_create(&s_lock) != RV9_OK) {
+    if (s_lock == NULL && rv9_lock_create(&s_lock) != RV9_OK) {
         ESP_LOGE(TAG, "could not create directory lock");
         return 0;
     }
@@ -229,9 +229,9 @@ rv9_mod_err_t rv9_mod_register_image(const void *image, uint32_t len)
     e->entry    = (rv9_mod_entry_fn)((uint8_t *)copy + h->entry_offset);
     e->resident = true;
 
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
     dir_append(e);
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 
     ESP_LOGI(TAG, "loaded '%s' rev %u, %lu bytes, resident at %p",
              e->name, e->revision, (unsigned long)e->size, e->image);
@@ -245,20 +245,20 @@ rv9_mod_err_t rv9_mod_link(const char *name, rv9_mod_entry_t **out_entry)
     rv9_mod_entry_t *e = (rv9_mod_entry_t *)rv9_mod_find(name);
     if (e == NULL) return RV9_MOD_ERR_NOTFOUND;
 
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
 
     /* Already resident: share it. This is the whole point of reentrant
        module code. */
     if (e->image != NULL) {
         e->link_count++;
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         *out_entry = e;
         return RV9_MOD_OK;
     }
 
     void *image = rv9_alloc_exec(e->size);
     if (image == NULL) {
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         return RV9_MOD_ERR_NOMEM;
     }
 
@@ -271,7 +271,7 @@ rv9_mod_err_t rv9_mod_link(const char *name, rv9_mod_entry_t **out_entry)
 
     if (err != RV9_MOD_OK) {
         rv9_free(image);
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         return err;
     }
 
@@ -283,7 +283,7 @@ rv9_mod_err_t rv9_mod_link(const char *name, rv9_mod_entry_t **out_entry)
     /* We just wrote instructions through the data path. */
     rv9_isync();
 
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 
     ESP_LOGI(TAG, "linked '%s' at %p, entry %p",
              e->name, e->image, (void *)e->entry);
@@ -296,10 +296,10 @@ rv9_mod_err_t rv9_mod_unlink(rv9_mod_entry_t *entry)
 {
     if (entry == NULL) return RV9_MOD_ERR_INVAL;
 
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
 
     if (entry->link_count == 0) {
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         return RV9_MOD_ERR_INVAL;
     }
 
@@ -310,7 +310,7 @@ rv9_mod_err_t rv9_mod_unlink(rv9_mod_entry_t *entry)
         ESP_LOGI(TAG, "unlinked '%s', image freed", entry->name);
     }
 
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
     return RV9_MOD_OK;
 }
 
@@ -538,6 +538,13 @@ static int env_load(const char *path)
     return (err == RV9_MOD_OK) ? 0 : -(int)err;
 }
 
+static int env_fork_rt(const char *module, uint32_t period_us,
+                       const char *arg)
+{
+    return s_proc_ops && s_proc_ops->fork_rt
+           ? s_proc_ops->fork_rt(module, period_us, arg) : -1;
+}
+
 static int env_chain(const char *module)
 {
     return s_proc_ops && s_proc_ops->chain ? s_proc_ops->chain(module) : -1;
@@ -571,6 +578,14 @@ void rv9_mod_env_init(rv9_mod_env_t *env, void *statics,
     env->getstat      = env_getstat;
     env->setstat      = env_setstat;
     env->load         = env_load;
+
+    /* Real-time services are supplied by the process manager, which knows
+       whether the caller is entitled to them. A module run outside a
+       process gets stubs that refuse. */
+    env->rt_declare   = NULL;
+    env->rt_wait      = NULL;
+    env->rt_stats     = NULL;
+    env->fork_rt      = env_fork_rt;
 }
 
 rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result)

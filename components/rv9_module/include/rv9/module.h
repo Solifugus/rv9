@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     9
+#define RV9_MODULE_ABI     10
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -85,6 +85,22 @@ _Static_assert(sizeof(rv9_mod_header_t) == RV9_MODULE_HDR_LEN,
  * Appending fields is compatible; reordering or removing them is not, and
  * must bump RV9_MODULE_ABI.
  */
+/*
+ * What a real-time process can find out about its own timing.
+ *
+ * Exposed to the application deliberately: "real-time" is a property you
+ * measure, and a control loop that cannot see its own jitter cannot report
+ * that it has stopped being trustworthy.
+ */
+typedef struct __attribute__((packed)) {
+    uint32_t period_us;
+    uint32_t activations;
+    uint32_t overruns;
+    uint32_t max_jitter_us;
+    uint32_t max_exec_us;
+    uint32_t last_exec_us;
+} rv9_rt_report_t;
+
 typedef struct {
     /* --- ABI 1 --- */
     uint32_t    abi_version;
@@ -158,6 +174,30 @@ typedef struct {
      * store from something you reflash into something you add to.
      */
     int       (*load)(const char *path);
+
+    /* --- ABI 10: real-time control --- */
+    /*
+     * Declare this process periodic, then wait for each period.
+     *
+     *     env->rt_declare(1000);          // 1 kHz
+     *     for (;;) {
+     *         read_sensors(); compute(); drive_actuators();
+     *         int late = env->rt_wait();  // 0 when on time
+     *         if (late) ...               // fell behind; decide what that means
+     *     }
+     *
+     * rt_wait returns how many periods elapsed while the loop was still
+     * working. A control loop that silently misses deadlines is worse than
+     * one that stops, so the number is handed back rather than absorbed.
+     *
+     * Only a process forked into the real-time class may use these.
+     */
+    int       (*rt_declare)(uint32_t period_us);
+    int       (*rt_wait)(void);
+    int       (*rt_stats)(rv9_rt_report_t *out);
+    /* Fork another module into the real-time class. */
+    int       (*fork_rt)(const char *module, uint32_t period_us,
+                         const char *arg);
 } rv9_mod_env_t;
 
 /* Seek whence, matching the I/O manager. */
@@ -327,6 +367,7 @@ typedef struct {
     int (*procs)(void *buf, uint32_t len);   /* fills rv9_sys_proc_t records */
     int (*chain)(const char *module);
     int (*fork_arg)(const char *module, int priority, const char *arg);
+    int (*fork_rt)(const char *module, uint32_t period_us, const char *arg);
 } rv9_mod_proc_ops_t;
 
 void rv9_mod_set_proc_ops(const rv9_mod_proc_ops_t *ops);

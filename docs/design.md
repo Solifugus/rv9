@@ -687,6 +687,81 @@ The lesson is not about sizes. It is that on a machine with 300 KB, every
 buffer is taken from something else, and a subsystem that fails for want of
 memory rarely says so — it reports that it cannot connect.
 
+## 10. Real-time processes
+
+A control loop cannot depend on every other thread in the system being
+polite, and RV-9's own scheduler is cooperative. So a real-time process is
+**not an RV-9 thread**. It runs on a preemptive scheduler above everything
+else — above ordinary processes, above the task RV-9's kernel lives in,
+above the drivers — and is released by a hardware microsecond timer rather
+than by a software tick.
+
+```c
+env->rt_declare(1000);              /* 1 kHz */
+for (;;) {
+    read_sensors(); compute(); drive_actuators();
+    int late = env->rt_wait();      /* 0 when on time */
+    if (late) { ... }               /* fell behind; decide what that means */
+}
+```
+
+The class is not about importance, it is about consequence: an ordinary
+process that runs late is slow, a real-time process that runs late is
+wrong.
+
+### Measured, not claimed
+
+"Real-time" is a property you measure. Every release records how late it
+was and how long the work took, and a period that elapses while the loop
+is still working is counted as an overrun rather than quietly absorbed —
+a control loop that silently misses deadlines is worse than one that
+stops, because it looks correct right up until something hits something.
+
+`env->rt_stats()` hands those numbers to the application, because a loop
+that cannot see its own jitter cannot report that it has stopped being
+trustworthy.
+
+Measured on hardware, with WiFi associated and the shell running:
+
+| period | activations | worst jitter | worst execution | overruns |
+| --- | --- | --- | --- | --- |
+| 1000 µs (1 kHz) | 2000 | 27 µs | 34 µs | 0 |
+| 200 µs (5 kHz) | 2000 | 7 µs | 8 µs | 0 |
+
+### This shape survives step 3
+
+When RV-9 owns the machine, a real-time process becomes a native
+high-priority preemptible thread released by a hardware comparator —
+the same arrangement, implemented by RV-9 instead of borrowed. The API
+does not change, which matters because code written against it is control
+code, and control code should not be rewritten because the kernel
+underneath grew up.
+
+### What it cost: two schedulers in one system
+
+A real-time process is scheduled by the host while everything else is
+scheduled by RV-9, and every place the two meet had to be found:
+
+- **Locks.** A mutex blocks the caller in whichever scheduler the caller
+  belongs to, which is useless for data both worlds touch. `rv9_lock_t` is
+  a lock usable from any context, and the process table, path tables and
+  driver state now use it. Hold it briefly and never block inside it: an
+  RV-9 thread waiting on one stalls the cooperative kernel until it is
+  released.
+- **Waiting for a process to exit** was a semaphore signalled in one world
+  and waited on in the other. It polls a word now.
+- **`rv9_task_delete(NULL)`** ended the RV-9 thread, which for a host task
+  is nothing at all — so the task function returned, which FreeRTOS
+  correctly treats as fatal.
+- **`rv9_task_self()`** returned RV-9's notion of the current thread, which
+  is NULL for a host task. A real-time process therefore had no identity,
+  no pid, no path table and no output: it ran perfectly and silently into
+  the void. Handles from the two schedulers are distinct objects, so one
+  call now answers for both.
+
+Every one of those was the same mistake in a different place: *not every
+caller of the KAL is an RV-9 thread.*
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

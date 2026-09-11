@@ -26,7 +26,7 @@ static const char *TAG = "rv9-proc";
 #define PROC_DEFAULT_STACK 4096
 
 static rv9_proc_t *s_procs;
-static rv9_mutex_t s_lock;
+static rv9_lock_t s_lock;
 static rv9_pid_t   s_next_pid = 1;
 static bool        s_aging = true;
 static bool        s_running;
@@ -77,18 +77,54 @@ static rv9_proc_t *current_locked(void)
 /* The environment handed to a process's module                        */
 /* ------------------------------------------------------------------ */
 
+/* Real-time services, refused to processes that are not in that class:
+   declaring a period from an ordinary process would promise a guarantee
+   the scheduler underneath it cannot make. */
+static int env_rt_declare(uint32_t period_us)
+{
+    rv9_lock_acquire(s_lock);
+    rv9_proc_t *p = current_locked();
+    bool ok = (p != NULL && p->cls == RV9_CLASS_REALTIME);
+    if (ok) p->period_us = period_us;
+    rv9_lock_release(s_lock);
+
+    if (!ok) return -1;
+    return rv9_rt_declare(period_us) == RV9_OK ? 0 : -2;
+}
+
+static int env_rt_wait(void)
+{
+    return rv9_rt_wait();
+}
+
+static int env_rt_stats(rv9_rt_report_t *out)
+{
+    if (out == NULL) return -1;
+
+    rv9_rt_stats_t st;
+    if (rv9_rt_stats(&st) != RV9_OK) return -1;
+
+    out->period_us     = st.period_us;
+    out->activations   = (uint32_t)st.activations;
+    out->overruns      = (uint32_t)st.overruns;
+    out->max_jitter_us = st.max_jitter_us;
+    out->max_exec_us   = st.max_exec_us;
+    out->last_exec_us  = st.last_exec_us;
+    return 0;
+}
+
 static uint32_t env_signals_take(void)
 {
     rv9_preempt_point();
 
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
     rv9_proc_t *p = current_locked();
     uint32_t sig = 0;
     if (p) {
         sig = p->signals;
         p->signals = 0;
     }
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
     return sig;
 }
 
@@ -111,9 +147,9 @@ static void proc_trampoline(void *arg)
      * after this line has run. fork() writes the same value again later,
      * which is harmless.
      */
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
     p->task = rv9_task_self();
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 
     /*
      * A process may outlive the module it started as: chain() swaps the
@@ -130,18 +166,21 @@ static void proc_trampoline(void *arg)
     rv9_mod_env_t env;
     rv9_mod_env_init(&env, p->statics, h->static_size, p->pid);
     env.signals_take = env_signals_take;
+    env.rt_declare   = env_rt_declare;
+    env.rt_wait      = env_rt_wait;
+    env.rt_stats     = env_rt_stats;
     env.arg          = p->arg[0] ? p->arg : NULL;
 
     rc = p->module->entry(&env);
 
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
     bool chaining = p->chain_pending;
     char next_name[32];
     if (chaining) {
         memcpy(next_name, p->chain_to, sizeof(next_name));
         p->chain_pending = false;
     }
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 
     if (!chaining) break;
 
@@ -168,22 +207,27 @@ static void proc_trampoline(void *arg)
         }
     }
 
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
     p->module = next;
     strncpy(p->name, next_name, sizeof(p->name) - 1);
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 
     ESP_LOGI(TAG, "pid %u chained to '%s'", (unsigned)p->pid, next_name);
     }
+
+    /* A real-time process gives its period back, or the next one cannot
+       declare: the timer and its release semaphore belong to the slot, not
+       to the module that borrowed it. */
+    if (p->cls == RV9_CLASS_REALTIME) rv9_rt_release();
 
     /* Let the I/O manager close whatever this process left open, before we
        mark it dead and someone waiting on it wakes up. */
     if (s_on_exit) s_on_exit(p->pid);
 
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
     p->exit_status = rc;
     p->state       = RV9_PROC_EXITED;
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 
     ESP_LOGI(TAG, "pid %u ('%s') exited, status %d",
              (unsigned)p->pid, p->name, rc);
@@ -194,7 +238,6 @@ static void proc_trampoline(void *arg)
     rv9_free(p->statics);
     p->statics = NULL;
 
-    rv9_sem_give(p->exited);
     rv9_task_delete(NULL);
 }
 
@@ -210,7 +253,7 @@ static void ager_task(void *arg)
         rv9_task_delay_ms(AGE_PERIOD_MS);
         if (!s_aging) continue;
 
-        rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+        rv9_lock_acquire(s_lock);
 
         /* Whoever currently ranks highest is the one getting the CPU, so it
            is the one whose age we reset. Everyone else climbs. */
@@ -240,7 +283,7 @@ static void ager_task(void *arg)
             }
         }
 
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
     }
 }
 
@@ -267,7 +310,7 @@ static int proc_wait_op(int pid, int *status, uint32_t timeout_ms)
    sysinfo(RV9_SYS_MEM) learns the process count. */
 static int proc_list_op(void *buf, uint32_t len)
 {
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
 
     uint32_t max = buf ? len / sizeof(rv9_sys_proc_t) : 0;
     rv9_sys_proc_t *out = (rv9_sys_proc_t *)buf;
@@ -288,7 +331,7 @@ static int proc_list_op(void *buf, uint32_t len)
         n++;
     }
 
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
     return (int)n;
 }
 
@@ -296,6 +339,14 @@ static int proc_fork_arg_op(const char *module, int priority, const char *arg)
 {
     rv9_pid_t pid = 0;
     rv9_proc_err_t err = rv9_proc_fork(module, priority, arg, &pid);
+    return (err == RV9_PROC_OK) ? (int)pid : -(int)err;
+}
+
+static int proc_fork_rt_op(const char *module, uint32_t period_us,
+                           const char *arg)
+{
+    rv9_pid_t pid = 0;
+    rv9_proc_err_t err = rv9_proc_fork_rt(module, period_us, arg, &pid);
     return (err == RV9_PROC_OK) ? (int)pid : -(int)err;
 }
 
@@ -310,13 +361,14 @@ static const rv9_mod_proc_ops_t s_mod_proc_ops = {
     .procs = proc_list_op,
     .chain = proc_chain_op,
     .fork_arg = proc_fork_arg_op,
+    .fork_rt  = proc_fork_rt_op,
 };
 
 rv9_proc_err_t rv9_proc_init(void)
 {
     if (s_running) return RV9_PROC_OK;
 
-    if (rv9_mutex_create(&s_lock) != RV9_OK) return RV9_PROC_ERR_NOMEM;
+    if (rv9_lock_create(&s_lock) != RV9_OK) return RV9_PROC_ERR_NOMEM;
 
     /*
      * Only run an ager if the scheduler underneath does not age for us.
@@ -346,15 +398,35 @@ rv9_pid_t rv9_proc_current_pid(void)
 {
     if (s_lock == NULL) return RV9_PID_NONE;
 
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
     rv9_proc_t *p = current_locked();
     rv9_pid_t pid = p ? p->pid : RV9_PID_NONE;
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
     return pid;
 }
 
+static rv9_proc_err_t fork_common(const char *module_name, int priority,
+                                  const char *arg, rv9_proc_class_t cls,
+                                  uint32_t period_us, rv9_pid_t *out_pid);
+
 rv9_proc_err_t rv9_proc_fork(const char *module_name, int priority,
                              const char *arg, rv9_pid_t *out_pid)
+{
+    return fork_common(module_name, priority, arg, RV9_CLASS_NORMAL, 0,
+                       out_pid);
+}
+
+rv9_proc_err_t rv9_proc_fork_rt(const char *module_name, uint32_t period_us,
+                                const char *arg, rv9_pid_t *out_pid)
+{
+    if (period_us == 0) return RV9_PROC_ERR_INVAL;
+    return fork_common(module_name, RV9_PRIO_MAX, arg, RV9_CLASS_REALTIME,
+                       period_us, out_pid);
+}
+
+static rv9_proc_err_t fork_common(const char *module_name, int priority,
+                                  const char *arg, rv9_proc_class_t cls,
+                                  uint32_t period_us, rv9_pid_t *out_pid)
 {
     if (module_name == NULL) return RV9_PROC_ERR_INVAL;
 
@@ -382,16 +454,9 @@ rv9_proc_err_t rv9_proc_fork(const char *module_name, int priority,
         }
     }
 
-    if (rv9_sem_create(1, 0, &p->exited) != RV9_OK) {
-        rv9_free(p->statics);
-        rv9_free(p);
-        rv9_mod_unlink(mod);
-        return RV9_PROC_ERR_NOMEM;
-    }
-
     rv9_pid_t parent = rv9_proc_current_pid();
 
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
 
     p->pid                = s_next_pid++;
     p->parent             = parent;
@@ -401,50 +466,76 @@ rv9_proc_err_t rv9_proc_fork(const char *module_name, int priority,
     p->effective_priority = priority;
     p->state              = RV9_PROC_ACTIVE;
     p->started_ms         = rv9_time_ms();
+    p->cls                = cls;
+    p->period_us          = period_us;
     strncpy(p->name, module_name, sizeof(p->name) - 1);
     if (arg != NULL) strncpy(p->arg, arg, sizeof(p->arg) - 1);
 
     p->next = s_procs;
     s_procs = p;
 
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 
     /* Hand the child whatever the parent had open, before it can run. */
     if (s_on_fork) s_on_fork(parent, p->pid);
 
     size_t stack = h->stack_size ? h->stack_size : PROC_DEFAULT_STACK;
-    rv9_err_t err = rv9_task_create(proc_trampoline, p->name, stack, p,
-                                    priority, &p->task);
+
+    /* A real-time process is not an RV-9 thread: it runs preemptively
+       above everything, because its latency must not depend on anyone
+       else's manners. See rv9/kal.h. */
+    rv9_err_t err = (cls == RV9_CLASS_REALTIME)
+        ? rv9_task_create_rt(proc_trampoline, p->name, stack, p, &p->task)
+        : rv9_task_create(proc_trampoline, p->name, stack, p, priority,
+                          &p->task);
     if (err != RV9_OK) {
         /* Leave the descriptor in the table marked dead rather than unpick
            the list from here; it costs a few bytes and keeps this simple. */
-        rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+        rv9_lock_acquire(s_lock);
         p->state = RV9_PROC_EXITED;
         p->exit_status = -1;
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         rv9_mod_unlink(mod);
         return RV9_PROC_ERR_NOMEM;
     }
 
-    ESP_LOGI(TAG, "forked pid %u '%s' at priority %d",
-             (unsigned)p->pid, p->name, priority);
+    if (cls == RV9_CLASS_REALTIME) {
+        ESP_LOGI(TAG, "forked pid %u '%s' real-time, %lu us period",
+                 (unsigned)p->pid, p->name, (unsigned long)period_us);
+    } else {
+        ESP_LOGI(TAG, "forked pid %u '%s' at priority %d",
+                 (unsigned)p->pid, p->name, priority);
+    }
 
     if (out_pid) *out_pid = p->pid;
     return RV9_PROC_OK;
 }
 
+/*
+ * Wait by watching, not by blocking on a semaphore.
+ *
+ * A real-time process runs on the host's scheduler and an ordinary one on
+ * RV-9's, so a semaphore handed between them would be signalled in one
+ * world and waited on in the other. Polling a word costs a few wakeups and
+ * works whichever scheduler either party belongs to.
+ */
+#define WAIT_POLL_MS 5
+
 rv9_proc_err_t rv9_proc_wait(rv9_pid_t pid, int *out_status, uint32_t timeout_ms)
 {
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
     rv9_proc_t *p = find_locked(pid);
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 
     if (p == NULL) return RV9_PROC_ERR_NOTFOUND;
 
-    if (p->state != RV9_PROC_EXITED) {
-        if (rv9_sem_take(p->exited, timeout_ms) != RV9_OK) {
+    uint64_t deadline = rv9_time_ms() + timeout_ms;
+
+    while (p->state != RV9_PROC_EXITED) {
+        if (timeout_ms != RV9_WAIT_FOREVER && rv9_time_ms() >= deadline) {
             return RV9_PROC_ERR_TIMEOUT;
         }
+        rv9_task_delay_ms(WAIT_POLL_MS);
     }
 
     if (out_status) *out_status = p->exit_status;
@@ -455,44 +546,44 @@ rv9_proc_err_t rv9_proc_chain(const char *module_name)
 {
     if (module_name == NULL) return RV9_PROC_ERR_INVAL;
 
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
     rv9_proc_t *p = current_locked();
     if (p != NULL) {
         strncpy(p->chain_to, module_name, sizeof(p->chain_to) - 1);
         p->chain_to[sizeof(p->chain_to) - 1] = '\0';
         p->chain_pending = true;
     }
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 
     return p ? RV9_PROC_OK : RV9_PROC_ERR_NOTFOUND;
 }
 
 rv9_proc_err_t rv9_proc_signal(rv9_pid_t pid, uint32_t signals)
 {
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
     rv9_proc_t *p = find_locked(pid);
     if (p != NULL && p->state != RV9_PROC_EXITED) {
         p->signals |= signals;
     }
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 
     return p ? RV9_PROC_OK : RV9_PROC_ERR_NOTFOUND;
 }
 
 const rv9_proc_t *rv9_proc_get(rv9_pid_t pid)
 {
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
     rv9_proc_t *p = find_locked(pid);
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
     return p;
 }
 
 const void *rv9_proc_statics(rv9_pid_t pid)
 {
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
     rv9_proc_t *p = find_locked(pid);
     const void *st = p ? p->statics : NULL;
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
     return st;
 }
 
@@ -511,14 +602,14 @@ void rv9_proc_aging_set(bool enabled)
     if (!enabled) {
         /* Drop everyone back to their base priority, so the effect of aging
            being off is immediate and unambiguous. */
-        rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+        rv9_lock_acquire(s_lock);
         for (rv9_proc_t *p = s_procs; p; p = p->next) {
             if (p->state != RV9_PROC_ACTIVE) continue;
             p->age = 0;
             p->effective_priority = p->base_priority;
             rv9_task_priority_set(p->task, p->base_priority);
         }
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
     }
 }
 

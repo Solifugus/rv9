@@ -41,7 +41,7 @@ typedef struct {
     const esp_partition_t *part;
     uint32_t               sectors;
     uint8_t                scratch[ERASE_SIZE];
-    rv9_mutex_t            lock;
+    rv9_lock_t            lock;
 } flashdisk_t;
 
 static rv9_io_err_t flashdisk_init(rv9_dev_t *dev)
@@ -58,7 +58,7 @@ static rv9_io_err_t flashdisk_init(rv9_dev_t *dev)
         return RV9_IO_ERR_NOTFOUND;
     }
 
-    if (rv9_mutex_create(&f->lock) != RV9_OK) {
+    if (rv9_lock_create(&f->lock) != RV9_OK) {
         rv9_free(f);
         return RV9_IO_ERR_NOMEM;
     }
@@ -106,7 +106,7 @@ static rv9_io_err_t flashdisk_write(rv9_dev_t *dev, uint32_t lsn,
     const uint8_t *src = (const uint8_t *)buf;
     rv9_io_err_t result = RV9_IO_OK;
 
-    rv9_mutex_lock(f->lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(f->lock);
 
     uint32_t done = 0;
     while (done < count) {
@@ -141,7 +141,7 @@ static rv9_io_err_t flashdisk_write(rv9_dev_t *dev, uint32_t lsn,
         done += here;
     }
 
-    rv9_mutex_unlock(f->lock);
+    rv9_lock_release(f->lock);
     return result;
 }
 

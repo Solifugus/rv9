@@ -21,7 +21,7 @@ static const char *TAG = "rv9-io";
 static const rv9_filemgr_t *s_filemgrs[MAX_FILEMGRS];
 static const rv9_driver_t  *s_drivers[MAX_DRIVERS];
 static rv9_dev_t           *s_devs;
-static rv9_mutex_t          s_lock;
+static rv9_lock_t          s_lock;
 
 /*
  * Per-process path tables. Kept here rather than in the process descriptor
@@ -332,18 +332,18 @@ int rv9_io_open(const char *name, uint32_t mode)
     const char *rest = "";
     split_path(name, devname, sizeof(devname), &rest);
 
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
 
     rv9_dev_t *dev = find_dev(devname);
     if (dev == NULL) {
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         return -RV9_IO_ERR_NOTFOUND;
     }
 
     rv9_pid_t pid = rv9_proc_current_pid();
     proc_paths_t *t = table_for(pid, true);
     if (t == NULL) {
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         return -RV9_IO_ERR_NOMEM;
     }
 
@@ -352,13 +352,13 @@ int rv9_io_open(const char *name, uint32_t mode)
         if (t->paths[i] == NULL) { num = i; break; }
     }
     if (num < 0) {
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         return -RV9_IO_ERR_NOPATHS;
     }
 
     rv9_path_t *p = path_new(dev, mode);
     if (p == NULL) {
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         return -RV9_IO_ERR_NOMEM;
     }
 
@@ -366,15 +366,15 @@ int rv9_io_open(const char *name, uint32_t mode)
        then let go of the lock: what follows may block for a long time. */
     t->paths[num] = p;
     dev->open_count++;
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 
     rv9_io_err_t err = path_open(p, rest);
 
     if (err != RV9_IO_OK) {
-        rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+        rv9_lock_acquire(s_lock);
         t->paths[num] = NULL;
         if (dev->open_count) dev->open_count--;
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         rv9_free(p);
         return -err;
     }
@@ -384,19 +384,19 @@ int rv9_io_open(const char *name, uint32_t mode)
 
 rv9_io_err_t rv9_io_close(int num)
 {
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
 
     rv9_pid_t pid = rv9_proc_current_pid();
     proc_paths_t *t = table_for(pid, false);
     if (t == NULL || num < 0 || num >= RV9_MAX_PATHS || t->paths[num] == NULL) {
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         return RV9_IO_ERR_BADPATH;
     }
 
     path_release(t->paths[num]);
     t->paths[num] = NULL;
 
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
     return RV9_IO_OK;
 }
 
@@ -445,13 +445,13 @@ rv9_io_err_t rv9_io_dup2(int from, int to)
     if (from == to) return RV9_IO_OK;
     if (to < 0 || to >= RV9_MAX_PATHS) return RV9_IO_ERR_BADPATH;
 
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
 
     rv9_pid_t pid = rv9_proc_current_pid();
     proc_paths_t *t = table_for(pid, true);
     if (t == NULL || from < 0 || from >= RV9_MAX_PATHS ||
         t->paths[from] == NULL) {
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         return RV9_IO_ERR_BADPATH;
     }
 
@@ -460,7 +460,7 @@ rv9_io_err_t rv9_io_dup2(int from, int to)
     t->paths[from]->refs++;
     t->paths[to] = t->paths[from];
 
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
     return RV9_IO_OK;
 }
 
@@ -472,9 +472,9 @@ rv9_io_err_t rv9_io_remove(const char *name)
     const char *rest = "";
     split_path(name, devname, sizeof(devname), &rest);
 
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
     rv9_dev_t *dev = find_dev(devname);
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 
     if (dev == NULL) return RV9_IO_ERR_NOTFOUND;
     if (dev->fmgr->remove == NULL) return RV9_IO_ERR_UNSUPPORTED;
@@ -522,11 +522,11 @@ rv9_io_err_t rv9_io_setstat(int num, uint32_t code, void *arg)
  */
 static void io_on_fork(rv9_pid_t parent, rv9_pid_t child)
 {
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
 
     proc_paths_t *ct = table_for(child, true);
     if (ct == NULL) {
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         return;
     }
 
@@ -538,7 +538,7 @@ static void io_on_fork(rv9_pid_t parent, rv9_pid_t child)
             pt->paths[i]->refs++;
             ct->paths[i] = pt->paths[i];
         }
-        rv9_mutex_unlock(s_lock);
+        rv9_lock_release(s_lock);
         return;
     }
 
@@ -556,12 +556,12 @@ static void io_on_fork(rv9_pid_t parent, rv9_pid_t child)
         }
     }
 
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 }
 
 static void io_on_exit(rv9_pid_t pid)
 {
-    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(s_lock);
 
     proc_paths_t **pp = &s_tables;
     while (*pp && (*pp)->pid != pid) pp = &(*pp)->next;
@@ -576,7 +576,7 @@ static void io_on_exit(rv9_pid_t pid)
         rv9_free(t);
     }
 
-    rv9_mutex_unlock(s_lock);
+    rv9_lock_release(s_lock);
 }
 
 rv9_io_err_t rv9_io_set_system_std(const char *in, const char *out)
@@ -661,7 +661,7 @@ static const rv9_mod_io_ops_t s_mod_io_ops = {
 rv9_io_err_t rv9_io_init(void)
 {
     if (s_lock != NULL) return RV9_IO_OK;
-    if (rv9_mutex_create(&s_lock) != RV9_OK) return RV9_IO_ERR_NOMEM;
+    if (rv9_lock_create(&s_lock) != RV9_OK) return RV9_IO_ERR_NOMEM;
 
     rv9_proc_set_hooks(io_on_fork, io_on_exit);
     rv9_mod_set_io_ops(&s_mod_io_ops);

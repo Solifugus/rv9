@@ -60,6 +60,19 @@ typedef uint16_t rv9_pid_t;
 /* Paths a process may hold open at once. */
 #define RV9_MAX_PATHS 8
 
+/*
+ * What kind of work a process is.
+ *
+ * The distinction is not importance, it is consequence. An ordinary
+ * process that runs late is slow; a real-time process that runs late is
+ * wrong. They are scheduled by different mechanisms for that reason --
+ * see rv9/kal.h.
+ */
+typedef enum {
+    RV9_CLASS_NORMAL = 0,
+    RV9_CLASS_REALTIME,
+} rv9_proc_class_t;
+
 typedef enum {
     RV9_PROC_ACTIVE = 1,   /* runnable or running */
     RV9_PROC_WAITING,      /* blocked on something */
@@ -76,6 +89,8 @@ typedef struct rv9_proc {
     rv9_mod_entry_t  *module;
     void             *statics;
     rv9_task_t        task;
+    rv9_proc_class_t  cls;
+    uint32_t          period_us;      /* real-time processes only */
 
     int               base_priority;
     int               age;              /* aging counter, 0 when running */
@@ -86,7 +101,6 @@ typedef struct rv9_proc {
     uint32_t          signals;          /* pending, cleared when taken */
 
     uint64_t          started_ms;
-    rv9_sem_t         exited;
 
     char              arg[64];        /* what fork was given, for env->arg */
 
@@ -117,6 +131,18 @@ rv9_proc_err_t rv9_proc_init(void);
  */
 rv9_proc_err_t rv9_proc_fork(const char *module_name, int priority,
                              const char *arg, rv9_pid_t *out_pid);
+
+/*
+ * Fork into the real-time class.
+ *
+ * The process is scheduled preemptively above everything else and released
+ * by a hardware timer, so its latency does not depend on the behaviour of
+ * any other process. It must declare its period and wait on it; a
+ * real-time process that never waits is simply the highest-priority
+ * busy loop in the system, which is a way to stop a machine.
+ */
+rv9_proc_err_t rv9_proc_fork_rt(const char *module_name, uint32_t period_us,
+                                const char *arg, rv9_pid_t *out_pid);
 
 /* Block until a process exits. timeout_ms may be RV9_WAIT_FOREVER. */
 rv9_proc_err_t rv9_proc_wait(rv9_pid_t pid, int *out_status, uint32_t timeout_ms);

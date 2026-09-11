@@ -71,7 +71,7 @@ typedef struct {
     rbf_ident_t ident;
     uint32_t    sector_count;
     bool        mounted;
-    rv9_mutex_t lock;
+    rv9_lock_t lock;
     uint8_t     scratch[SECTOR_SIZE];   /* one shared bounce buffer */
 } rbf_mount_t;
 
@@ -208,7 +208,7 @@ static rv9_io_err_t rbf_mount(rv9_dev_t *dev)
 
     rbf_mount_t *m = rv9_calloc(1, sizeof(*m));
     if (m == NULL) return RV9_IO_ERR_NOMEM;
-    if (rv9_mutex_create(&m->lock) != RV9_OK) {
+    if (rv9_lock_create(&m->lock) != RV9_OK) {
         rv9_free(m);
         return RV9_IO_ERR_NOMEM;
     }
@@ -374,7 +374,7 @@ static rv9_io_err_t rbf_open(rv9_path_t *path, const char *rest)
         return RV9_IO_OK;
     }
 
-    rv9_mutex_lock(m->lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(m->lock);
 
     rbf_dirent_t ent;
     int index = dir_find(dev, m, rest, &ent);
@@ -418,7 +418,7 @@ static rv9_io_err_t rbf_open(rv9_path_t *path, const char *rest)
         err = RV9_IO_ERR_NOTFOUND;
     }
 
-    rv9_mutex_unlock(m->lock);
+    rv9_lock_release(m->lock);
 
     if (err != RV9_IO_OK) {
         rv9_free(st);
@@ -437,9 +437,9 @@ static rv9_io_err_t rbf_close(rv9_path_t *path)
 
     if (st->dirty && !st->is_dir) {
         rbf_mount_t *m = (rbf_mount_t *)path->dev->fmgr_state;
-        rv9_mutex_lock(m->lock, RV9_WAIT_FOREVER);
+        rv9_lock_acquire(m->lock);
         fd_write(path->dev, st->fd_lsn, &st->fd);
-        rv9_mutex_unlock(m->lock);
+        rv9_lock_release(m->lock);
     }
 
     rv9_free(st);
@@ -462,7 +462,7 @@ static rv9_io_err_t dir_read(rv9_path_t *path, void *buf, size_t len,
     uint32_t skip = (uint32_t)(path->pos / (int64_t)sizeof(rv9_dirent_t));
     uint32_t seen = 0;
 
-    rv9_mutex_lock(m->lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(m->lock);
 
     for (uint32_t s = 0; s < m->ident.root_sectors && produced < want; s++) {
         if (rd(dev, m->ident.root_lsn + s, m->scratch) != RV9_IO_OK) break;
@@ -484,7 +484,7 @@ static rv9_io_err_t dir_read(rv9_path_t *path, void *buf, size_t len,
         }
     }
 
-    rv9_mutex_unlock(m->lock);
+    rv9_lock_release(m->lock);
 
     path->pos += (int64_t)produced * (int64_t)sizeof(rv9_dirent_t);
     if (done) *done = produced * sizeof(rv9_dirent_t);
@@ -510,7 +510,7 @@ static rv9_io_err_t rbf_read(rv9_path_t *path, void *buf, size_t len,
     uint8_t *out = (uint8_t *)buf;
     size_t moved = 0;
 
-    rv9_mutex_lock(m->lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(m->lock);
 
     while (moved < len) {
         uint32_t lsn = offset_to_lsn(&st->fd, pos);
@@ -527,7 +527,7 @@ static rv9_io_err_t rbf_read(rv9_path_t *path, void *buf, size_t len,
         pos   += chunk;
     }
 
-    rv9_mutex_unlock(m->lock);
+    rv9_lock_release(m->lock);
 
     path->pos = pos;
     if (done) *done = moved;
@@ -548,7 +548,7 @@ static rv9_io_err_t rbf_write(rv9_path_t *path, const void *buf, size_t len,
     uint32_t pos = (uint32_t)path->pos;
     size_t moved = 0;
 
-    rv9_mutex_lock(m->lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(m->lock);
 
     while (moved < len) {
         uint32_t needed = (pos + SECTOR_SIZE) / SECTOR_SIZE;
@@ -583,7 +583,7 @@ static rv9_io_err_t rbf_write(rv9_path_t *path, const void *buf, size_t len,
 
 out:
     if (pos > st->fd.size) { st->fd.size = pos; st->dirty = true; }
-    rv9_mutex_unlock(m->lock);
+    rv9_lock_release(m->lock);
 
     path->pos = pos;
     if (done) *done = moved;
@@ -626,7 +626,7 @@ static rv9_io_err_t rbf_remove(rv9_dev_t *dev, const char *name)
     rbf_mount_t *m = (rbf_mount_t *)dev->fmgr_state;
     if (m == NULL || name == NULL || name[0] == '\0') return RV9_IO_ERR_INVAL;
 
-    rv9_mutex_lock(m->lock, RV9_WAIT_FOREVER);
+    rv9_lock_acquire(m->lock);
 
     rbf_dirent_t ent;
     int index = dir_find(dev, m, name, &ent);
@@ -643,7 +643,7 @@ static rv9_io_err_t rbf_remove(rv9_dev_t *dev, const char *name)
         err = dir_write(dev, m, index, &ent);
     }
 
-    rv9_mutex_unlock(m->lock);
+    rv9_lock_release(m->lock);
     return err;
 }
 

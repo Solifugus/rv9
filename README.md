@@ -26,6 +26,12 @@ passes the same KAL conformance suite as FreeRTOS
 ```
 
 ```
+rv9> rt control 1000
+control: 2000 activations at 1000 us
+  worst jitter   27 us
+  worst execute  34 us
+  overruns       0
+
 rv9> mdir
 name        type    rev  size link
 desc_term   descrip 5    132   0

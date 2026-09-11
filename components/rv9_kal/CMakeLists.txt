@@ -11,6 +11,9 @@ else()
     set(kal_backend "src/kal_freertos.c")
 endif()
 
-idf_component_register(SRCS ${kal_backend}
+# kal_rt.c is built either way: real-time tasks are hosted by the host's
+# preemptive scheduler regardless of which kernel runs everything else,
+# because RV-9's own is cooperative and cannot bound latency.
+idf_component_register(SRCS ${kal_backend} "src/kal_rt.c"
                        INCLUDE_DIRS "include"
                        REQUIRES rv9_kernel freertos esp_timer heap)
