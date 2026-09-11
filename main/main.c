@@ -264,8 +264,24 @@ static void term_banner(void)
  *
  * The number that matters is how long urgent waited.
  */
-#define INV_HOLD_MS   400     /* how long the holder keeps the lock */
-#define INV_MEDIUM_MS 600     /* how long the irrelevant hog runs */
+static void inversion_demo_body(void);
+
+/*
+ * Deliberately short.
+ *
+ * An earlier version held the lock for 400 ms and hogged for 600. That
+ * measures the same thing and creates half a second of CPU monopoly at the
+ * top of the priority order -- because the real-time waiter blocking on the
+ * mutex makes FreeRTOS lend *its* priority to the task the kernel runs in,
+ * which then executes CPU-bound threads at that priority. WiFi and the
+ * console starve, and the result looked like a lock bug for some time.
+ *
+ * A real control loop does not monopolise a CPU for half a second, and
+ * neither should a test of one. The effect is proportional, so a tenth of
+ * the duration shows it just as clearly.
+ */
+#define INV_HOLD_MS   40      /* how long the holder keeps the lock */
+#define INV_MEDIUM_MS 60      /* how long the irrelevant hog runs */
 
 static rv9_lock_t s_inv_lock;
 static volatile bool s_inv_go;
@@ -328,26 +344,52 @@ static uint32_t inversion_round(bool inherit)
     rv9_task_create(inv_medium, "inv-med", 8192, NULL, RV9_PRIO_HIGH, NULL);
     rv9_task_create_rt(inv_urgent, "inv-urgent", 4096, NULL, NULL);
 
-    for (int i = 0; i < 400 && s_inv_wait_ms == 0; i++) rv9_task_delay_ms(10);
+    for (int i = 0; i < 200 && s_inv_wait_ms == 0; i++) rv9_task_delay_ms(5);
 
     rv9_task_delay_ms(INV_MEDIUM_MS);   /* let the hog finish */
     return s_inv_wait_ms;
 }
 
-static void inversion_demo(void)
+/*
+ * Run well after boot, not during it.
+ *
+ * This demonstration puts a task at the very top of the priority order
+ * while it runs. Doing that at 2.8 s -- which is exactly when the radio is
+ * associating -- starved the WiFi driver during its most timing-sensitive
+ * moment, and the result was stalls and panics that looked like a lock bug
+ * and were not one.
+ *
+ * The measurement is the same whenever it is taken. Taking it once the
+ * system is idle costs nothing and tells the truth about the locks rather
+ * than about what else was happening at the time.
+ */
+#define INVERSION_DELAY_MS 15000
+
+static void inversion_task(void *arg)
+{
+    (void)arg;
+    rv9_task_delay_ms(INVERSION_DELAY_MS);
+    inversion_demo_body();
+    rv9_task_delete(NULL);
+}
+
+static void inversion_demo_body(void)
 {
     if (rv9_lock_create(&s_inv_lock) != RV9_OK) return;
 
-    ESP_LOGI(TAG, "--- priority inversion ---");
+    /* At warning level so it is visible: the shell quiets the log to WARN
+       while it owns the console, and this runs long after the shell has
+       started. */
+    ESP_LOGW(TAG, "--- priority inversion ---");
 
     uint32_t without = inversion_round(false);
     uint32_t with    = inversion_round(true);
 
-    ESP_LOGI(TAG, "urgent waited %lu ms without inheritance, %lu ms with",
+    ESP_LOGW(TAG, "urgent waited %lu ms without inheritance, %lu ms with",
              (unsigned long)without, (unsigned long)with);
 
     if (with < without) {
-        ESP_LOGI(TAG, "inheritance cut the wait by %lu ms: the holder ran "
+        ESP_LOGW(TAG, "inheritance cut the wait by %lu ms: the holder ran "
                       "instead of the hog", (unsigned long)(without - with));
     } else {
         ESP_LOGW(TAG, "inheritance made no measurable difference here");
@@ -356,6 +398,12 @@ static void inversion_demo(void)
     rv9_lock_set_inheritance(true);
     rv9_lock_destroy(s_inv_lock);
     s_inv_lock = NULL;
+}
+
+static void inversion_demo(void)
+{
+    rv9_task_create(inversion_task, "inv-demo", 4096, NULL,
+                    RV9_PRIO_LOW, NULL);
 }
 
 /* A shell on the network, alongside the one on the cable. */

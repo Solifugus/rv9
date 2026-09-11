@@ -235,9 +235,10 @@ control layer is late if it is late.
   host mutex lends to the task so the kernel runs, and the lock boosts the
   holding RV-9 thread so the kernel runs *it*. Measured at 504 ms → 397 ms
   for a real-time waiter behind a low-priority holder and a medium hog.
-- The three-actor demonstration is disabled at boot: it made boot
-  unreliable for reasons not yet found, while the implementation itself is
-  stable. See design §12.
+- The three-actor demonstration is disabled. Chasing it found the thing
+  worth knowing: inheritance from a real-time waiter elevates the *whole*
+  cooperative kernel to real-time priority for the duration of the hold.
+  Keep critical sections shared with real-time work short. See design §12.
 
 ## Phase 9 — Working on it remotely  ◐ plaintext done
 

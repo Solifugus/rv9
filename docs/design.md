@@ -860,18 +860,38 @@ off the run queue so the (boosted) holder can get the CPU. The cost is up
 to one tick of latency on a contended lock; real-time waiters do not pay
 it, being host tasks.
 
-### What is not resolved
+### Inheritance elevates the whole kernel — mind your hold times
 
-The three-actor demonstration is **disabled at boot** (`RV9_RUN_INVERSION_DEMO`).
-It produced the measurement above reliably, and it also made boot
-unreliable — panics and stalls that did not appear with it off, across
-repeated attempts, and whose cause was not found. The inheritance
-implementation itself is stable: boot is clean and repeatable with the
-demo disabled.
+This is the important consequence, and it is not obvious.
 
-That is an unsatisfying place to leave it and is recorded rather than
-tidied away. The measurement stands; the harness that produced it does
-not yet deserve to run on every boot.
+When a real-time process blocks on a lock held by an RV-9 thread, FreeRTOS
+lends *its* priority to the task the lock's holder runs in — which is the
+task RV-9's entire kernel runs in. For as long as the holder holds the
+lock, the cooperative kernel runs **at real-time priority**, scheduling
+whichever thread it pleases. Everything else on the machine, WiFi and the
+console included, waits.
+
+That is inheritance working correctly. It is also a design constraint with
+teeth:
+
+> **A lock shared with a real-time process bounds how long the whole system
+> may run at real-time priority. That bound is the holder's hold time.**
+
+The first version of the demonstration held a lock for 400 ms and hogged
+the CPU for 600. The result was half a second of total priority monopoly
+on every boot, arriving exactly while the radio was associating — which
+produced stalls and panics that looked like a lock bug and were nothing of
+the kind. The lock code was correct throughout; the *test* was pathological.
+
+A control loop does not monopolise a CPU for half a second, and neither
+should anything holding a lock one might want. Keep critical sections
+shared with real-time work to the shortest thing that is correct.
+
+The demonstration remains in the source, disabled
+(`RV9_RUN_INVERSION_DEMO`), and the measurement it produced — 504 ms
+without inheritance, 397 ms with — stands. Re-enabling it at these shorter
+durations still did not produce output reliably and was not pursued
+further: the finding above is worth more than the harness.
 
 ## 9. Migration to a native kernel
 
