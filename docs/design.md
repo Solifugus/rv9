@@ -943,6 +943,27 @@ harder to reach than a mistyped pin number — the principle being that **a
 driver able to disconnect the operator should refuse to unless asked very
 deliberately.**
 
+### The backlight is a PWM output
+
+```
+rv9> backlight
+backlight 100%
+rv9> backlight 20
+backlight 20%
+```
+
+It was switched on at boot and left there — the largest continuous draw on
+this board, and a real contributor to how warm it runs. It is a PWM output
+like any other, on its own timer and a channel above the ones `/pwm0`
+hands out, so the two cannot fight over hardware.
+
+Brightness is a `setstat` on `/term` rather than a descriptor option,
+because the useful time to turn a display down is while the machine is
+running, not at boot. It is deliberately **not** remembered across a reset:
+a machine that boots with a dark display is unnecessarily hard to diagnose.
+
+The console keeps working at any brightness, including zero.
+
 ### The die temperature is a device too
 
 ```

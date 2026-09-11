@@ -221,6 +221,10 @@ typedef struct {
 #define RV9_PIO_SS_FREQUENCY  18   /* Hz, for anything periodic */
 #define RV9_PIO_GS_RANGE      19   /* largest value a write may carry */
 
+/* The LCD console's own settings. */
+#define RV9_LCD_SS_CLEAR      (RV9_SS_DRIVER_BASE + 0)
+#define RV9_LCD_SS_BRIGHTNESS (RV9_SS_DRIVER_BASE + 1)   /* 0..100 percent */
+
 /* ------------------------------------------------------------------ */
 /* sysinfo                                                             */
 /* ------------------------------------------------------------------ */

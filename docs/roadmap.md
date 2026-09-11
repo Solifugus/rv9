@@ -264,8 +264,9 @@ control layer is late if it is late.
   should refuse to.
 - **`/tsens` — the die temperature, done.** 45-46 C with radio and
   backlight on; the input a thermal-throttling decision needs.
-- Not done: LCD backlight brightness as a descriptor option. It has been
-  on at full since phase 3 and is a real contributor to board temperature.
+- **Backlight brightness — done**, as a `setstat` on `/term` rather than a
+  descriptor option: the useful time to dim a display is while running.
+  Not persisted, deliberately.
 - Not done: I2C and SPI as devices, which is what most sensors want.
 - Not done: interrupt-driven inputs — a pin change releasing a process.
   That is the same mechanism aperiodic real-time needs, and doing both at

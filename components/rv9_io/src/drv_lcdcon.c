@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "driver/spi_master.h"
 #include "esp_lcd_io_spi.h"
 #include "esp_lcd_panel_dev.h"
@@ -71,6 +72,12 @@ static const char *TAG = "rv9-lcdcon";
 #define PANEL_H       320
 #define PANEL_GAP     34    /* 172-wide panel centred in the controller's 240 */
 #define LCD_CLK_HZ    (40 * 1000 * 1000)
+
+/* Backlight PWM. Above the channels /pwm0 allocates, on its own timer. */
+#define BL_CHANNEL    LEDC_CHANNEL_5
+#define BL_TIMER      LEDC_TIMER_1
+#define BL_DUTY_BITS  LEDC_TIMER_10_BIT
+#define BL_FREQ_HZ    5000
 
 #define GLYPH_W       10
 #define GLYPH_H       20
@@ -130,6 +137,7 @@ typedef struct {
     char     *grid;          /* cols * rows */
     bool     *dirty;         /* rows */
     uint16_t  fg, bg;
+    uint8_t   brightness;      /* percent */
     uint16_t  shade[SHADES];   /* fg blended to bg, ready for the panel */
     int       cx, cy;
     uint16_t *rowbuf;        /* one text row of pixels, w x ch */
@@ -141,6 +149,8 @@ static inline char *cell(lcdcon_t *c, int row, int col)
 {
     return &c->grid[row * c->cols + col];
 }
+
+static void backlight_set(lcdcon_t *c, uint32_t percent);
 
 /* ---- painting ---- */
 
@@ -291,13 +301,29 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
 
     memset(c->grid, ' ', (size_t)c->cols * c->rows);
 
-    /* Backlight on. PWM dimming would be a setstat; not needed yet. */
-    gpio_config_t bl = {
-        .pin_bit_mask = 1ULL << PIN_BL,
-        .mode = GPIO_MODE_OUTPUT,
+    /* Backlight as a PWM output, so it can be turned down. Its own timer
+       and a channel above the ones /pwm0 hands out, so the two cannot
+       fight over hardware. */
+    ledc_timer_config_t bl_timer = {
+        .speed_mode      = LEDC_LOW_SPEED_MODE,
+        .timer_num       = BL_TIMER,
+        .duty_resolution = BL_DUTY_BITS,
+        .freq_hz         = BL_FREQ_HZ,
+        .clk_cfg         = LEDC_AUTO_CLK,
     };
-    gpio_config(&bl);
-    gpio_set_level(PIN_BL, 1);
+    ledc_timer_config(&bl_timer);
+
+    ledc_channel_config_t bl_ch = {
+        .gpio_num   = PIN_BL,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel    = BL_CHANNEL,
+        .timer_sel  = BL_TIMER,
+        .duty       = 0,
+        .hpoint     = 0,
+    };
+    ledc_channel_config(&bl_ch);
+
+    backlight_set(c, 100);
 
     spi_bus_config_t bus = {
         .sclk_io_num = PIN_SCLK,
@@ -390,15 +416,43 @@ static rv9_io_err_t lcdcon_write(rv9_dev_t *dev, const void *buf, size_t len,
     return RV9_IO_OK;
 }
 
-/* Driver-private setstat codes. */
-#define LCDCON_SS_CLEAR (RV9_SS_DRIVER_BASE + 0)
+/*
+ * Backlight brightness.
+ *
+ * The backlight was switched on at boot and left there, which is the
+ * largest continuous draw on this board and a real contributor to how warm
+ * it runs. It is a PWM output like any other, so it may as well be
+ * adjustable -- and being able to turn the panel down without turning the
+ * system off is worth having on anything battery-powered or enclosed.
+ *
+ * Runtime only: not remembered across a reset, because a machine that
+ * boots with a dark display is unnecessarily hard to diagnose.
+ */
+static void backlight_set(lcdcon_t *c, uint32_t percent)
+{
+    if (percent > 100) percent = 100;
+    c->brightness = (uint8_t)percent;
+
+    /* Perceived brightness is far from linear, but a straight mapping is
+       honest about what it does and predictable to script against. */
+    uint32_t duty = (percent * ((1u << BL_DUTY_BITS) - 1)) / 100u;
+
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, BL_CHANNEL, duty);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, BL_CHANNEL);
+}
 
 static rv9_io_err_t lcdcon_setstat(rv9_dev_t *dev, uint32_t code, void *arg)
 {
     lcdcon_t *c = (lcdcon_t *)dev->drv_state;
-    (void)arg;
+    if (c == NULL) return RV9_IO_ERR_IO;
 
-    if (code != LCDCON_SS_CLEAR) return RV9_IO_ERR_UNSUPPORTED;
+    if (code == RV9_LCD_SS_BRIGHTNESS) {
+        if (arg == NULL) return RV9_IO_ERR_INVAL;
+        backlight_set(c, *(uint32_t *)arg);
+        return RV9_IO_OK;
+    }
+
+    if (code != RV9_LCD_SS_CLEAR) return RV9_IO_ERR_UNSUPPORTED;
 
     rv9_lock_acquire(c->lock);
     memset(c->grid, ' ', (size_t)c->cols * c->rows);
@@ -410,10 +464,23 @@ static rv9_io_err_t lcdcon_setstat(rv9_dev_t *dev, uint32_t code, void *arg)
     return RV9_IO_OK;
 }
 
+static rv9_io_err_t lcdcon_getstat(rv9_dev_t *dev, uint32_t code, void *arg)
+{
+    lcdcon_t *c = (lcdcon_t *)dev->drv_state;
+    if (c == NULL || arg == NULL) return RV9_IO_ERR_IO;
+
+    if (code == RV9_LCD_SS_BRIGHTNESS) {
+        *(uint32_t *)arg = c->brightness;
+        return RV9_IO_OK;
+    }
+    return RV9_IO_ERR_UNSUPPORTED;
+}
+
 static const rv9_driver_t lcdcon = {
     .name    = "lcdcon",
     .init    = lcdcon_init,
     .write   = lcdcon_write,
+    .getstat = lcdcon_getstat,
     .setstat = lcdcon_setstat,
 };
 
