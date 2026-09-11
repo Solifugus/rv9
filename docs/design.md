@@ -641,6 +641,52 @@ The module is deliberately excluded from the flash image — `.nostore` in
 its directory — so that its running at all is proof it arrived some other
 way.
 
+## 9g. Persistence
+
+A RAM disk proves a file manager works and is useless for anything real:
+files and loaded programs die at reset. The board has spare flash, and
+spare flash is a volume.
+
+`/f0` is RBF over a 1 MB flash partition — the same file manager as `/r0`
+over a different driver, which is the arrangement the layering promised.
+Together with `autoload()` at boot, a program written there is a command
+on every boot afterwards:
+
+```
+I (341) rv9-rbf: /f0 mounted: volume 'rv9', 2048 sectors
+I (1118) rv9: /f0: loaded 1 of 1 module
+rv9> downloaded
+I was never flashed onto this board.
+I arrived over WiFi, through a file, as pid 6.
+```
+
+Nothing was typed to make that happen and no cable was involved.
+
+**Flash is not RAM, and the driver says so.** It erases in 4 KB blocks
+while RBF writes 512-byte sectors, so a partial write means read the erase
+block, patch it, erase, write it back. The driver batches by erase block so
+a sequential run costs one cycle rather than eight. Blocks endure on the
+order of 100k erases: right for configuration, programs and occasional
+logs; wrong for something rewritten every second, and when that matters the
+answer is an SD card behind the same interface, which RBF will not notice.
+
+### What this cost, and what it taught
+
+Networking broke. `connect()` began failing for every host, including ones
+that had worked minutes earlier — and the cause was memory, not the
+network: **11 KB free, 7 KB low water.** lwIP could not allocate a
+connection.
+
+The RAM disk was 64 KB and the kernel heap another 64 KB, both sized when
+nothing else was competing. `/f0` provides a megabyte that costs no RAM at
+all, so `/r0` dropped to 16 KB of scratch and the kernel heap to 32 KB —
+which is what the kernel actually holds. Free memory went from 11 KB to
+94 KB.
+
+The lesson is not about sizes. It is that on a machine with 300 KB, every
+buffer is taken from something else, and a subsystem that fails for want of
+memory rarely says so — it reports that it cannot connect.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

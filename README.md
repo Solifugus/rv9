@@ -34,9 +34,8 @@ mdir        program 1    784   1
 shell       program 2    1248  1
 ...
 rv9> echo > /term        # output goes to the panel instead
-rv9> fetch 192.168.1.12:8000 /downloaded.mod > /r0/downloaded.mod
-rv9> load /r0/downloaded.mod
-rv9> downloaded
+rv9> fetch 192.168.1.12:8000 /downloaded.mod > /f0/downloaded.mod
+rv9> downloaded        # after a reboot: /f0 is flash, and boot loads it
 I was never flashed onto this board.
 I arrived over WiFi, through a file, as pid 9.
 

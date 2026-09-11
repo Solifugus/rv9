@@ -22,6 +22,9 @@
 #include "esp_flash.h"
 #include "esp_log.h"
 
+#include <stdio.h>
+#include <string.h>
+
 static const char *TAG = "rv9";
 
 #define RV9_VERSION "0.0.6-phase5"
@@ -128,6 +131,50 @@ static void devs(void)
     }
 }
 
+/*
+ * Load whatever programs a volume is carrying.
+ *
+ * This is what makes a program stick: write it to /f0 once and it is a
+ * command on every boot afterwards, with no cable involved. A directory is
+ * a file, so finding them is an ordinary read.
+ */
+static void autoload(const char *dev)
+{
+    int p = rv9_io_open(dev, RV9_MODE_READ);
+    if (p < 0) return;
+
+    rv9_dirent_t ents[8];
+    int loaded = 0, tried = 0;
+
+    for (;;) {
+        size_t got = 0;
+        if (rv9_io_read(p, ents, sizeof(ents), &got) != RV9_IO_OK || got == 0) {
+            break;
+        }
+
+        int count = (int)(got / sizeof(rv9_dirent_t));
+        for (int i = 0; i < count; i++) {
+            /* Only files that say they are modules. */
+            size_t n = strlen(ents[i].name);
+            if (n < 5 || strcmp(ents[i].name + n - 4, ".mod") != 0) continue;
+
+            char path[48];
+            snprintf(path, sizeof(path), "%s/%s", dev, ents[i].name);
+
+            tried++;
+            if (rv9_mod_load_path(path) == RV9_MOD_OK) loaded++;
+        }
+        if (count < (int)(sizeof(ents) / sizeof(ents[0]))) break;
+    }
+
+    rv9_io_close(p);
+
+    if (tried > 0) {
+        ESP_LOGI(TAG, "%s: loaded %d of %d module%s", dev, loaded, tried,
+                 tried == 1 ? "" : "s");
+    }
+}
+
 /* Bring up the I/O system: managers and drivers register, then every
    descriptor module in the store is attached. */
 static void io_bringup(void)
@@ -143,6 +190,7 @@ static void io_bringup(void)
     rv9_drv_uart_register();
     rv9_drv_lcdcon_register();
     rv9_drv_ramdisk_register();
+    rv9_drv_flashdisk_register();
     rv9_drv_net_register();
 
     int n = rv9_io_attach_from_modules();
@@ -150,6 +198,9 @@ static void io_bringup(void)
              n, n == 1 ? "" : "s");
 
     devs();
+
+    /* Anything left on the persistent volume becomes a command again. */
+    autoload("/f0");
 
     /* Processes with no parent inherit these. */
     /* The terminal is the USB cable: keyboard in, characters out. The

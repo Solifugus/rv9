@@ -494,24 +494,24 @@ static int env_setstat(int path, uint32_t code, void *arg)
  * the RAM disk today, an SD card when one exists, and -- since it arrived
  * over the network into that file -- effectively from anywhere at all.
  */
-static int env_load(const char *path)
+rv9_mod_err_t rv9_mod_load_path(const char *path)
 {
-    if (path == NULL || s_io_ops == NULL) return -1;
+    if (path == NULL || s_io_ops == NULL) return RV9_MOD_ERR_INVAL;
 
     int p = s_io_ops->open(path, RV9_MODE_READ);
-    if (p < 0) return -2;
+    if (p < 0) return RV9_MOD_ERR_NOTFOUND;
 
     uint64_t size = 0;
     if (s_io_ops->getstat(p, RV9_GS_SIZE, &size) < 0 || size == 0 ||
         size > 64 * 1024) {
         s_io_ops->close(p);
-        return -3;
+        return RV9_MOD_ERR_INVAL;
     }
 
     uint8_t *buf = (uint8_t *)rv9_alloc((size_t)size);
     if (buf == NULL) {
         s_io_ops->close(p);
-        return -4;
+        return RV9_MOD_ERR_NOMEM;
     }
 
     uint32_t got = 0;
@@ -522,17 +522,20 @@ static int env_load(const char *path)
     }
     s_io_ops->close(p);
 
-    int rc = -5;
-    if (got == size) {
-        rv9_mod_err_t err = rv9_mod_register_image(buf, got);
-        rc = (err == RV9_MOD_OK) ? 0 : -(int)err - 10;
-        if (err != RV9_MOD_OK) {
-            ESP_LOGE(TAG, "load '%s': %s", path, rv9_mod_strerror(err));
-        }
+    rv9_mod_err_t err = (got == size) ? rv9_mod_register_image(buf, got)
+                                      : RV9_MOD_ERR_IO;
+    if (err != RV9_MOD_OK) {
+        ESP_LOGE(TAG, "load '%s': %s", path, rv9_mod_strerror(err));
     }
 
     rv9_free(buf);
-    return rc;
+    return err;
+}
+
+static int env_load(const char *path)
+{
+    rv9_mod_err_t err = rv9_mod_load_path(path);
+    return (err == RV9_MOD_OK) ? 0 : -(int)err;
 }
 
 static int env_chain(const char *module)

@@ -44,8 +44,12 @@ static const char *TAG = "rv9-kal";
 
 /* The kernel's heap. Its own objects come from here; the host allocator
    still serves DMA and executable memory, which are properties of where
-   the memory is rather than of who hands it out. */
-#define KERNEL_HEAP_BYTES (64 * 1024)
+   the memory is rather than of who hands it out.
+   
+   Sized to what the kernel actually holds -- thread bookkeeping and small
+   objects. Reserving more than that takes it away from the WiFi stack,
+   which needs a great deal more than RV-9 does. */
+#define KERNEL_HEAP_BYTES (32 * 1024)
 
 static volatile uint32_t *s_tick_ref;
 

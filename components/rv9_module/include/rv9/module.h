@@ -356,6 +356,12 @@ rv9_mod_err_t rv9_mod_verify(const void *image, size_t avail);
  */
 rv9_mod_err_t rv9_mod_register_image(const void *image, uint32_t len);
 
+/*
+ * Read a module from a path and add it to the directory. Used by the
+ * `load` command and by boot, which loads whatever a volume is carrying.
+ */
+rv9_mod_err_t rv9_mod_load_path(const char *path);
+
 #ifdef __cplusplus
 }
 #endif

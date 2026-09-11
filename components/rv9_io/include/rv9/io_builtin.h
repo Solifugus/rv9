@@ -20,3 +20,4 @@ rv9_io_err_t rv9_rbf_register(void);
 rv9_io_err_t rv9_drv_ramdisk_register(void);
 rv9_io_err_t rv9_nfm_register(void);
 rv9_io_err_t rv9_drv_net_register(void);
+rv9_io_err_t rv9_drv_flashdisk_register(void);

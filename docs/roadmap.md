@@ -122,6 +122,10 @@ to stop and enjoy it for a while before committing to the rest.**
   separate from the character `read`/`write`
 - `ramdisk` driver → `/r0` — done, 64 KB
 - `dir`, `filetest`, `del` utilities, argument passing to modules — done
+- **`/f0` — persistent storage on a flash partition, done.** RBF over
+  `flashdisk`: same file manager as `/r0`, different driver. Programs
+  written there are loaded at boot by `autoload()` and are commands again
+  without a cable.
 - **`sdspi` driver → `/sd0` — not written.** Waiting on a microSD card to
   test against. The file manager above it is already proven, so this is a
   driver-shaped hole rather than an unknown.
