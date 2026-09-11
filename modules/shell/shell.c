@@ -158,12 +158,40 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     for (;;) {
         m_say(env, RV9_STDOUT, "rv9> ");
 
-        int n = env->read(RV9_STDIN, st->line, LINE_MAX - 1);
-        if (n < 0) {
-            m_say(env, RV9_STDOUT, "read error\n");
-            break;
+        /*
+         * Read until a line is complete.
+         *
+         * Over a terminal, SCF hands back a whole line at once. Over a
+         * socket the bytes arrive in whatever sizes the network chose, and
+         * a line may take several reads or share one with the next. The
+         * newline is what ends a line, whichever it came from.
+         */
+        int n = 0;
+        bool closed = false, complete = false;
+
+        while (!complete && n < LINE_MAX - 1) {
+            int k = env->read(RV9_STDIN, st->line + n, LINE_MAX - 1 - n);
+            if (k <= 0) { closed = true; break; }
+
+            for (int i = n; i < n + k; i++) {
+                if (st->line[i] == '\n' || st->line[i] == '\r') {
+                    complete = true;
+                    break;
+                }
+            }
+            n += k;
         }
+
+        if (closed && n == 0) break;     /* the other end went away */
+
         st->line[n] = '\0';
+        for (int i = 0; i < n; i++) {
+            if (st->line[i] == '\n' || st->line[i] == '\r') {
+                st->line[i] = '\0';
+                n = i;
+                break;
+            }
+        }
         if (n == 0) continue;
 
         /* Keep a whole copy before tokenize() chops the original. */

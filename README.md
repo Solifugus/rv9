@@ -26,6 +26,8 @@ passes the same KAL conformance suite as FreeRTOS
 ```
 
 ```
+$ nc 192.168.1.121 2300          # a shell over WiFi
+
 rv9> rt control 1000
 control: 2000 activations at 1000 us
   worst jitter   27 us

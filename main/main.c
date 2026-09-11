@@ -248,8 +248,21 @@ static void term_banner(void)
  * needs a log path that cannot deadlock against the I/O manager it logs
  * through, so it waits for a phase with time to do it properly.
  */
+/* A shell on the network, alongside the one on the cable. */
+static void start_rshd(void)
+{
+    rv9_pid_t pid = 0;
+    if (rv9_proc_fork("rshd", RV9_PRIO_LOW, NULL, &pid) == RV9_PROC_OK) {
+        ESP_LOGI(TAG, "rshd listening on port 2300 (nc <ip> 2300)");
+    } else {
+        ESP_LOGW(TAG, "could not start rshd");
+    }
+}
+
 static void init_shell_loop(void)
 {
+    start_rshd();
+
     ESP_LOGI(TAG, "starting shell on /uart0 (log quiet while it runs)");
 
     for (;;) {

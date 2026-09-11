@@ -235,6 +235,21 @@ control layer is late if it is late.
   holding a lock a real-time process wants is the classic inversion, and
   the current answer is only that critical sections are short.
 
+## Phase 9 — Working on it remotely  ◐ plaintext done
+
+- **`rshd` — a shell over TCP, done.** `nc <ip> 2300`. Roughly forty lines,
+  because a connection is a path and a child inherits its parent's paths.
+  Local and remote shells run simultaneously as ordinary processes.
+- **Not secure, and not pretending to be.** Anyone who can reach the port
+  gets a shell.
+- **SSH — wanted, not started.** Key exchange (X25519), a host key
+  (Ed25519), an AEAD cipher (ChaCha20-Poly1305), transport framing,
+  userauth and channels. mbedTLS in ESP-IDF supplies the primitives. This
+  is a project of its own; the value of doing `rshd` first is that the
+  plumbing underneath is now proven, so SSH is purely a security problem.
+- Not done: more than one concurrent remote session, a pty/job control,
+  or anything resembling line editing over the network.
+
 ## Sequencing notes
 
 - **Phases 0-4 never need rewriting.** They sit above the KAL, so phase 7

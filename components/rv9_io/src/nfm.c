@@ -37,9 +37,24 @@
 
 static const char *TAG = "rv9-nfm";
 
-#define RECV_TIMEOUT_MS  15000
-#define ACCEPT_BACKLOG   1
-#define POLL_MS          10
+#define CONNECT_TIMEOUT_MS 15000
+#define ACCEPT_BACKLOG     1
+#define POLL_MS            10
+
+/*
+ * Accepting and receiving wait indefinitely, the way reading a terminal
+ * does. A path that is not ready yet blocks the reader; that is what
+ * reading means, and a caller who wants otherwise can ask whether data is
+ * ready first.
+ *
+ * They used to give up after fifteen seconds, which made a listening
+ * daemon listen only *most* of the time -- connections arriving in the gap
+ * were refused -- and quietly ended any session idle for a quarter of a
+ * minute.
+ *
+ * Connecting still gives up: an unreachable host should be reported, not
+ * waited on forever.
+ */
 
 /*
  * Every socket here is non-blocking, and waiting is done by sleeping
@@ -122,7 +137,7 @@ static rv9_io_err_t connect_out(const char *host, uint16_t port, int *out_fd)
 
     /* Wait for the handshake by asking whether the socket has become
        writable, sleeping in between so other threads run. */
-    for (uint32_t waited = 0; waited < RECV_TIMEOUT_MS; waited += POLL_MS) {
+    for (uint32_t waited = 0; waited < CONNECT_TIMEOUT_MS; waited += POLL_MS) {
         fd_set wfds;
         FD_ZERO(&wfds);
         FD_SET(fd, &wfds);
@@ -178,7 +193,7 @@ static rv9_io_err_t accept_in(uint16_t port, int *out_fd)
     socklen_t peer_len = sizeof(peer);
     int fd = -1;
 
-    for (uint32_t waited = 0; waited < RECV_TIMEOUT_MS; waited += POLL_MS) {
+    for (;;) {
         peer_len = sizeof(peer);
         fd = accept(listener, (struct sockaddr *)&peer, &peer_len);
         if (fd >= 0) break;
@@ -258,7 +273,7 @@ static rv9_io_err_t nfm_read(rv9_path_t *path, void *buf, size_t len,
     nfm_path_t *st = (nfm_path_t *)path->fm_state;
     if (st == NULL || st->fd < 0) return RV9_IO_ERR_IO;
 
-    for (uint32_t waited = 0; waited < RECV_TIMEOUT_MS; waited += POLL_MS) {
+    for (;;) {
         int n = recv(st->fd, buf, len, 0);
         if (n >= 0) {
             if (done) *done = (size_t)n;
@@ -269,7 +284,7 @@ static rv9_io_err_t nfm_read(rv9_path_t *path, void *buf, size_t len,
     }
 
     if (done) *done = 0;
-    return RV9_IO_ERR_TIMEOUT;
+    return RV9_IO_ERR_IO;
 }
 
 static rv9_io_err_t nfm_write(rv9_path_t *path, const void *buf, size_t len,
@@ -282,9 +297,9 @@ static rv9_io_err_t nfm_write(rv9_path_t *path, const void *buf, size_t len,
     size_t sent = 0;
 
     uint32_t waited = 0;
-    while (sent < len && waited < RECV_TIMEOUT_MS) {
+    while (sent < len && waited < CONNECT_TIMEOUT_MS) {
         int n = send(st->fd, p + sent, len - sent, 0);
-        if (n > 0) { sent += (size_t)n; continue; }
+        if (n > 0) { sent += (size_t)n; waited = 0; continue; }
         if (n < 0 && !would_block()) break;
         rv9_task_delay_ms(POLL_MS);
         waited += POLL_MS;

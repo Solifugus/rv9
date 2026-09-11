@@ -141,6 +141,18 @@ static rv9_io_err_t scf_read(rv9_path_t *path, void *buf, size_t len,
         if (ch == '\r' || ch == '\n') {
             echo(dev, "\r\n", 2);
 
+            /*
+             * The newline is part of what was read.
+             *
+             * Returning the line without it leaves the caller unable to
+             * tell a finished line from a partial one -- which does not
+             * matter reading from a terminal, where SCF decides where a
+             * line ends, and matters entirely reading from a socket, where
+             * bytes arrive in whatever sizes the network chose. A reader
+             * that waits for a newline then works over both.
+             */
+            if (st->len < LINE_MAX - 1) st->line[st->len++] = '\n';
+
             size_t n = st->len < len ? st->len : len;
             memcpy(buf, st->line, n);
             st->len = 0;

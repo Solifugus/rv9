@@ -762,6 +762,58 @@ scheduled by RV-9, and every place the two meet had to be found:
 Every one of those was the same mistake in a different place: *not every
 caller of the KAL is an RV-9 thread.*
 
+## 11. A shell over the network
+
+```
+$ nc 192.168.1.121 2300
+
+RV-9 shell. Type 'help'.
+rv9> rt control 1000
+control: 2000 activations at 1000 us
+  worst jitter   11 us
+  overruns       0
+```
+
+`rshd` is about forty lines, and contains no terminal handling, no
+protocol and no knowledge of sockets. It opens a path, points stdin and
+stdout at it, forks the shell, and puts them back:
+
+```c
+int c = env->open("/n0/listen/2300", RV9_MODE_RW);   /* blocks */
+env->dup2(RV9_STDIN, SAVE_IN);  env->dup2(RV9_STDOUT, SAVE_OUT);
+env->dup2(c, RV9_STDIN);        env->dup2(c, RV9_STDOUT);
+env->fork_arg("shell", 8, 0);   /* inherits them */
+```
+
+Every piece it needs was built for another reason: a connection is a path
+(phase 6), a child inherits its parent's paths by reference (phase 3), and
+the shell reads stdin without caring what it is (phase 4). Local and
+remote shells run at the same time, as ordinary processes.
+
+Two things had to change, and both were latent bugs rather than new work.
+
+**SCF returned a line without its newline.** Reading a terminal, that is
+harmless — SCF decides where a line ends. Reading a socket it is fatal,
+because bytes arrive in whatever sizes the network chose and the reader
+cannot tell a finished line from a partial one. The terminator is part of
+what was read now, and the shell reads until it sees one, which works over
+both.
+
+**NFM gave up after fifteen seconds.** That made a listening daemon listen
+only *most* of the time — connections arriving in the gap were refused —
+and silently ended any session idle for a quarter of a minute. Accepting
+and receiving wait indefinitely now, the way reading a terminal does.
+Connecting still gives up, because an unreachable host should be reported
+rather than waited on.
+
+### This is not secure
+
+Anyone who can reach the port gets a shell. It is for a workbench LAN.
+SSH is the eventual answer and is real work — key exchange, a cipher, host
+keys, channels — not something to bolt onto this. What this does provide
+is the plumbing SSH would need, already proven: a shell whose standard
+paths can be pointed at a connection.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has
