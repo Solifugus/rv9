@@ -113,6 +113,13 @@ for dir in "$ROOT"/modules/*/; do
         --revision "$revision" \
         "$OUT/$name.bin" "$OUT/$name.mod"
 
+    # A module marked .nostore is built but kept out of the flash image --
+    # it has to reach the board some other way, which is the point of it.
+    if [[ -f "$dir/.nostore" ]]; then
+        echo "  ($name kept out of the store)"
+        continue
+    fi
+
     cat "$OUT/$name.mod" >> "$STORE"
 
     # Modules are 4-byte aligned in the store.

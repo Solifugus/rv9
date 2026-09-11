@@ -76,9 +76,10 @@ static void help(const rv9_mod_env_t *env)
           "  exit              leave the shell\n"
           "  <module> [arg] [> dev]  fork it, optionally redirected\n"
           "\n"
-          "try: mdir, procs, free, dir, filetest\n"
+          "try: mdir, procs, free, dir, filetest, netstat\n"
           "     dir /r0        echo > /term\n"
-          "     del /r0/notes.txt\n");
+          "     fetch host /path > /r0/file\n"
+          "     load /r0/file.mod     then run it by name\n");
 }
 
 /*
@@ -98,7 +99,10 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
             m_say(env, RV9_STDOUT, "cannot save stdout\n");
             return;
         }
-        int t = env->open(target, RV9_MODE_WRITE);
+        /* CREATE so that "> /r0/thing" makes a file rather than failing.
+           Redirecting to a device ignores it; redirecting to a volume is
+           how anything gets onto one. */
+        int t = env->open(target, RV9_MODE_WRITE | RV9_MODE_CREATE);
         if (t < 0) {
             m_say(env, RV9_STDOUT, target);
             m_say(env, RV9_STDOUT, ": cannot open\n");

@@ -605,6 +605,42 @@ the scheduler. That costs a little latency and is correct under both
 kernels, which is the trade a driver should make: **a driver has no
 business knowing how many host tasks its callers share.**
 
+## 9f. A program that was never flashed
+
+The module store stopped being something you reflash and became something
+you add to.
+
+```
+rv9> downloaded
+downloaded: no such module
+rv9> fetch 192.168.1.12:8000 /downloaded.mod > /r0/downloaded.mod
+--- 320 bytes of body
+rv9> load /r0/downloaded.mod
+loaded; 'mdir' lists it
+rv9> downloaded
+I was never flashed onto this board.
+I arrived over WiFi, through a file, as pid 9.
+```
+
+Every layer earns its place in that sequence and none of them knew about
+the others:
+
+- `fetch` opened `/n0/192.168.1.12:8000/…` — the network as a path
+- the shell redirected its stdout into `/r0/downloaded.mod`, a *file*,
+  because redirection opens with CREATE and a volume is just another device
+- `fetch` writes status to stderr and the body to stdout, so redirection
+  captured exactly the file's bytes
+- `load` read it back through the I/O manager, verified its CRC, copied it
+  into executable memory and added it to the module directory
+- the shell then ran it by name, like any other command
+
+`rv9_mod_register_image()` marks such a module **resident**: there is no
+store to re-read it from, so unlinking frees its links but keeps its image.
+
+The module is deliberately excluded from the flash image — `.nostore` in
+its directory — so that its running at all is proof it arrived some other
+way.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

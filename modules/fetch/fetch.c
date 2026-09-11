@@ -4,6 +4,14 @@
  * The point is what is absent. No sockets, no DNS call, no connect: it
  * builds a path name, opens it, writes a request and reads the answer.
  * The same three verbs that read a file off /r0 or a line off /uart0.
+ *
+ * Headers go to stderr and the body to stdout, so that
+ *
+ *     fetch host /thing.mod > /r0/thing.mod
+ *
+ * puts exactly the bytes of the file on the volume while the status still
+ * reaches the terminal. Redirection replaces stdout and leaves stderr
+ * alone, which is what that separation is for.
  */
 #include "modlib.h"
 
@@ -40,12 +48,20 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     if (st == NULL || env->statics_size < sizeof(*st)) return -2;
 
     if (env->arg == NULL || env->arg[0] == '\0') {
-        m_say(env, RV9_STDOUT, "usage: fetch <host> [path]\n");
+        m_say(env, RV9_STDOUT, "usage: fetch <host>[:port] [path]\n");
         return -3;
     }
 
+    char hostport[64];
+    uint32_t used = word(hostport, sizeof(hostport), env->arg);
+
+    /* "host" or "host:port". */
     char host[64];
-    uint32_t used = word(host, sizeof(host), env->arg);
+    const char *port = "80";
+    uint32_t i = 0;
+    while (hostport[i] && hostport[i] != ':') { host[i] = hostport[i]; i++; }
+    host[i] = '\0';
+    if (hostport[i] == ':') port = &hostport[i + 1];
 
     const char *doc = env->arg + used;
     while (*doc == ' ') doc++;
@@ -54,14 +70,15 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     /* "/n0/<host>/80" -- the network as a path. */
     uint32_t at = append(st->path, 0, "/n0/", sizeof(st->path));
     at = append(st->path, at, host, sizeof(st->path));
-    at = append(st->path, at, "/80", sizeof(st->path));
+    at = append(st->path, at, "/", sizeof(st->path));
+    at = append(st->path, at, port, sizeof(st->path));
 
-    m_say(env, RV9_STDOUT, "opening ");
-    m_say(env, RV9_STDOUT, st->path);
-    m_say(env, RV9_STDOUT, "\n");
+    m_say(env, RV9_STDERR, "opening ");
+    m_say(env, RV9_STDERR, st->path);
+    m_say(env, RV9_STDERR, "\n");
 
     int p = env->open(st->path, RV9_MODE_RW);
-    if (p < 0) { m_say(env, RV9_STDOUT, "cannot connect\n"); return -4; }
+    if (p < 0) { m_say(env, RV9_STDERR, "cannot connect\n"); return -4; }
 
     uint32_t r = append(st->req, 0, "GET ", sizeof(st->req));
     r = append(st->req, r, doc, sizeof(st->req));
@@ -70,25 +87,52 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     r = append(st->req, r, "\r\nConnection: close\r\n\r\n", sizeof(st->req));
 
     if (env->write(p, st->req, r) < 0) {
-        m_say(env, RV9_STDOUT, "send failed\n");
+        m_say(env, RV9_STDERR, "send failed\n");
         env->close(p);
         return -5;
     }
 
-    int total = 0;
+    /*
+     * Split the reply at the blank line. Everything before it is status,
+     * and goes to stderr; everything after is the file, and goes to
+     * stdout, where redirection can put it somewhere useful.
+     */
+    int  body_bytes = 0;
+    bool in_body = false;
+    int  match = 0;              /* how much of "\r\n\r\n" has been seen */
+
     for (;;) {
-        int n = env->read(p, st->buf, BUF_LEN - 1);
+        int n = env->read(p, st->buf, BUF_LEN);
         if (n <= 0) break;
-        st->buf[n] = '\0';
-        if (total == 0) m_say(env, RV9_STDOUT, st->buf);   /* headers */
-        total += n;
-        if (total > 8192) break;
+
+        int start = 0;
+        if (!in_body) {
+            for (int i = 0; i < n; i++) {
+                char c = st->buf[i];
+                if ((match == 0 || match == 2) && c == '\r')      match++;
+                else if ((match == 1 || match == 3) && c == '\n') match++;
+                else match = (c == '\r') ? 1 : 0;
+
+                if (match == 4) {
+                    env->write(RV9_STDERR, st->buf, (uint32_t)(i + 1));
+                    start = i + 1;
+                    in_body = true;
+                    break;
+                }
+            }
+            if (!in_body) { env->write(RV9_STDERR, st->buf, (uint32_t)n); continue; }
+        }
+
+        if (n > start) {
+            env->write(RV9_STDOUT, st->buf + start, (uint32_t)(n - start));
+            body_bytes += n - start;
+        }
     }
 
     env->close(p);
 
-    m_say(env, RV9_STDOUT, "\n--- ");
-    m_num(env, RV9_STDOUT, total);
-    m_say(env, RV9_STDOUT, " bytes\n");
-    return total > 0 ? 0 : -6;
+    m_say(env, RV9_STDERR, "--- ");
+    m_num(env, RV9_STDERR, body_bytes);
+    m_say(env, RV9_STDERR, " bytes of body\n");
+    return body_bytes > 0 ? 0 : -6;
 }

@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     8
+#define RV9_MODULE_ABI     9
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -150,6 +150,14 @@ typedef struct {
     int       (*seek)(int path, int32_t offset, int whence);
     int       (*getstat)(int path, uint32_t code, void *arg);
     int       (*setstat)(int path, uint32_t code, void *arg);
+
+    /* --- ABI 9: adding a program at runtime --- */
+    /*
+     * Read a module from a path and add it to the module directory, after
+     * which it is a command like any other. This is what turns the module
+     * store from something you reflash into something you add to.
+     */
+    int       (*load)(const char *path);
 } rv9_mod_env_t;
 
 /* Seek whence, matching the I/O manager. */
@@ -247,6 +255,7 @@ typedef struct rv9_mod_entry {
     uint32_t              store_offset; /* where it lives in the module store */
     uint32_t              link_count;   /* processes holding it */
     void                 *image;        /* RAM image, NULL when not loaded */
+    bool                  resident;     /* image is permanent, not from store */
     rv9_mod_entry_fn      entry;        /* valid while loaded */
     struct rv9_mod_entry *next;
 } rv9_mod_entry_t;
@@ -337,6 +346,15 @@ uint32_t rv9_crc32(uint32_t crc, const void *data, size_t len);
 
 /* Verify a module image already in memory. */
 rv9_mod_err_t rv9_mod_verify(const void *image, size_t avail);
+
+/*
+ * Add a module from an image in memory rather than from the store.
+ *
+ * The image is verified, copied into executable memory and kept there --
+ * a resident module has no store to be re-read from, so unlinking it frees
+ * its links but not its image.
+ */
+rv9_mod_err_t rv9_mod_register_image(const void *image, uint32_t len);
 
 #ifdef __cplusplus
 }

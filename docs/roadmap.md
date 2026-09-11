@@ -128,8 +128,12 @@ to stop and enjoy it for a while before committing to the rest.**
 - Bus arbitration with the LCD is the interesting part when it comes: both
   devices share SPI, and mediating that is the I/O manager's business rather
   than each driver improvising.
-- Not done: a native filesystem beyond RBF, and loading modules from a
-  volume rather than the flash partition.
+- **Loading modules from a volume — done.** `load <path>` reads a module
+  through the I/O manager, verifies it and adds it to the directory, so a
+  program can be added without reflashing. Combined with redirection into a
+  file and the network being a path, a program can arrive from anywhere:
+  verified by downloading one over WiFi and running it.
+- Not done: a native filesystem beyond RBF.
 - **Pipes did not land.** A PIPE file manager is straightforward, but shell
   pipe syntax needs two processes with one blocking on the other's output,
   and that deserves its own attention rather than being tacked on here.

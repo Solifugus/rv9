@@ -194,6 +194,50 @@ const rv9_mod_entry_t *rv9_mod_find(const char *name)
     return best;
 }
 
+/*
+ * Add a module that arrived as bytes rather than being found in the store.
+ *
+ * Its image stays resident: there is nowhere to re-read it from, so it is
+ * copied into executable memory once and kept. Replacing a resident module
+ * means loading a newer revision, which wins by the same rule as any other
+ * name collision.
+ */
+rv9_mod_err_t rv9_mod_register_image(const void *image, uint32_t len)
+{
+    rv9_mod_err_t err = rv9_mod_verify(image, len);
+    if (err != RV9_MOD_OK) return err;
+
+    const rv9_mod_header_t *h = (const rv9_mod_header_t *)image;
+
+    void *copy = rv9_alloc_exec(h->module_len);
+    if (copy == NULL) return RV9_MOD_ERR_NOMEM;
+    memcpy(copy, image, h->module_len);
+    rv9_isync();
+
+    rv9_mod_entry_t *e = rv9_calloc(1, sizeof(*e));
+    if (e == NULL) {
+        rv9_free(copy);
+        return RV9_MOD_ERR_NOMEM;
+    }
+
+    const char *name = (const char *)copy + h->name_offset;
+    strncpy(e->name, name, sizeof(e->name) - 1);
+    e->type     = h->type;
+    e->revision = h->revision;
+    e->size     = h->module_len;
+    e->image    = copy;
+    e->entry    = (rv9_mod_entry_fn)((uint8_t *)copy + h->entry_offset);
+    e->resident = true;
+
+    rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
+    dir_append(e);
+    rv9_mutex_unlock(s_lock);
+
+    ESP_LOGI(TAG, "loaded '%s' rev %u, %lu bytes, resident at %p",
+             e->name, e->revision, (unsigned long)e->size, e->image);
+    return RV9_MOD_OK;
+}
+
 rv9_mod_err_t rv9_mod_link(const char *name, rv9_mod_entry_t **out_entry)
 {
     if (name == NULL || out_entry == NULL) return RV9_MOD_ERR_INVAL;
@@ -259,7 +303,7 @@ rv9_mod_err_t rv9_mod_unlink(rv9_mod_entry_t *entry)
         return RV9_MOD_ERR_INVAL;
     }
 
-    if (--entry->link_count == 0) {
+    if (--entry->link_count == 0 && !entry->resident) {
         rv9_free(entry->image);
         entry->image = NULL;
         entry->entry = NULL;
@@ -443,6 +487,54 @@ static int env_setstat(int path, uint32_t code, void *arg)
     return s_io_ops && s_io_ops->setstat ? s_io_ops->setstat(path, code, arg) : -1;
 }
 
+/*
+ * Read a module from a path and add it to the directory.
+ *
+ * Uses the I/O manager, so the module can come from anywhere a path can:
+ * the RAM disk today, an SD card when one exists, and -- since it arrived
+ * over the network into that file -- effectively from anywhere at all.
+ */
+static int env_load(const char *path)
+{
+    if (path == NULL || s_io_ops == NULL) return -1;
+
+    int p = s_io_ops->open(path, RV9_MODE_READ);
+    if (p < 0) return -2;
+
+    uint64_t size = 0;
+    if (s_io_ops->getstat(p, RV9_GS_SIZE, &size) < 0 || size == 0 ||
+        size > 64 * 1024) {
+        s_io_ops->close(p);
+        return -3;
+    }
+
+    uint8_t *buf = (uint8_t *)rv9_alloc((size_t)size);
+    if (buf == NULL) {
+        s_io_ops->close(p);
+        return -4;
+    }
+
+    uint32_t got = 0;
+    while (got < size) {
+        int n = s_io_ops->read(p, buf + got, (uint32_t)size - got);
+        if (n <= 0) break;
+        got += (uint32_t)n;
+    }
+    s_io_ops->close(p);
+
+    int rc = -5;
+    if (got == size) {
+        rv9_mod_err_t err = rv9_mod_register_image(buf, got);
+        rc = (err == RV9_MOD_OK) ? 0 : -(int)err - 10;
+        if (err != RV9_MOD_OK) {
+            ESP_LOGE(TAG, "load '%s': %s", path, rv9_mod_strerror(err));
+        }
+    }
+
+    rv9_free(buf);
+    return rc;
+}
+
 static int env_chain(const char *module)
 {
     return s_proc_ops && s_proc_ops->chain ? s_proc_ops->chain(module) : -1;
@@ -475,6 +567,7 @@ void rv9_mod_env_init(rv9_mod_env_t *env, void *statics,
     env->seek         = env_seek;
     env->getstat      = env_getstat;
     env->setstat      = env_setstat;
+    env->load         = env_load;
 }
 
 rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result)
