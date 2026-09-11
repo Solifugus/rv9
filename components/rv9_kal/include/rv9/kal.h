@@ -71,6 +71,17 @@ uint32_t rv9_ms_to_ticks(uint32_t ms);
 typedef struct rv9_task *rv9_task_t;
 typedef void (*rv9_task_fn)(void *arg);
 
+/*
+ * Bring the kernel up and start the system's first task.
+ *
+ * Whichever kernel backs the KAL, this is how RV-9 starts: the backend
+ * does whatever its kernel needs -- FreeRTOS needs nothing, RV-9's own
+ * kernel needs a heap, a tick and something to run it -- and then runs
+ * `fn` as the first task. It does not return.
+ */
+rv9_err_t rv9_kal_start(rv9_task_fn fn, const char *name, size_t stack_bytes,
+                        void *arg, int priority);
+
 /* stack_bytes of 0 selects a backend-chosen default. */
 rv9_err_t rv9_task_create(rv9_task_fn fn, const char *name, size_t stack_bytes,
                           void *arg, int priority, rv9_task_t *out_task);
@@ -81,6 +92,35 @@ rv9_task_t rv9_task_self(void);
 void      rv9_task_yield(void);
 void      rv9_task_delay_ms(uint32_t ms);
 rv9_err_t rv9_task_priority_set(rv9_task_t task, int priority);
+
+/*
+ * Does the scheduler underneath age priorities itself?
+ *
+ * RV-9's process manager has implemented aging since phase 2 by nudging
+ * task priorities from above, because the host scheduler does not do it.
+ * RV-9's own kernel does, and the two fight: setting a priority resets the
+ * age the kernel just applied. So the process manager asks.
+ *
+ * The policy is unchanged either way -- what changes is which layer
+ * carries it out, which is the whole point of having written the policy
+ * down rather than left it implicit in one implementation.
+ */
+bool rv9_sched_ages(void);
+
+/*
+ * A point at which this task may be descheduled.
+ *
+ * On a preemptive host this is free: the scheduler already takes the CPU
+ * whenever it likes. On RV-9's own kernel it is what makes a compute-bound
+ * thread preemptible at all, because that kernel switches only when asked.
+ *
+ * The system call layer calls this, which makes every system call a
+ * preemption point -- so a module doing work interleaved with any kernel
+ * service is scheduled fairly without knowing this function exists. A
+ * module that computes for a long time touching nothing still cannot be
+ * interrupted; that needs the trap vector, and arrives with phase 7 step 3.
+ */
+void rv9_preempt_point(void);
 
 /* ------------------------------------------------------------------ */
 /* Counting semaphores                                                 */

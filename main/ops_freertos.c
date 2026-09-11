@@ -85,7 +85,7 @@ static void *f_calloc(size_t c, size_t s)    { return rv9_calloc(c, s); }
 static void  f_free(void *p)                 { rv9_free(p); }
 
 static const kal_ops_t s_ops = {
-    .name = "freertos",
+    .name = "kal",
     .time_ms = f_time_ms, .delay_ms = f_delay_ms, .yield = f_yield,
     .task_create = f_task_create, .task_exit = f_task_exit,
     .task_self = f_task_self,

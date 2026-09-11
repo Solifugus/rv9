@@ -29,8 +29,8 @@ static void *n_alloc(size_t n) { return rv9k_alloc(n); }
 static int n_task_create(void (*fn)(void *), const char *name,
                          size_t stack, void *arg, int prio)
 {
-    return rv9k_thread_create((rv9k_entry_fn)fn, arg, name, stack, prio,
-                              n_alloc) != NULL ? 0 : -1;
+    return rv9k_thread_create((rv9k_entry_fn)fn, arg, name, stack, prio)
+           != NULL ? 0 : -1;
 }
 
 static void  n_task_exit(void) { rv9k_exit(); }

@@ -43,3 +43,8 @@ CONFIG_ESP_SYSTEM_HW_STACK_GUARD=n
 # so it needs a callback dispatched from the interrupt rather than from a
 # task that cannot be scheduled.
 CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD=y
+
+# Run RV-9 on RV-9's own kernel: processes, I/O and the shell are all
+# scheduled by rv9_kernel rather than by FreeRTOS, which is left holding
+# one task for the kernel to live in. Set to n for the FreeRTOS reference.
+CONFIG_RV9_KERNEL_NATIVE=y

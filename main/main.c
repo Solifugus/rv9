@@ -348,6 +348,27 @@ static void phase2_demo(void)
     uint32_t starved_mid = 0, starved_ms = 0;
     uint32_t aged_mid = 0, aged_ms = 0;
 
+    /*
+     * When the kernel ages, aging cannot be switched off to compare
+     * against -- and there is nothing left to demonstrate here, because
+     * the comparison has already been made in the kernel's own tests.
+     */
+    if (rv9_sched_ages()) {
+        contention_round("kernel aging", true, &aged_mid, &aged_ms);
+        ESP_LOGI(TAG, "--- result ---");
+        ESP_LOGI(TAG, "low-priority progress at %d ms: %lu units",
+                 SAMPLE_AT_MS, (unsigned long)aged_mid);
+        if (aged_mid > 0) {
+            ESP_LOGI(TAG, "the kernel's own aging kept the low-priority "
+                          "process running");
+        } else {
+            ESP_LOGE(TAG, "the low-priority process got no CPU");
+        }
+        signal_demo();
+        procs();
+        return;
+    }
+
     contention_round("without aging", false, &starved_mid, &starved_ms);
     contention_round("with aging",    true,  &aged_mid,    &aged_ms);
 
@@ -381,11 +402,33 @@ static void rv9_init_task(void *arg)
 {
     (void)arg;
 
-    /* Phase 7 step 1: prove the native kernel's context switch and
-       scheduler while the host kernel is still holding the machine up. */
-#if RV9_RUN_KERNEL_TEST
+    /*
+     * The tests run here, not in app_main.
+     *
+     * With the native kernel behind the KAL, the KAL only means anything
+     * inside an RV-9 thread: a delay sleeps the calling thread, task_self
+     * names it, and a created task needs the scheduler to be running.
+     * app_main is a host task and none of that is true there -- which the
+     * self-test reported accurately the first time it was asked from the
+     * wrong place.
+     */
+    if (!rv9_kal_selftest()) {
+        ESP_LOGE(TAG, "KAL self-test failed -- not proceeding");
+        return;
+    }
+    ESP_LOGI(TAG, "KAL is sound.");
+
+    /*
+     * The kernel tests build and tear down their own kernel, which is fine
+     * when RV-9 is a guest and fatal when the kernel underneath us is the
+     * one being torn down.
+     */
+#if RV9_RUN_KERNEL_TEST && !CONFIG_RV9_KERNEL_NATIVE
     rv9_kernel_selftest();
 #endif
+
+    /* The KAL contract, against whichever kernel this build runs on. */
+    rv9_conformance_run(rv9_ops_freertos());
 
     rv9_mod_dir_init();
     mdir();
@@ -403,19 +446,9 @@ void app_main(void)
 {
     banner();
 
-    if (!rv9_kal_selftest()) {
-        ESP_LOGE(TAG, "KAL self-test failed -- not proceeding");
-        return;
-    }
-
-    /* The same contract, against the implementation everything runs on.
-       This is the reference the native kernel is measured against. */
-    rv9_conformance_run(rv9_ops_freertos());
-
-    ESP_LOGI(TAG, "KAL is sound.");
-
-    rv9_err_t err = rv9_task_create(rv9_init_task, "rv9-init", 4096, NULL,
-                                    RV9_PRIO_SYSTEM, NULL);
+    /* Whichever kernel backs the KAL brings itself up and runs init. */
+    rv9_err_t err = rv9_kal_start(rv9_init_task, "rv9-init", 8192, NULL,
+                                  RV9_PRIO_SYSTEM);
     if (err != RV9_OK) {
         ESP_LOGE(TAG, "could not start init: %s", rv9_strerror(err));
     }

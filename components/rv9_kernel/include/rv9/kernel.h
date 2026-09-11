@@ -39,7 +39,7 @@
 extern "C" {
 #endif
 
-#define RV9K_MAX_THREADS   16
+#define RV9K_MAX_THREADS   32
 #define RV9K_NAME_LEN      16
 
 /* Same priority band as the rest of RV-9; see rv9/kal.h. */
@@ -150,12 +150,36 @@ uint32_t rv9k_ticks(void);
  */
 void rv9k_preempt_point(void);
 
+/*
+ * Where thread stacks come from and go back to. Both are needed: a kernel
+ * that can only allocate stacks runs out of thread slots, which is how a
+ * system that forks a process per command dies after its sixteenth one.
+ */
+void rv9k_set_allocators(void *(*alloc)(size_t), void (*release)(void *));
+
 rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
-                                  size_t stack_bytes, int priority,
-                                  void *(*alloc)(size_t));
+                                  size_t stack_bytes, int priority);
 
 /* Run until every thread has finished. Returns to the caller's context. */
 void rv9k_run(void);
+
+/*
+ * Run forever, hosting an operating system rather than a test.
+ *
+ * When nothing is runnable the idle hook is called. On bare metal that is
+ * a wait-for-interrupt; while RV-9 is a guest it is the host's way of
+ * giving up the CPU, so the rest of the machine keeps working. Without it
+ * an idle kernel would spin at whatever priority its host task has.
+ */
+void rv9k_set_idle_hook(void (*fn)(void));
+void rv9k_serve(void);
+
+/* Stop scheduling other threads. Nesting counts. */
+void rv9k_sched_lock(void);
+void rv9k_sched_unlock(void);
+
+/* End a thread that is not the caller. */
+void rv9k_thread_kill(rv9k_thread_t *t);
 
 void rv9k_yield(void);
 void rv9k_sleep_ms(uint32_t ms);

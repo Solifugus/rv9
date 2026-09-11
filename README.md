@@ -15,8 +15,10 @@ processes with OS-9-style priority aging, measured starvation-free; unified
 I/O with SCF, a UART driver, and a text console on the ST7789 panel; and a
 shell where every command is a loadable module; and RBF storage with
 segment-list files on a RAM disk; the network as a path; and RV-9's own
-context switch, scheduler and timer tick running its threads, passing the
-same KAL conformance suite as FreeRTOS (phase 7, steps 1-2 of 5).
+**the whole system running on RV-9's own kernel** -- processes, I/O,
+storage, networking and the shell all scheduled by `rv9_kernel`, which
+passes the same KAL conformance suite as FreeRTOS
+(`CONFIG_RV9_KERNEL_NATIVE`; phase 7, steps 1-2 of 5).
 
 ```
 [freertos]   23 passed, 0 failed

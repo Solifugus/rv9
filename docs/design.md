@@ -2,8 +2,9 @@
 
 A small modular operating system for RISC-V, in the spirit of Microware OS-9.
 
-Status: phases 0-6 complete; phase 7 steps 1-2 done and the KAL
-contract satisfied by RV-9's own kernel — KAL on FreeRTOS (27/27 conformance tests
+Status: phases 0-6 complete; phase 7 steps 1-2 done, and **the whole
+system now runs on RV-9's own kernel** — processes, I/O, storage,
+networking and the shell, all scheduled by rv9_kernel — KAL on FreeRTOS (27/27 conformance tests
 passing on hardware), module format/directory/loader, and processes with
 priority aging, all verified on hardware. See docs/roadmap.md.
 
@@ -555,6 +556,54 @@ spinning would dominate:
 ```
 ran 160 ms; consumer used 0 ticks, blocked 8 times
 ```
+
+## 9e. RV-9 running on RV-9
+
+`CONFIG_RV9_KERNEL_NATIVE` selects which kernel backs the KAL. With it on,
+every RV-9 thread — the shell, every process, the I/O manager's internals —
+is scheduled by RV-9's own scheduler. FreeRTOS is still underneath, holding
+one task for the kernel to live in and running the ESP-IDF drivers; taking
+the machine outright is what remains of step 3.
+
+Nothing above the KAL changed to make this work. That is the seam paying
+for six phases of discipline.
+
+Three things broke, and each was informative.
+
+**Thread slots leaked.** A slot was only reusable once its stack was NULL,
+and nothing ever freed a dead thread's stack — so the system died after its
+sixteenth thread. The guest tests never saw it because they reset the
+kernel between runs. The kernel now reaps dead threads, and needed to be
+given a *release* function as well as an allocator: a kernel that can only
+allocate stacks runs out of threads.
+
+**Two agers fought.** The process manager has aged priorities since phase 2
+because FreeRTOS does not. RV-9's kernel does it directly, and the two
+undid each other — setting a priority reset the age the kernel had just
+applied. The KAL now answers `rv9_sched_ages()`, and the process manager
+stands down when the kernel below it already carries the policy. The policy
+did not change; which layer performs it did, which is exactly what writing
+it down was for.
+
+**A cooperative kernel needs somewhere to be preempted.** RV-9's kernel
+switches only when asked, so a compute-bound module owned the machine.
+Every system call is now a preemption point (`rv9_preempt_point()`, free on
+a preemptive host), so a module interleaving work with any kernel service
+is scheduled fairly without knowing this exists. A module that computes for
+a long time touching nothing still cannot be interrupted — that needs the
+trap vector.
+
+### And one thing this arrangement taught about drivers
+
+NFM blocked inside `accept()`. Under FreeRTOS that parks one task; under
+RV-9's kernel, whose threads all share a single host task, it parked the
+entire operating system — including the process about to connect to that
+listener.
+
+Every socket is non-blocking now, and waiting is done by sleeping through
+the scheduler. That costs a little latency and is correct under both
+kernels, which is the trade a driver should make: **a driver has no
+business knowing how many host tasks its callers share.**
 
 ## 9. Migration to a native kernel
 

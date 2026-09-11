@@ -28,6 +28,10 @@ static uint32_t       s_last_age_tick;
 static uint64_t       s_switches;
 static uint64_t       s_blocks;
 static bool           s_running;
+static uint32_t       s_sched_lock;
+static void         (*s_idle_hook)(void);
+static void        *(*s_alloc)(size_t);
+static void         (*s_release)(void *);
 
 /* Stack layout built for a thread that has never run. Mirrors exactly what
    rv9_ctx_switch pops, so a first entry and a resume are the same code. */
@@ -47,6 +51,7 @@ void rv9k_init(void)
     s_switches      = 0;
     s_blocks        = 0;
     s_running       = false;
+    s_sched_lock    = 0;
 }
 
 /*
@@ -63,10 +68,9 @@ uint32_t rv9k_ticks(void) { return s_ticks; }
 static uint32_t now(void) { return s_ticks; }
 
 rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
-                                  size_t stack_bytes, int priority,
-                                  void *(*alloc)(size_t))
+                                  size_t stack_bytes, int priority)
 {
-    if (fn == NULL || alloc == NULL) return NULL;
+    if (fn == NULL || s_alloc == NULL) return NULL;
 
     rv9k_thread_t *t = NULL;
     for (int i = 0; i < RV9K_MAX_THREADS; i++) {
@@ -80,7 +84,7 @@ rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
     size_t words = (stack_bytes + 3) / 4;
     if (words < 128) words = 128;
 
-    uint32_t *stack = (uint32_t *)alloc(words * 4);
+    uint32_t *stack = (uint32_t *)s_alloc(words * 4);
     if (stack == NULL) return NULL;
 
     t->stack       = stack;
@@ -273,6 +277,28 @@ static rv9k_thread_t *pick_next(void)
     return best;
 }
 
+/*
+ * Return finished threads' stacks and free their slots.
+ *
+ * Never the running thread: a thread marks itself dead and then
+ * reschedules, so it is still standing on the stack being considered
+ * until the switch completes. Whoever runs next reaps it.
+ */
+static void reap_dead(void)
+{
+    for (int i = 0; i < RV9K_MAX_THREADS; i++) {
+        rv9k_thread_t *th = &s_threads[i];
+        if (th == s_current) continue;
+        if (th->state != RV9K_DEAD || th->stack == NULL) continue;
+
+        if (s_release) s_release(th->stack);
+        th->stack       = NULL;
+        th->stack_words = 0;
+        th->sp          = NULL;
+        th->name[0]     = '\0';
+    }
+}
+
 static bool any_alive(void)
 {
     for (int i = 0; i < RV9K_MAX_THREADS; i++) {
@@ -288,8 +314,13 @@ static bool any_alive(void)
 /* Give up the CPU. Called from a thread; returns when it runs again. */
 static void reschedule(void)
 {
+    /* Held off. The caller keeps the CPU; whatever it wanted to happen
+       happens when the lock is released. */
+    if (s_sched_lock > 0) return;
+
     rv9k_thread_t *prev = s_current;
 
+    reap_dead();
     wake_sleepers();
     age_threads();
 
@@ -324,6 +355,65 @@ static void reschedule(void)
         rv9_ctx_switch(&prev->sp, next->sp);
     } else {
         rv9_ctx_switch(&s_host_sp, next->sp);
+    }
+}
+
+void rv9k_sched_lock(void) { s_sched_lock++; }
+
+void rv9k_sched_unlock(void)
+{
+    if (s_sched_lock > 0) s_sched_lock--;
+    if (s_sched_lock == 0 && s_current) reschedule();
+}
+
+void rv9k_set_idle_hook(void (*fn)(void)) { s_idle_hook = fn; }
+
+void rv9k_set_allocators(void *(*alloc)(size_t), void (*release)(void *))
+{
+    s_alloc   = alloc;
+    s_release = release;
+}
+
+void rv9k_thread_kill(rv9k_thread_t *t)
+{
+    if (t == NULL) return;
+    if (t == s_current) { rv9k_exit(); return; }
+
+    if (t->blocked_on) {
+        waitq_remove((rv9k_waitq_t *)t->blocked_on, t);
+        t->blocked_on = NULL;
+    }
+    t->state = RV9K_DEAD;
+}
+
+/*
+ * Host an operating system: run threads forever, idling when there is
+ * nothing to run. Unlike rv9k_run this never returns, because a kernel
+ * with nothing to do has not finished -- it is waiting.
+ */
+void rv9k_serve(void)
+{
+    s_running = true;
+
+    for (;;) {
+        reap_dead();
+        wake_sleepers();
+        age_threads();
+
+        rv9k_thread_t *next = pick_next();
+        if (next == NULL) {
+            if (s_idle_hook) s_idle_hook();
+            continue;
+        }
+
+        next->state        = RV9K_RUNNING;
+        next->entered_tick = now();
+        s_switches++;
+        next->last_ran_seq = s_switches;
+        s_current          = next;
+
+        rv9_ctx_switch(&s_host_sp, next->sp);
+        s_current = NULL;
     }
 }
 
@@ -391,6 +481,7 @@ void rv9k_run(void)
     s_running = true;
 
     while (any_alive()) {
+        reap_dead();
         wake_sleepers();
         age_threads();
 

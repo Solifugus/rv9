@@ -293,10 +293,27 @@ static int env_print(const char *s)
     return 0;
 }
 
-static uint64_t env_time_ms(void) { return rv9_time_ms(); }
+/*
+ * Every service a module asks for is a chance to reschedule it.
+ *
+ * On a preemptive kernel this costs nothing. On RV-9's own kernel, which
+ * switches only when asked, it is what keeps one compute-bound module from
+ * owning the machine -- without the module having to know anything about
+ * scheduling. A module that computes for a long time while touching
+ * nothing is still uninterruptible; that waits for the trap vector.
+ */
+static uint64_t env_time_ms(void)
+{
+    rv9_preempt_point();
+    return rv9_time_ms();
+}
 static void     env_yield(void) { rv9_task_yield(); }
 static void     env_sleep_ms(uint32_t ms) { rv9_task_delay_ms(ms); }
-static uint32_t env_no_signals(void) { return 0; }
+static uint32_t env_no_signals(void)
+{
+    rv9_preempt_point();
+    return 0;
+}
 
 void rv9_mod_set_io_ops(const rv9_mod_io_ops_t *ops) { s_io_ops = ops; }
 
@@ -328,11 +345,13 @@ static int env_close(int path)
 
 static int env_read(int path, void *buf, uint32_t len)
 {
+    rv9_preempt_point();
     return s_io_ops && s_io_ops->read ? s_io_ops->read(path, buf, len) : -1;
 }
 
 static int env_write(int path, const void *buf, uint32_t len)
 {
+    rv9_preempt_point();
     return s_io_ops && s_io_ops->write ? s_io_ops->write(path, buf, len) : -1;
 }
 

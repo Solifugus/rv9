@@ -84,6 +84,7 @@ static void burner_thread(void *arg)
 }
 
 static void *test_alloc(size_t n) { return rv9_alloc(n); }
+static void  test_release(void *p) { rv9_free(p); }
 
 /* ---- the kernel's tick ---- */
 
@@ -173,6 +174,7 @@ static void consumer_thread(void *arg)
 static bool blocking_tests(void)
 {
     rv9k_init();
+    rv9k_set_allocators(test_alloc, test_release);
 
     static pipe_t p;
     p.received = 0;
@@ -180,9 +182,9 @@ static bool blocking_tests(void)
     rv9k_queue_init(&p.q, p.storage, 4, sizeof(uint32_t));
 
     rv9k_thread_t *cons = rv9k_thread_create(consumer_thread, &p, "consumer",
-                                             4096, 12, test_alloc);
+                                             4096, 12);
     rv9k_thread_t *prod = rv9k_thread_create(producer_thread, &p, "producer",
-                                             4096, 4, test_alloc);
+                                             4096, 4);
     if (cons == NULL || prod == NULL) return false;
 
     uint32_t t0 = rv9k_ticks();
@@ -314,10 +316,11 @@ static void conformance_thread(void *arg)
 static bool native_conformance(void)
 {
     rv9k_init();
+    rv9k_set_allocators(test_alloc, test_release);
     s_native_failures = -1;
 
     if (rv9k_thread_create(conformance_thread, NULL, "conformance",
-                           16384, 8, test_alloc) == NULL) {
+                           16384, 8) == NULL) {
         ESP_LOGE(TAG, "could not start the conformance thread");
         return false;
     }
@@ -349,15 +352,16 @@ bool rv9_kernel_selftest(void)
 
     /* --- threads run at all, and alternate --- */
     rv9k_init();
+    rv9k_set_allocators(test_alloc, test_release);
 
     static counter_t a, b;
     a = (counter_t){ .limit = 50 };
     b = (counter_t){ .limit = 50 };
 
     rv9k_thread_t *ta = rv9k_thread_create(counter_thread, &a, "count-a",
-                                           4096, 8, test_alloc);
+                                           4096, 8);
     rv9k_thread_t *tb = rv9k_thread_create(counter_thread, &b, "count-b",
-                                           4096, 8, test_alloc);
+                                           4096, 8);
 
     check(ta != NULL && tb != NULL, "thread_create");
     if (ta == NULL || tb == NULL) return false;
@@ -387,6 +391,7 @@ bool rv9_kernel_selftest(void)
 
     /* --- priority is respected, and aging prevents starvation --- */
     rv9k_init();
+    rv9k_set_allocators(test_alloc, test_release);
 
     static burner_t hi, lo;
     uint32_t deadline = rv9k_ticks() + RV9K_MS_TO_TICKS(300);
@@ -394,9 +399,9 @@ bool rv9_kernel_selftest(void)
     lo = (burner_t){ .deadline = deadline };
 
     rv9k_thread_t *th = rv9k_thread_create(burner_thread, &hi, "hi",
-                                           4096, 12, test_alloc);
+                                           4096, 12);
     rv9k_thread_t *tl = rv9k_thread_create(burner_thread, &lo, "lo",
-                                           4096, 4, test_alloc);
+                                           4096, 4);
     check(th != NULL && tl != NULL, "priority threads created");
 
     rv9_sched_lock();

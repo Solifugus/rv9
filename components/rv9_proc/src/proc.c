@@ -79,6 +79,8 @@ static rv9_proc_t *current_locked(void)
 
 static uint32_t env_signals_take(void)
 {
+    rv9_preempt_point();
+
     rv9_mutex_lock(s_lock, RV9_WAIT_FOREVER);
     rv9_proc_t *p = current_locked();
     uint32_t sig = 0;
@@ -316,10 +318,21 @@ rv9_proc_err_t rv9_proc_init(void)
 
     if (rv9_mutex_create(&s_lock) != RV9_OK) return RV9_PROC_ERR_NOMEM;
 
-    /* The ager must outrank everything it manages. */
-    rv9_err_t err = rv9_task_create(ager_task, "rv9-ager", 2560, NULL,
-                                    RV9_PRIO_AGER, NULL);
-    if (err != RV9_OK) return RV9_PROC_ERR_NOMEM;
+    /*
+     * Only run an ager if the scheduler underneath does not age for us.
+     *
+     * This one exists because FreeRTOS schedules strictly by priority.
+     * RV-9's own kernel implements the same policy directly, and running
+     * both means each undoes the other: setting a priority resets the age
+     * the kernel just applied.
+     */
+    if (!rv9_sched_ages()) {
+        rv9_err_t err = rv9_task_create(ager_task, "rv9-ager", 2560, NULL,
+                                        RV9_PRIO_AGER, NULL);
+        if (err != RV9_OK) return RV9_PROC_ERR_NOMEM;
+    } else {
+        ESP_LOGI(TAG, "the kernel ages threads itself; no ager needed");
+    }
 
     rv9_mod_set_proc_ops(&s_mod_proc_ops);
 
@@ -490,6 +503,9 @@ const rv9_proc_t *rv9_proc_next(const rv9_proc_t *prev)
 
 void rv9_proc_aging_set(bool enabled)
 {
+    /* When the kernel ages, aging is not ours to switch off. */
+    if (rv9_sched_ages()) return;
+
     s_aging = enabled;
 
     if (!enabled) {
@@ -506,4 +522,4 @@ void rv9_proc_aging_set(bool enabled)
     }
 }
 
-bool rv9_proc_aging_get(void) { return s_aging; }
+bool rv9_proc_aging_get(void) { return rv9_sched_ages() ? true : s_aging; }

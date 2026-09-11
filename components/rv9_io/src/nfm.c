@@ -33,11 +33,38 @@
 #include "esp_log.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
+#include <fcntl.h>
 
 static const char *TAG = "rv9-nfm";
 
 #define RECV_TIMEOUT_MS  15000
 #define ACCEPT_BACKLOG   1
+#define POLL_MS          10
+
+/*
+ * Every socket here is non-blocking, and waiting is done by sleeping
+ * through the scheduler rather than inside lwIP.
+ *
+ * Blocking in a socket call parks whichever thread made it -- which is
+ * fine when each thread is a host task, and fatal when RV-9's own kernel
+ * is running all of its threads inside one. A listener sitting in accept()
+ * stopped the entire operating system, including the process that was
+ * about to connect to it.
+ *
+ * Polling costs a little latency and makes the driver correct under both
+ * kernels, which is the trade a driver should make: it has no business
+ * knowing how many host tasks its callers are sharing.
+ */
+static void set_nonblocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+static bool would_block(void)
+{
+    return errno == EWOULDBLOCK || errno == EAGAIN || errno == EINPROGRESS;
+}
 
 typedef struct {
     int  fd;
@@ -83,19 +110,43 @@ static rv9_io_err_t connect_out(const char *host, uint16_t port, int *out_fd)
 
     int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd < 0) return RV9_IO_ERR_NOMEM;
+    set_nonblocking(fd);
 
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 &&
+        !would_block()) {
         ESP_LOGW(TAG, "connect to %s:%u failed: errno %d (%s)",
                  host, (unsigned)port, errno, strerror(errno));
         close(fd);
         return RV9_IO_ERR_IO;
     }
 
-    struct timeval tv = { .tv_sec = RECV_TIMEOUT_MS / 1000, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    /* Wait for the handshake by asking whether the socket has become
+       writable, sleeping in between so other threads run. */
+    for (uint32_t waited = 0; waited < RECV_TIMEOUT_MS; waited += POLL_MS) {
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(fd, &wfds);
+        struct timeval zero = { 0, 0 };
 
-    *out_fd = fd;
-    return RV9_IO_OK;
+        if (select(fd + 1, NULL, &wfds, NULL, &zero) > 0) {
+            int err = 0;
+            socklen_t len = sizeof(err);
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+            if (err == 0) {
+                *out_fd = fd;
+                return RV9_IO_OK;
+            }
+            ESP_LOGW(TAG, "connect to %s:%u refused: errno %d",
+                     host, (unsigned)port, err);
+            close(fd);
+            return RV9_IO_ERR_IO;
+        }
+        rv9_task_delay_ms(POLL_MS);
+    }
+
+    ESP_LOGW(TAG, "connect to %s:%u timed out", host, (unsigned)port);
+    close(fd);
+    return RV9_IO_ERR_TIMEOUT;
 }
 
 static rv9_io_err_t accept_in(uint16_t port, int *out_fd)
@@ -105,6 +156,7 @@ static rv9_io_err_t accept_in(uint16_t port, int *out_fd)
 
     int one = 1;
     setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    set_nonblocking(listener);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -120,17 +172,22 @@ static rv9_io_err_t accept_in(uint16_t port, int *out_fd)
         return RV9_IO_ERR_IO;
     }
 
-    struct timeval tv = { .tv_sec = RECV_TIMEOUT_MS / 1000, .tv_usec = 0 };
-    setsockopt(listener, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
     ESP_LOGI(TAG, "listening on %u", (unsigned)port);
 
     struct sockaddr_in peer;
     socklen_t peer_len = sizeof(peer);
-    int fd = accept(listener, (struct sockaddr *)&peer, &peer_len);
-    if (fd < 0) {
-        ESP_LOGW(TAG, "accept on %u failed: errno %d (%s)",
-                 (unsigned)port, errno, strerror(errno));
+    int fd = -1;
+
+    for (uint32_t waited = 0; waited < RECV_TIMEOUT_MS; waited += POLL_MS) {
+        peer_len = sizeof(peer);
+        fd = accept(listener, (struct sockaddr *)&peer, &peer_len);
+        if (fd >= 0) break;
+        if (!would_block()) {
+            ESP_LOGW(TAG, "accept on %u failed: errno %d (%s)",
+                     (unsigned)port, errno, strerror(errno));
+            break;
+        }
+        rv9_task_delay_ms(POLL_MS);
     }
 
     /* The listener has done its job; only the connection is a path. */
@@ -138,7 +195,7 @@ static rv9_io_err_t accept_in(uint16_t port, int *out_fd)
 
     if (fd < 0) return RV9_IO_ERR_TIMEOUT;
 
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    set_nonblocking(fd);
     *out_fd = fd;
     return RV9_IO_OK;
 }
@@ -201,11 +258,18 @@ static rv9_io_err_t nfm_read(rv9_path_t *path, void *buf, size_t len,
     nfm_path_t *st = (nfm_path_t *)path->fm_state;
     if (st == NULL || st->fd < 0) return RV9_IO_ERR_IO;
 
-    int n = recv(st->fd, buf, len, 0);
-    if (n < 0) { if (done) *done = 0; return RV9_IO_ERR_TIMEOUT; }
+    for (uint32_t waited = 0; waited < RECV_TIMEOUT_MS; waited += POLL_MS) {
+        int n = recv(st->fd, buf, len, 0);
+        if (n >= 0) {
+            if (done) *done = (size_t)n;
+            return RV9_IO_OK;   /* n == 0 means the peer closed */
+        }
+        if (!would_block()) break;
+        rv9_task_delay_ms(POLL_MS);
+    }
 
-    if (done) *done = (size_t)n;
-    return RV9_IO_OK;     /* n == 0 means the peer closed; a short read */
+    if (done) *done = 0;
+    return RV9_IO_ERR_TIMEOUT;
 }
 
 static rv9_io_err_t nfm_write(rv9_path_t *path, const void *buf, size_t len,
@@ -217,10 +281,13 @@ static rv9_io_err_t nfm_write(rv9_path_t *path, const void *buf, size_t len,
     const uint8_t *p = (const uint8_t *)buf;
     size_t sent = 0;
 
-    while (sent < len) {
+    uint32_t waited = 0;
+    while (sent < len && waited < RECV_TIMEOUT_MS) {
         int n = send(st->fd, p + sent, len - sent, 0);
-        if (n <= 0) break;
-        sent += (size_t)n;
+        if (n > 0) { sent += (size_t)n; continue; }
+        if (n < 0 && !would_block()) break;
+        rv9_task_delay_ms(POLL_MS);
+        waited += POLL_MS;
     }
 
     if (done) *done = sent;

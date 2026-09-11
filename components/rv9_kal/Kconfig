@@ -1,0 +1,20 @@
+menu "RV-9"
+
+config RV9_KERNEL_NATIVE
+    bool "Back the KAL with RV-9's own kernel"
+    default n
+    help
+        Selects which kernel RV-9 runs on.
+
+        Off: the KAL is implemented on FreeRTOS, which is how RV-9 has run
+        since phase 0 and remains the reference.
+
+        On: the KAL is implemented on RV-9's own scheduler, and the whole
+        system -- processes, I/O, the shell -- is scheduled by it. FreeRTOS
+        is still underneath holding one task, which is where RV-9's kernel
+        runs; taking the machine outright is phase 7 step 3.
+
+        Both are built from the same sources above the KAL and pass the
+        same conformance suite.
+
+endmenu

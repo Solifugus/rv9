@@ -82,6 +82,14 @@ rv9_err_t rv9_task_create(rv9_task_fn fn, const char *name, size_t stack_bytes,
     return RV9_OK;
 }
 
+rv9_err_t rv9_kal_start(rv9_task_fn fn, const char *name, size_t stack_bytes,
+                        void *arg, int priority)
+{
+    /* FreeRTOS is already running by the time app_main is called, so
+       starting the system is just starting its first task. */
+    return rv9_task_create(fn, name, stack_bytes, arg, priority, NULL);
+}
+
 void rv9_task_delete(rv9_task_t task)
 {
     vTaskDelete((TaskHandle_t)task);   /* NULL means "this task" */
@@ -106,6 +114,12 @@ rv9_err_t rv9_task_priority_set(rv9_task_t task, int priority)
     vTaskPrioritySet((TaskHandle_t)task, prio_to_native(priority));
     return RV9_OK;
 }
+
+/* FreeRTOS schedules strictly by priority and never ages. */
+bool rv9_sched_ages(void) { return false; }
+
+/* Nothing to do: this scheduler takes the CPU whenever it wants it. */
+void rv9_preempt_point(void) { }
 
 /* ---------------- semaphores ---------------- */
 

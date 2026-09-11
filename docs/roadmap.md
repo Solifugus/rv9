@@ -180,6 +180,9 @@ why it comes here and not earlier.
   Also done, and both were prerequisites: the kernel's own allocator
   (first fit, coalescing both ways) and real wait queues, so a blocked
   thread leaves the run queue instead of spinning.
+  **The whole system now runs on RV-9's kernel** (`CONFIG_RV9_KERNEL_NATIVE`):
+  processes, I/O, storage, networking and the shell. FreeRTOS holds one
+  task for the kernel to live in and runs the ESP-IDF drivers.
   What remains for step 3 is genuinely just boot and traps: a startup path
   that does not hand the machine to FreeRTOS, our own `mtvec`, and the
   asynchronous preemption that trap entry makes possible.
