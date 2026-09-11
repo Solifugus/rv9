@@ -255,6 +255,22 @@ control layer is late if it is late.
 - Not done: more than one concurrent remote session, a pty/job control,
   or anything resembling line editing over the network.
 
+## Phase 10 — Hardware  ◐ pins, PWM and ADC done
+
+- **`/gpio`, `/pwm0`, `/adc0` — done**, under a new `pio` file manager: a
+  third driver shape after character and block, carrying values rather than
+  bytes. `pin`, `pwm`, `adc` utilities convert text at the shell.
+- USB pins (13, 14) are reserved: a driver that can disconnect the operator
+  should refuse to.
+- Not done: I2C and SPI as devices, which is what most sensors want.
+- Not done: interrupt-driven inputs — a pin change releasing a process.
+  That is the same mechanism aperiodic real-time needs, and doing both at
+  once is the sensible way round.
+- Not done: **bounded-latency I/O for real-time processes.** A control loop
+  writing `/pwm0` takes the same locks as the shell, and design §12 now
+  explains exactly why that matters: the hold time bounds how long the
+  whole system runs at real-time priority.
+
 ## Sequencing notes
 
 - **Phases 0-4 never need rewriting.** They sit above the KAL, so phase 7

@@ -893,6 +893,68 @@ without inheritance, 397 ms with — stands. Re-enabling it at these shorter
 durations still did not produce output reliably and was not pursued
 further: the finding above is worth more than the harness.
 
+## 13. Hardware as devices
+
+Pins, PWM outputs and analogue inputs are devices under the same I/O
+manager as everything else:
+
+```
+/gpio/8        pin 8
+/pwm0/3        PWM on pin 3
+/adc0/1        analogue channel 1
+```
+
+**PIO is a third discipline**, after SCF's character streams and RBF's
+blocks. A pin is not a stream of bytes and not an array of sectors; it is
+an addressable unit carrying a value. Drivers of this shape implement
+`unit_open` / `unit_read` / `unit_write` / `unit_stat`, and a read or write
+moves one 32-bit value rather than text.
+
+That is for the fast path: a control loop writing a duty cycle every
+millisecond should not format decimal first. The `pin`, `pwm` and `adc`
+utilities convert for humans at the shell, where a microsecond does not
+matter. Configuration — direction, pull, frequency — goes through
+getstat/setstat, which is what those calls are for.
+
+Measured working: GPIO drives and reads back, and `/adc0` returns real
+conversions (762, 729, 724, 721 of 4095 on a floating input).
+
+### Two drivers, two opposite closing behaviours
+
+Deliberately, and worth stating because the asymmetry looks like an
+oversight:
+
+- **`/gpio` holds its level when the path closes.** An enable line that
+  dropped because the program which raised it exited would be worse than
+  useless.
+- **`/pwm0` stops driving when the path closes.** It holds a hardware
+  channel that must be given back, and an actuator still running because a
+  program finished is a bad way to learn that it finished.
+
+### A driver that can disconnect the operator
+
+GPIO 13 and 14 carry the USB Serial/JTAG lines: the console, the flashing
+channel, and the only way to talk to this board. The reserved list covered
+the display and the card slot and missed them, so a routine `pin 13` during
+a pin survey took the machine away and needed the cable physically pulled.
+
+They are reserved now, with no override. When there is one it should be
+harder to reach than a mistyped pin number — the principle being that **a
+driver able to disconnect the operator should refuse to unless asked very
+deliberately.**
+
+### And one bug that was not the driver's
+
+Every pin reported a mismatch: written 1, reads 0. The driver was correct
+throughout — instrumenting it showed the pad reading back 1 immediately.
+The fault was in the `pin` utility, which opened the path *write-only* and
+then read it. The I/O manager refused, exactly as it should, and the
+utility ignored the error and printed a variable that had never been
+written to.
+
+Ignoring a return value turned a correct refusal into what looked like
+broken hardware for several rounds of debugging.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

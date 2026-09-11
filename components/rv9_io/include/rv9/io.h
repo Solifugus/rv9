@@ -96,6 +96,26 @@ typedef struct rv9_driver {
                                 void *buf, uint32_t count);
     rv9_io_err_t (*write_blocks)(struct rv9_dev *dev, uint32_t lsn,
                                  const void *buf, uint32_t count);
+
+    /*
+     * Peripheral drivers implement these: a third shape, after character
+     * streams and block devices.
+     *
+     * A pin, a PWM output or an ADC channel is not a stream of bytes and
+     * not an array of sectors. It is an addressable unit with a value, and
+     * pretending otherwise would mean a control loop formatting decimal to
+     * move a servo. `unit` is whatever the device numbers its units by --
+     * a GPIO number, a channel.
+     */
+    rv9_io_err_t (*unit_open)(struct rv9_dev *dev, uint32_t unit,
+                              uint32_t mode, void **unit_state);
+    rv9_io_err_t (*unit_close)(struct rv9_dev *dev, void *unit_state);
+    rv9_io_err_t (*unit_read)(struct rv9_dev *dev, void *unit_state,
+                              uint32_t *value);
+    rv9_io_err_t (*unit_write)(struct rv9_dev *dev, void *unit_state,
+                               uint32_t value);
+    rv9_io_err_t (*unit_stat)(struct rv9_dev *dev, void *unit_state,
+                              bool set, uint32_t code, uint32_t *value);
 } rv9_driver_t;
 
 /* ------------------------------------------------------------------ */

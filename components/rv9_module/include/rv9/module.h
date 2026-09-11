@@ -212,6 +212,15 @@ typedef struct {
 #define RV9_GS_SIZE        4
 #define RV9_SS_DRIVER_BASE 256
 
+/*
+ * Peripheral settings, shared by every PIO device so that a program does
+ * not need to know which driver is underneath.
+ */
+#define RV9_PIO_SS_DIRECTION  16   /* 0 = input, 1 = output */
+#define RV9_PIO_SS_PULL       17   /* 0 = none, 1 = up, 2 = down */
+#define RV9_PIO_SS_FREQUENCY  18   /* Hz, for anything periodic */
+#define RV9_PIO_GS_RANGE      19   /* largest value a write may carry */
+
 /* ------------------------------------------------------------------ */
 /* sysinfo                                                             */
 /* ------------------------------------------------------------------ */

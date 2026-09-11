@@ -45,6 +45,26 @@ static inline void m_num(const rv9_mod_env_t *env, int path, int32_t v)
     m_say(env, path, &buf[i]);
 }
 
+/* Decimal, stopping at the first character that is not a digit. */
+static inline uint32_t m_num_parse(const char *s, const char **end)
+{
+    uint32_t v = 0;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (uint32_t)(*s - '0'); s++; }
+    if (end) *end = s;
+    return v;
+}
+
+/* Split "a b" into the first word and the rest. */
+static inline const char *m_word(const char *s, char *out, uint32_t cap)
+{
+    uint32_t i = 0;
+    while (*s == ' ') s++;
+    while (*s && *s != ' ' && i < cap - 1) out[i++] = *s++;
+    out[i] = '\0';
+    while (*s == ' ') s++;
+    return s;
+}
+
 /* Left-aligned in a field of `width`, for table output. */
 static inline void m_pad(const rv9_mod_env_t *env, int path, const char *s,
                          uint32_t width)
