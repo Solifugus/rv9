@@ -1144,6 +1144,145 @@ Third one of this family, and the pattern is stated in §10 already: **not
 every caller of the KAL is an RV-9 thread.** The first two failed loudly
 and immediately. This one ran perfectly for weeks.
 
+## 15. Reacting: real-time processes released by interrupts
+
+A periodic process asks "what time is it?". A reactive one asks "what just
+happened?", and the second is not the first sampling fast enough — a
+1 kHz loop watching for an edge finds it up to a millisecond late, burns a
+core doing it, and still cannot tell you when the edge actually was.
+
+So a real-time process can now be released by an **event** instead of a
+period:
+
+```c
+uint32_t both = 3;                                  /* rising and falling */
+env->setstat(pin, RV9_PIO_SS_EDGE, &both);          /* arm the pin        */
+
+uint32_t ev = 0;
+env->getstat(pin, RV9_PIO_GS_EVENT, &ev);           /* which event is it? */
+env->rt_declare_event((int)ev, 200);                /* no faster than 5 kHz */
+
+for (;;) {
+    int coalesced = env->rt_wait();                 /* returns when it happens */
+    ...
+}
+```
+
+`rt_wait()` is **the same call** as for a periodic process. That is the
+design decision worth defending: a control loop should be able to change
+what wakes it without being rewritten, because "released on time" is one
+idea whether the release comes from a timer we own or from a world we do
+not. Only the clock differs.
+
+### Events, and why they are numbers
+
+An event is a rendezvous between an interrupt and a thread, and it is named
+by a small integer. This is OS-9's `F$Event` — deliberately, and not only
+for the heritage: a numbered event is something a driver can hand out
+through `getstat` without either end holding a pointer into the other.
+
+`rv9_proc` therefore has no dependency on `rv9_io`. The process manager
+takes a number and hands it to the KAL; the module does the introduction,
+asking the *device* which event it signals on. Any device that can
+interrupt answers the same two codes — `SS_EDGE` to arm, `GS_EVENT` to ask
+— so a UART with a character waiting, or a card finishing a transfer, will
+plug into this without a new mechanism. That is why the codes live in the
+generic PIO settings and not in the gpio driver.
+
+### What is measured, and against what
+
+The interrupt handler stamps the microsecond clock **before** it wakes
+anyone. The process compares that stamp with the clock when it actually
+resumed. So `max_jitter_us` becomes *pin to process*: the whole cost of an
+interrupt, a semaphore, a context switch and a preemption.
+
+Two details that decide whether the number is honest:
+
+- When several edges arrive before the process runs, the stamp kept is the
+  **oldest** unserviced one, not the newest. Stamping the newest would
+  quietly subtract the part of the delay that was our fault, which is the
+  direction an instrument must never round in.
+- Coalesced events are **counted**, not discarded silently. They are the
+  aperiodic form of a missed period: more happened than was responded to.
+
+`min_interval_us` is the sporadic task's equivalent of a period — the
+shortest gap the caller promises to cope with, and what makes the load
+analysable at all. A source that beats it is not throttled; it is counted,
+and warned about once. A control system whose inputs are arriving faster
+than its designer expected needs to be told, not silently rate-limited.
+
+### Measured
+
+ESP32-C5, WiFi associated, both edges of `/gpio/3`, worst case over the run:
+
+| what is driving the pin                        | edges | worst edge → process |
+|------------------------------------------------|-------|----------------------|
+| an ordinary process, idle machine              | 400   | 7 µs                 |
+| the same, first run after boot (radio writing NVS) | 400 | 15 µs               |
+| the same, while `noise` writes flash and forks | 2000  | 13 µs                |
+| a *second* real-time process at 1 kHz          | 1500  | 41–51 µs             |
+
+No events were coalesced and none were lost in any run. The last row is the
+most interesting: both processes are host tasks at the same priority, so the
+waiter cannot preempt the generator and waits for it to block. Two real-time
+processes at one priority level is a scheduling policy this system does not
+have yet — see below.
+
+### What this does *not* yet measure, and why
+
+An edge that arrives **during a flash erase**. Every event source available
+on this board without external wiring is software, and software that lives
+in flash is stopped by the same window that would delay the response — so no
+edge is produced during the stall, and none is waiting at the far end of it.
+The measurements above show the interrupt path is intact and nothing is
+dropped; they do not put a number on that window.
+
+Closing it needs a source that is genuinely independent of the CPU: an
+external signal generator, or a peripheral (LEDC, a timer's hardware output)
+routed to an armed pin. Worth doing before anyone builds a controller that
+trusts the number. The periodic side has the same hazard measured at 82 ms
+(§14), and there is no reason to assume the reactive side is better until it
+is measured.
+
+### Two things this changed underneath
+
+**A pin may now be held by more than one process.** Opening a `/gpio` unit
+used to call `gpio_reset_pin` every time, which took the previous opener's
+configuration with it — direction, pull, and, once there were interrupts,
+the arming a process was blocked waiting on. The pin stayed open and simply
+stopped doing what it had been told. The reset now happens on the first open
+only, and direction is the union of what the openers asked for: if anyone
+wants to drive it, it is an output, because an output on this chip still
+reads back.
+
+**`gpio_set_level` was not actually resident.** §14 claimed the GPIO write
+path was reachable with the flash cache off, on the strength of ESP-IDF
+mapping `gpio_set_level` and `gpio_get_level` `noflash`. It does — *if*
+`CONFIG_GPIO_CTRL_FUNC_IN_IRAM` is set, and it is off by default. Marking
+RV-9's own code `RV9_RT_CODE` and then calling into flash on the last
+instruction is a thorough way to achieve nothing. The option is now in
+`sdkconfig.defaults` and the claim is true; `nm` on the image is the check,
+and it belongs in a test rather than in a habit.
+
+### What is still missing
+
+- **A scheduling policy among real-time processes.** They all sit at one
+  host priority, so two of them round-robin. Rate-monotonic or EDF is the
+  obvious next thing, and it needs the periods and inter-arrival bounds that
+  are already being declared and recorded.
+- **Non-real-time processes waiting on events.** An ordinary process should
+  be able to block in `read()` on an armed pin — the OS-9 shape, where a
+  blocking read is how you wait for a device. The event object is already
+  the right rendezvous for it; what is missing is the cooperative kernel's
+  side of the wait.
+- **`floods` is not in the module ABI.** It is recorded and logged, but
+  `rv9_rt_report_t` did not grow to carry it, on purpose: the module
+  supplies that buffer and the kernel fills it, so appending a field would
+  write past the end of an older module's stack. Fields the kernel writes
+  into module memory are frozen once published — which is the opposite of
+  the rule for `rv9_mod_env_t`, where the module only reads what it knows
+  about and appending is free.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

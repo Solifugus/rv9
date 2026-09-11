@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     11
+#define RV9_MODULE_ABI     12
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -91,6 +91,19 @@ _Static_assert(sizeof(rv9_mod_header_t) == RV9_MODULE_HDR_LEN,
  * Exposed to the application deliberately: "real-time" is a property you
  * measure, and a control loop that cannot see its own jitter cannot report
  * that it has stopped being trustworthy.
+ *
+ * The same six numbers serve an event-driven process, with period_us
+ * reading as the declared minimum inter-arrival, max_jitter_us as the time
+ * from the interrupt to the process running, and overruns as events folded
+ * together because they arrived while it was busy.
+ *
+ * This struct did NOT grow when event-driven processes arrived, and that is
+ * a rule rather than an oversight. Appending to rv9_mod_env_t is safe
+ * because the kernel writes it and the module only reads what it knows
+ * about. This one goes the other way: the module supplies the buffer and
+ * the kernel fills it, so an older module passing a shorter struct to a
+ * newer kernel would have its stack written past the end. Fields the
+ * kernel writes into module memory are frozen once published.
  */
 typedef struct __attribute__((packed)) {
     uint32_t period_us;
@@ -204,6 +217,38 @@ typedef struct {
        measure itself with, and a loop that cannot measure itself cannot
        report that it has stopped being trustworthy. */
     uint64_t  (*time_us)(void);
+
+    /* --- ABI 12: released by an event rather than by a period --- */
+    /*
+     * Some control code is periodic and some is reactive, and the second
+     * kind is not the first kind sampling fast enough. A process declared
+     * this way runs when something happens:
+     *
+     *     uint32_t both = 3;
+     *     env->setstat(pin, RV9_PIO_SS_EDGE, &both);
+     *     uint32_t ev = 0;
+     *     env->getstat(pin, RV9_PIO_GS_EVENT, &ev);
+     *     env->rt_declare_event((int)ev, 200);   // no faster than 5 kHz
+     *     for (;;) {
+     *         int coalesced = env->rt_wait();    // returns when it happens
+     *         ...
+     *     }
+     *
+     * rt_wait is the same call as for a periodic process, and reports the
+     * same things: max_jitter_us becomes the time from the interrupt to
+     * this code running, and overruns becomes the number of events that
+     * arrived while it was still busy and were folded into one.
+     *
+     * min_interval_us is what the caller promises to cope with -- the
+     * sporadic task's period, and what makes the load analysable. Pass 0
+     * to say there is no bound, which is honest and promises nothing.
+     *
+     * Event ids come from the device, through getstat. They are small
+     * integers rather than handles for the same reason OS-9's F$Event used
+     * numbers: a driver can hand one out without either end needing a
+     * pointer into the other.
+     */
+    int       (*rt_declare_event)(int event_id, uint32_t min_interval_us);
 } rv9_mod_env_t;
 
 /* Seek whence, matching the I/O manager. */
@@ -226,6 +271,20 @@ typedef struct {
 #define RV9_PIO_SS_PULL       17   /* 0 = none, 1 = up, 2 = down */
 #define RV9_PIO_SS_FREQUENCY  18   /* Hz, for anything periodic */
 #define RV9_PIO_GS_RANGE      19   /* largest value a write may carry */
+
+/*
+ * Interrupts, as a device setting.
+ *
+ * Arming a unit with SS_EDGE makes it signal an event when the world
+ * changes; GS_EVENT then says which event, as a small integer, and a
+ * real-time process asks to be released by that number. Nothing about this
+ * is specific to a pin -- a UART with a character waiting, or a card
+ * finishing a transfer, answers the same two codes -- which is the point of
+ * putting it in the generic PIO settings rather than in the gpio driver.
+ */
+#define RV9_PIO_SS_EDGE       20   /* 0 = off, 1 = rising, 2 = falling,
+                                      3 = both */
+#define RV9_PIO_GS_EVENT      21   /* event id, or 0 if not armed */
 
 /* The LCD console's own settings. */
 #define RV9_LCD_SS_CLEAR      (RV9_SS_DRIVER_BASE + 0)

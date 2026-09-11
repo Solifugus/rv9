@@ -102,6 +102,30 @@ static int env_rt_declare(uint32_t period_us)
     return rv9_rt_declare(period_us) == RV9_OK ? 0 : -2;
 }
 
+/*
+ * Released by an event instead of a period.
+ *
+ * The process manager never learns which device produced the event -- it
+ * takes a number and hands it to the KAL. That is what keeps rv9_proc from
+ * having to depend on rv9_io: the module does the introduction, asking the
+ * device for its event id through getstat and passing it here.
+ */
+static int env_rt_declare_event(int event_id, uint32_t min_interval_us)
+{
+    rv9_lock_acquire(s_lock);
+    rv9_proc_t *p = current_locked();
+    bool ok = (p != NULL && p->cls == RV9_CLASS_REALTIME);
+    if (ok) p->period_us = min_interval_us;
+    rv9_lock_release(s_lock);
+
+    if (!ok) return -1;
+
+    rv9_event_t ev = rv9_event_by_id(event_id);
+    if (ev == NULL) return -3;      /* nothing armed, or a stale id */
+
+    return rv9_rt_declare_event(ev, min_interval_us) == RV9_OK ? 0 : -2;
+}
+
 static RV9_RT_CODE int env_rt_wait(void)
 {
     return rv9_rt_wait();
@@ -177,6 +201,7 @@ static void proc_trampoline(void *arg)
     rv9_mod_env_init(&env, p->statics, h->static_size, p->pid);
     env.signals_take = env_signals_take;
     env.rt_declare   = env_rt_declare;
+    env.rt_declare_event = env_rt_declare_event;
     env.rt_wait      = env_rt_wait;
     env.rt_stats     = env_rt_stats;
     env.arg          = p->arg[0] ? p->arg : NULL;
@@ -429,7 +454,13 @@ rv9_proc_err_t rv9_proc_fork(const char *module_name, int priority,
 rv9_proc_err_t rv9_proc_fork_rt(const char *module_name, uint32_t period_us,
                                 const char *arg, rv9_pid_t *out_pid)
 {
-    if (period_us == 0) return RV9_PROC_ERR_INVAL;
+    /*
+     * A period of zero is allowed, and means the process will say for
+     * itself what releases it -- an event-driven one has no period to give
+     * here. What fork_rt decides is the class, which is the part that has
+     * to be settled before the task exists; the release source is the
+     * process's own business and is declared from inside it.
+     */
     return fork_common(module_name, RV9_PRIO_MAX, arg, RV9_CLASS_REALTIME,
                        period_us, out_pid);
 }

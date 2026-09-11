@@ -10,8 +10,19 @@
  *
  * So a real-time task is not an RV-9 thread. It runs on the host's
  * preemptive scheduler, above everything else including the task RV-9's
- * kernel lives in, and is released by a hardware timer rather than by a
- * software tick. Nothing below the microsecond timer is in its way.
+ * kernel lives in, and is released by hardware -- a microsecond timer, or
+ * an interrupt from the device it is controlling -- rather than by a
+ * software tick. Nothing below the interrupt is in its way.
+ *
+ * TWO RELEASE SOURCES, ONE CALL
+ *
+ * A periodic task is released by a timer; an event-driven (sporadic) one
+ * by an interrupt. Both sit in rv9_rt_wait(), and both are measured the
+ * same way, because the question is the same: how long after the release
+ * should have happened did this code actually run? Only the clock differs
+ * -- one we own, one we do not. Keeping it one call means a control loop
+ * can change what wakes it without being rewritten, which matters when the
+ * thing being written against this is a language for reactive systems.
  *
  * This is deliberately the same shape the native implementation will have
  * when RV-9 owns the machine: a preemptible thread at the top of the
@@ -45,9 +56,21 @@
 static const char *TAG = "rv9-rt";
 
 #define MAX_RT_TASKS 4
+#define MAX_EVENTS   8
 #define MISS_BACKLOG 8      /* releases the semaphore may hold before we
                                stop counting; more than this is not late,
                                it is broken */
+
+typedef struct rv9_event {
+    SemaphoreHandle_t sem;
+    uint64_t          at_us;    /* when the oldest unserviced signal arrived */
+    uint32_t          pending;  /* signals since the waiter last looked */
+    uint64_t          last_us;  /* when the previous signal arrived */
+    bool              in_use;
+} event_impl_t;
+
+static event_impl_t s_events[MAX_EVENTS];
+static portMUX_TYPE s_event_guard = portMUX_INITIALIZER_UNLOCKED;
 
 typedef struct {
     TaskHandle_t       task;
@@ -55,12 +78,20 @@ typedef struct {
     esp_timer_handle_t timer;
     uint32_t           period_us;
 
+    /* Non-NULL when this task is released by an event rather than a timer.
+       The two are exclusive: a task has one release source, or its numbers
+       mean nothing. */
+    event_impl_t      *event;
+
     /* Measurement. A control loop is only as trustworthy as its numbers. */
     uint64_t           activations;
     uint64_t           overruns;
     uint32_t           max_jitter_us;
     uint32_t           max_exec_us;
     uint32_t           last_exec_us;
+    uint32_t           min_interval_us;  /* shortest arrival gap seen */
+    uint64_t           floods;           /* arrivals inside the declared gap */
+    bool               flood_reported;
     uint64_t           released_at_us;   /* when this activation began */
     bool               in_use;
 } rt_task_t;
@@ -223,6 +254,121 @@ void rv9_lock_release(rv9_lock_t lock)
     xSemaphoreGive(l->mux);
 }
 
+/* ------------------------------------------------------------------ */
+/* Events                                                              */
+/* ------------------------------------------------------------------ */
+
+rv9_err_t rv9_event_create(rv9_event_t *out_event)
+{
+    if (out_event == NULL) return RV9_ERR_INVAL;
+
+    /*
+     * A fixed pool, not the heap. An event is signalled from an interrupt
+     * handler, so it must live somewhere that is always mapped -- and being
+     * able to name one by a small index is what lets a driver hand it out
+     * through getstat without a pointer crossing the seam.
+     */
+    event_impl_t *e = NULL;
+    for (int i = 0; i < MAX_EVENTS; i++) {
+        if (!s_events[i].in_use) { e = &s_events[i]; break; }
+    }
+    if (e == NULL) return RV9_ERR_NOMEM;
+
+    memset(e, 0, sizeof(*e));
+
+    /* Counting, so a signal arriving while the waiter is busy is remembered
+       rather than lost. How many were coalesced is counted separately. */
+    e->sem = xSemaphoreCreateCounting(MISS_BACKLOG, 0);
+    if (e->sem == NULL) return RV9_ERR_NOMEM;
+
+    e->in_use = true;
+    *out_event = (rv9_event_t)e;
+    return RV9_OK;
+}
+
+void rv9_event_destroy(rv9_event_t ev)
+{
+    event_impl_t *e = (event_impl_t *)ev;
+    if (e == NULL || !e->in_use) return;
+
+    /*
+     * Whoever is waiting must be gone first. There is no way to check that
+     * here, which is why the only caller is a driver closing a unit it
+     * opened -- the path is closed, so nothing can still be armed on it.
+     */
+    e->in_use = false;
+    vSemaphoreDelete(e->sem);
+    e->sem = NULL;
+}
+
+int rv9_event_id(rv9_event_t ev)
+{
+    event_impl_t *e = (event_impl_t *)ev;
+    if (e == NULL || !e->in_use) return 0;
+    return (int)(e - s_events) + 1;      /* 0 means "no event" */
+}
+
+rv9_event_t rv9_event_by_id(int id)
+{
+    if (id < 1 || id > MAX_EVENTS) return NULL;
+    event_impl_t *e = &s_events[id - 1];
+    return e->in_use ? (rv9_event_t)e : NULL;
+}
+
+/*
+ * Resident, and so is everything it calls. This runs in an interrupt
+ * handler installed with ESP_INTR_FLAG_IRAM, which means it may be entered
+ * while the flash cache is off -- reaching anything in flash from here
+ * would not be slow, it would be a panic.
+ */
+RV9_RT_CODE void rv9_event_signal_from_isr(rv9_event_t ev)
+{
+    event_impl_t *e = (event_impl_t *)ev;
+    if (e == NULL) return;
+
+    uint64_t now = rv9_time_us();
+
+    portENTER_CRITICAL_ISR(&s_event_guard);
+    /*
+     * Stamp the OLDEST unserviced signal, not the newest.
+     *
+     * If two edges arrive before the task runs, the honest latency is
+     * measured from the first one: that is how long the system actually
+     * took to respond to something that had already happened. Stamping the
+     * newest would quietly subtract the part of the delay that was our
+     * fault, which is the direction an instrument must never round in.
+     */
+    if (e->pending == 0) e->at_us = now;
+    e->pending++;
+    portEXIT_CRITICAL_ISR(&s_event_guard);
+
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(e->sem, &woken);
+
+    /* Yielding from an interrupt is the host kernel's business, and it
+       stays on this side of the seam. */
+    if (woken) portYIELD_FROM_ISR();
+}
+
+void rv9_event_signal(rv9_event_t ev)
+{
+    event_impl_t *e = (event_impl_t *)ev;
+    if (e == NULL) return;
+
+    uint64_t now = rv9_time_us();
+
+    portENTER_CRITICAL(&s_event_guard);
+    if (e->pending == 0) e->at_us = now;
+    e->pending++;
+    portEXIT_CRITICAL(&s_event_guard);
+
+    xSemaphoreGive(e->sem);
+}
+
+/* ------------------------------------------------------------------ */
+/* Real-time tasks                                                     */
+/* ------------------------------------------------------------------ */
+
 static RV9_RT_CODE rt_task_t *slot_for(TaskHandle_t t)
 {
     for (int i = 0; i < MAX_RT_TASKS; i++) {
@@ -245,21 +391,59 @@ static void IRAM_ATTR release_isr(void *arg)
     if (woken) portYIELD_FROM_ISR();
 }
 
+/* A slot belongs to a task, not to a release source: the accounting is the
+   same either way, and only the thing that wakes it differs. */
+static rt_task_t *claim_slot(TaskHandle_t self)
+{
+    if (slot_for(self) != NULL) return NULL;            /* already declared */
+
+    for (int i = 0; i < MAX_RT_TASKS; i++) {
+        if (!s_rt[i].in_use) {
+            memset(&s_rt[i], 0, sizeof(s_rt[i]));
+            s_rt[i].task = self;
+            s_rt[i].min_interval_us = UINT32_MAX;
+            return &s_rt[i];
+        }
+    }
+    return NULL;
+}
+
+rv9_err_t rv9_rt_declare_event(rv9_event_t ev, uint32_t min_interval_us)
+{
+    event_impl_t *e = (event_impl_t *)ev;
+    if (e == NULL || !e->in_use) return RV9_ERR_INVAL;
+
+    rt_task_t *rt = claim_slot(xTaskGetCurrentTaskHandle());
+    if (rt == NULL) return RV9_ERR_NOMEM;
+
+    rt->event     = e;
+    rt->period_us = min_interval_us;   /* the declared bound, not a period */
+
+    /*
+     * Start from now rather than from the first event.
+     *
+     * The alternative -- leave released_at_us at zero and let the first
+     * wait compute a gap since the epoch -- makes the first activation
+     * report an execution time of however long the board has been up. An
+     * instrument's first reading should not be its worst.
+     */
+    rt->released_at_us = rv9_time_us();
+    rt->in_use = true;
+
+    ESP_LOGI(TAG, "real-time task declared: event %d, min interval %lu us",
+             rv9_event_id(ev), (unsigned long)min_interval_us);
+    return RV9_OK;
+}
+
 rv9_err_t rv9_rt_declare(uint32_t period_us)
 {
     if (period_us == 0) return RV9_ERR_INVAL;
 
     TaskHandle_t self = xTaskGetCurrentTaskHandle();
-    if (slot_for(self) != NULL) return RV9_ERR_INVAL;   /* already declared */
 
-    rt_task_t *rt = NULL;
-    for (int i = 0; i < MAX_RT_TASKS; i++) {
-        if (!s_rt[i].in_use) { rt = &s_rt[i]; break; }
-    }
+    rt_task_t *rt = claim_slot(self);
     if (rt == NULL) return RV9_ERR_NOMEM;
 
-    memset(rt, 0, sizeof(*rt));
-    rt->task      = self;
     rt->period_us = period_us;
 
     /* Counting, so that a release arriving while the task is still busy is
@@ -299,17 +483,87 @@ rv9_err_t rv9_rt_declare(uint32_t period_us)
  * decides to write its calibration data to flash; if it lived in flash the
  * loop would not be able to wake up and find out how late it was.
  */
+/*
+ * Waiting for an event.
+ *
+ * Everything here that a periodic task does against a timer, this does
+ * against the world: lateness is measured from the instant the interrupt
+ * handler stamped, not from a deadline we set ourselves. That number --
+ * pin to process -- is the one a reactive system lives or dies on, and it
+ * is the only one that cannot be obtained from inside the task alone.
+ */
+static RV9_RT_CODE int rt_wait_event(rt_task_t *rt)
+{
+    event_impl_t *e = rt->event;
+
+    if (xSemaphoreTake(e->sem, portMAX_DELAY) != pdTRUE) return -1;
+
+    /* Drain the rest: they are signals about a world that has since changed
+       again, and the handler is about to look at the world as it is now. */
+    while (uxSemaphoreGetCount(e->sem) > 0) xSemaphoreTake(e->sem, 0);
+
+    portENTER_CRITICAL(&s_event_guard);
+    uint64_t at      = e->at_us;
+    uint64_t prev    = e->last_us;
+    uint32_t pending = e->pending;
+    e->last_us = at;
+    e->pending = 0;
+    portEXIT_CRITICAL(&s_event_guard);
+
+    uint64_t woken = rv9_time_us();
+
+    /* Pin to process. */
+    uint32_t latency = (woken > at) ? (uint32_t)(woken - at) : 0;
+    if (latency > rt->max_jitter_us) rt->max_jitter_us = latency;
+
+    /* How fast is this source really going? Worth knowing whether or not a
+       bound was declared -- a bound nobody measured is a guess. */
+    if (prev != 0 && at > prev) {
+        uint64_t gap = at - prev;
+        uint32_t g = (gap > UINT32_MAX) ? UINT32_MAX : (uint32_t)gap;
+        if (g < rt->min_interval_us) rt->min_interval_us = g;
+
+        if (rt->period_us != 0 && g < rt->period_us) {
+            rt->floods++;
+            /* Once. A source that is flooding will flood thousands of
+               times, and a log that scrolls is a log nobody reads. */
+            if (!rt->flood_reported) {
+                rt->flood_reported = true;
+                ESP_LOGW(TAG, "event %d arrived %lu us apart, %lu declared",
+                         rv9_event_id((rv9_event_t)e),
+                         (unsigned long)g, (unsigned long)rt->period_us);
+            }
+        }
+    }
+
+    rt->released_at_us = woken;
+    rt->activations++;
+
+    /*
+     * Signals that piled up while we were working. They are the aperiodic
+     * form of a missed period: the system was handed more to respond to
+     * than it responded to, and coalescing them is a decision, not an
+     * accident, so it is reported.
+     */
+    int coalesced = (pending > 1) ? (int)(pending - 1) : 0;
+    rt->overruns += (uint64_t)coalesced;
+    return coalesced;
+}
+
 RV9_RT_CODE int rv9_rt_wait(void)
 {
     rt_task_t *rt = slot_for(xTaskGetCurrentTaskHandle());
     if (rt == NULL) return -1;
 
     /* Charge this activation before sleeping, so execution time is the
-       work itself and not the work plus the wait. */
+       work itself and not the work plus the wait. Both release sources owe
+       this, so it happens before they part company. */
     uint64_t now = rv9_time_us();
     uint32_t exec = (uint32_t)(now - rt->released_at_us);
     rt->last_exec_us = exec;
     if (exec > rt->max_exec_us) rt->max_exec_us = exec;
+
+    if (rt->event != NULL) return rt_wait_event(rt);
 
     if (xSemaphoreTake(rt->release, portMAX_DELAY) != pdTRUE) return -1;
 
@@ -356,12 +610,33 @@ void rv9_rt_release(void)
     rt_task_t *rt = slot_for(xTaskGetCurrentTaskHandle());
     if (rt == NULL) return;
 
-    esp_timer_stop(rt->timer);
-    esp_timer_delete(rt->timer);
-    vSemaphoreDelete(rt->release);
+    /* An event-driven task borrowed its release source; it did not make it,
+       and the device it belongs to is still there. Only let go of it. */
+    if (rt->event != NULL) {
+        rt->event = NULL;
+    } else {
+        esp_timer_stop(rt->timer);
+        esp_timer_delete(rt->timer);
+        vSemaphoreDelete(rt->release);
+    }
 
     rt->in_use = false;
     rt->task   = NULL;
+}
+
+static void fill_stats(const rt_task_t *rt, rv9_rt_stats_t *out)
+{
+    out->period_us       = rt->period_us;
+    out->activations     = rt->activations;
+    out->overruns        = rt->overruns;
+    out->max_jitter_us   = rt->max_jitter_us;
+    out->max_exec_us     = rt->max_exec_us;
+    out->last_exec_us    = rt->last_exec_us;
+    out->event_driven    = (rt->event != NULL);
+    out->floods          = rt->floods;
+    /* Nothing seen yet reads as zero, not as four billion. */
+    out->min_interval_us = (rt->min_interval_us == UINT32_MAX)
+                           ? 0 : rt->min_interval_us;
 }
 
 rv9_err_t rv9_rt_stats(rv9_rt_stats_t *out)
@@ -369,12 +644,7 @@ rv9_err_t rv9_rt_stats(rv9_rt_stats_t *out)
     rt_task_t *rt = slot_for(xTaskGetCurrentTaskHandle());
     if (rt == NULL || out == NULL) return RV9_ERR_INVAL;
 
-    out->period_us     = rt->period_us;
-    out->activations   = rt->activations;
-    out->overruns      = rt->overruns;
-    out->max_jitter_us = rt->max_jitter_us;
-    out->max_exec_us   = rt->max_exec_us;
-    out->last_exec_us  = rt->last_exec_us;
+    fill_stats(rt, out);
     return RV9_OK;
 }
 
@@ -387,12 +657,7 @@ rv9_err_t rv9_rt_stats_by_index(int index, rv9_rt_stats_t *out, bool *valid)
     if (valid) *valid = rt->in_use;
     if (!rt->in_use) return RV9_OK;
 
-    out->period_us     = rt->period_us;
-    out->activations   = rt->activations;
-    out->overruns      = rt->overruns;
-    out->max_jitter_us = rt->max_jitter_us;
-    out->max_exec_us   = rt->max_exec_us;
-    out->last_exec_us  = rt->last_exec_us;
+    fill_stats(rt, out);
     return RV9_OK;
 }
 

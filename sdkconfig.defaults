@@ -49,6 +49,16 @@ CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD=y
 # one task for the kernel to live in. Set to n for the FreeRTOS reference.
 CONFIG_RV9_KERNEL_NATIVE=y
 
+# A pin must be reachable while the flash cache is off.
+#
+# RV9_RT_CODE puts RV-9's own write path in IRAM, but the last two calls in
+# it belong to ESP-IDF, and by default they live in flash like everything
+# else -- so a control loop that reached gpio_set_level during a flash write
+# would have found it missing. This moves gpio_set_level and gpio_get_level
+# into IRAM, which is what makes "a pin is the one device a control loop can
+# drive through a flash write" actually true rather than nearly true.
+CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y
+
 # RV-9 keeps each task's path table in thread-local storage so that reading
 # or writing a path costs a dereference rather than a lock and a search.
 # Index 0 belongs to ESP-IDF's pthread support, so RV-9 uses index 1 and

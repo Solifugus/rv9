@@ -51,9 +51,58 @@ static bool pin_is_reserved(uint32_t pin)
 }
 
 typedef struct {
-    uint32_t pin;
-    bool     output;
+    uint32_t    pin;
+    bool        output;
+
+    /* Set when the pin has been armed for edges. The event is this unit's
+       own: two processes watching the same pin open it twice and get one
+       each, and neither can starve the other by draining a shared queue. */
+    rv9_event_t event;
+    uint32_t    edge;
 } gpio_unit_t;
+
+/*
+ * The shared GPIO interrupt, installed once and on demand.
+ *
+ * ESP_INTR_FLAG_IRAM is the whole reason this is worth doing carefully: it
+ * promises that neither ESP-IDF's dispatcher nor our handler will touch
+ * flash, so an edge arriving while the cache is off still reaches the
+ * process waiting for it. A pin that stops interrupting whenever the radio
+ * saves its calibration data would not be an input a control system could
+ * be built on.
+ */
+static bool s_isr_service;
+
+/*
+ * Resident. Everything it calls is too -- rv9_event_signal_from_isr and the
+ * timestamp it takes -- and nothing here allocates, logs or takes a lock
+ * that ordinary code holds.
+ */
+static RV9_RT_CODE void gpio_edge_isr(void *arg)
+{
+    gpio_unit_t *u = (gpio_unit_t *)arg;
+    rv9_event_signal_from_isr(u->event);
+}
+
+/*
+ * How many paths are open on each pin, and how many of them want to drive
+ * it.
+ *
+ * A pin is one piece of hardware and more than one process may hold it --
+ * one watching for edges, another changing the level. Without this, the
+ * second open reset the pin and took the first opener's configuration with
+ * it: direction, pull, and (once there were interrupts) the arming that the
+ * first process was blocked waiting on. The pin stayed open and simply
+ * stopped doing what it had been told.
+ *
+ * So the reset happens once, on the first open, and direction is the union
+ * of what the openers asked for: if anyone wants to drive it, it is an
+ * output, because an output on this chip still reads back.
+ */
+#define MAX_PINS 40
+static uint8_t s_open_count[MAX_PINS];
+static uint8_t s_output_count[MAX_PINS];
+static rv9_lock_t s_lock;
 
 static rv9_io_err_t gpio_unit_open(rv9_dev_t *dev, uint32_t unit,
                                    uint32_t mode, void **out_state)
@@ -61,6 +110,7 @@ static rv9_io_err_t gpio_unit_open(rv9_dev_t *dev, uint32_t unit,
     (void)dev;
 
     if (!GPIO_IS_VALID_GPIO((gpio_num_t)unit)) return RV9_IO_ERR_NOTFOUND;
+    if (unit >= MAX_PINS) return RV9_IO_ERR_NOTFOUND;
     if (pin_is_reserved(unit)) {
         ESP_LOGW(TAG, "pin %lu is spoken for (USB console, display or card)",
                  (unsigned long)unit);
@@ -73,24 +123,45 @@ static rv9_io_err_t gpio_unit_open(rv9_dev_t *dev, uint32_t unit,
     u->pin    = unit;
     u->output = (mode & RV9_MODE_WRITE) != 0;
 
+    rv9_lock_acquire(s_lock);
+    bool first = (s_open_count[unit] == 0);
+    s_open_count[unit]++;
+    if (u->output) s_output_count[unit]++;
+    bool drive = (s_output_count[unit] > 0);
+    rv9_lock_release(s_lock);
+
     /*
-     * Reclaim the pin first.
+     * Reclaim the pin, but only the first time.
      *
      * A GPIO on this chip usually comes up routed to some peripheral
      * through the IOMUX, and configuring it as GPIO does not undo that --
      * so the pin reads and writes as if nothing happened, which is exactly
      * how it presented: every pin accepted a write and read back zero.
      */
-    gpio_reset_pin((gpio_num_t)unit);
+    esp_err_t err;
+    if (first) {
+        gpio_reset_pin((gpio_num_t)unit);
 
-    gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << unit,
-        .mode = u->output ? GPIO_MODE_INPUT_OUTPUT : GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    if (gpio_config(&cfg) != ESP_OK) {
+        gpio_config_t cfg = {
+            .pin_bit_mask = 1ULL << unit,
+            .mode = drive ? GPIO_MODE_INPUT_OUTPUT : GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        err = gpio_config(&cfg);
+    } else {
+        /* Direction only. Everything else already belongs to someone. */
+        err = gpio_set_direction((gpio_num_t)unit,
+                                 drive ? GPIO_MODE_INPUT_OUTPUT
+                                       : GPIO_MODE_INPUT);
+    }
+
+    if (err != ESP_OK) {
+        rv9_lock_acquire(s_lock);
+        s_open_count[unit]--;
+        if (u->output) s_output_count[unit]--;
+        rv9_lock_release(s_lock);
         rv9_free(u);
         return RV9_IO_ERR_IO;
     }
@@ -102,15 +173,98 @@ static rv9_io_err_t gpio_unit_open(rv9_dev_t *dev, uint32_t unit,
 static rv9_io_err_t gpio_unit_close(rv9_dev_t *dev, void *state)
 {
     (void)dev;
-    rv9_free(state);
+    gpio_unit_t *u = (gpio_unit_t *)state;
+    if (u == NULL) return RV9_IO_OK;
+
+    /* Disarm before freeing, in that order: an interrupt that arrives
+       between the two would be handed a pointer to nothing. */
+    if (u->event != NULL) {
+        gpio_intr_disable((gpio_num_t)u->pin);
+        gpio_isr_handler_remove((gpio_num_t)u->pin);
+        rv9_event_destroy(u->event);
+        u->event = NULL;
+    }
+
+    /* The level stays; the accounting does not. Closing the last path that
+       wanted to drive the pin does not turn it back into an input either --
+       see the note at the top about why a level survives its process. */
+    rv9_lock_acquire(s_lock);
+    if (u->pin < MAX_PINS) {
+        if (s_open_count[u->pin] > 0)                 s_open_count[u->pin]--;
+        if (u->output && s_output_count[u->pin] > 0)  s_output_count[u->pin]--;
+    }
+    rv9_lock_release(s_lock);
+
+    rv9_free(u);
     return RV9_IO_OK;
 }
 
 /*
- * Resident, and so are the two ESP-IDF calls they make: gpio_set_level and
- * gpio_get_level are mapped 'noflash'. A pin is therefore the one device a
- * control loop can drive while the flash cache is off. PWM and the ADC are
- * not: their drivers take mutexes and live in flash.
+ * Arm or disarm the pin.
+ *
+ * Unlike a level, this does not survive the close -- see the note at the
+ * top of this file about why a level does. An interrupt exists to wake a
+ * particular process, so it has no meaning once that process is gone, and
+ * leaving one armed would keep firing into a handler nobody reads.
+ */
+static rv9_io_err_t gpio_set_edge(gpio_unit_t *u, uint32_t mode)
+{
+    static const gpio_int_type_t types[] = {
+        GPIO_INTR_DISABLE, GPIO_INTR_POSEDGE,
+        GPIO_INTR_NEGEDGE, GPIO_INTR_ANYEDGE,
+    };
+    if (mode > 3) return RV9_IO_ERR_INVAL;
+
+    if (mode == 0) {
+        if (u->event == NULL) return RV9_IO_OK;
+        gpio_intr_disable((gpio_num_t)u->pin);
+        gpio_isr_handler_remove((gpio_num_t)u->pin);
+        rv9_event_destroy(u->event);
+        u->event = NULL;
+        u->edge  = 0;
+        return RV9_IO_OK;
+    }
+
+    if (!s_isr_service) {
+        esp_err_t e = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+        if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) return RV9_IO_ERR_IO;
+        s_isr_service = true;
+    }
+
+    if (u->event == NULL) {
+        if (rv9_event_create(&u->event) != RV9_OK) return RV9_IO_ERR_NOMEM;
+        if (gpio_isr_handler_add((gpio_num_t)u->pin, gpio_edge_isr, u)
+            != ESP_OK) {
+            rv9_event_destroy(u->event);
+            u->event = NULL;
+            return RV9_IO_ERR_IO;
+        }
+    }
+
+    if (gpio_set_intr_type((gpio_num_t)u->pin, types[mode]) != ESP_OK) {
+        return RV9_IO_ERR_IO;
+    }
+    if (gpio_intr_enable((gpio_num_t)u->pin) != ESP_OK) return RV9_IO_ERR_IO;
+
+    u->edge = mode;
+    ESP_LOGI(TAG, "pin %lu armed (%s), event %d", (unsigned long)u->pin,
+             mode == 1 ? "rising" : mode == 2 ? "falling" : "both",
+             rv9_event_id(u->event));
+    return RV9_IO_OK;
+}
+
+/*
+ * Resident, and so are the two ESP-IDF calls they make -- but only because
+ * we asked. gpio_set_level and gpio_get_level are mapped 'noflash' when
+ * CONFIG_GPIO_CTRL_FUNC_IN_IRAM is set, and it is off by default; this file
+ * claimed they were resident before the option was in sdkconfig.defaults,
+ * which made the claim aspirational. Marking our own code IRAM and then
+ * calling into flash on the last instruction would have been a thorough way
+ * to achieve nothing.
+ *
+ * A pin is therefore the one device a control loop can drive while the
+ * flash cache is off. PWM and the ADC are not: their drivers take mutexes
+ * and live in flash.
  */
 static RV9_RT_CODE rv9_io_err_t gpio_unit_read(rv9_dev_t *dev, void *state,
                                                uint32_t *value)
@@ -163,6 +317,15 @@ static rv9_io_err_t gpio_unit_stat(rv9_dev_t *dev, void *state, bool set,
         *value = 1;                       /* a pin is one bit */
         return RV9_IO_OK;
 
+    case RV9_PIO_SS_EDGE:
+        if (!set) { *value = u->edge; return RV9_IO_OK; }
+        return gpio_set_edge(u, *value);
+
+    case RV9_PIO_GS_EVENT:
+        if (set) return RV9_IO_ERR_UNSUPPORTED;
+        *value = (uint32_t)rv9_event_id(u->event);
+        return RV9_IO_OK;
+
     default:
         return RV9_IO_ERR_UNSUPPORTED;
     }
@@ -179,5 +342,8 @@ static const rv9_driver_t gpio_drv = {
 
 rv9_io_err_t rv9_drv_gpio_register(void)
 {
+    if (s_lock == NULL && rv9_lock_create(&s_lock) != RV9_OK) {
+        return RV9_IO_ERR_NOMEM;
+    }
     return rv9_io_register_driver(&gpio_drv);
 }

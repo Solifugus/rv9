@@ -65,6 +65,27 @@ static inline const char *m_word(const char *s, char *out, uint32_t cap)
     return s;
 }
 
+/*
+ * Build a unit path: m_devpath(buf, "/gpio/", 3) gives "/gpio/3".
+ *
+ * Written out by hand because the obvious version is a trap. A local
+ * `char pre[] = "/gpio/";` compiles to a memcpy from rodata, and a module
+ * has no libc to supply one -- the link fails, which is the good case. A
+ * pointer to the literal is fine; an array initialised from it is not.
+ */
+static inline void m_devpath(char *out, const char *dev, uint32_t unit)
+{
+    uint32_t i = 0;
+    while (*dev) out[i++] = *dev++;
+
+    char d[12];
+    int n = 0;
+    do { d[n++] = (char)('0' + unit % 10); unit /= 10; } while (unit);
+    while (n > 0) out[i++] = d[--n];
+
+    out[i] = '\0';
+}
+
 /* Left-aligned in a field of `width`, for table output. */
 static inline void m_pad(const rv9_mod_env_t *env, int path, const char *s,
                          uint32_t width)

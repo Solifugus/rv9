@@ -213,7 +213,7 @@ useful, working preparation, but preparation.*
 
 ---
 
-## Phase 8 — Real-time  ◐ periodic processes and bounded I/O done
+## Phase 8 — Real-time  ◐ periodic and event-driven processes done
 
 Driven by a real use: RV-9 as a target for autonomous systems, where the
 control layer is late if it is late.
@@ -225,9 +225,24 @@ control layer is late if it is late.
 - **Timing is reported to the application** via `env->rt_stats()`, because
   a control loop that cannot see its own jitter cannot report that it has
   stopped being trustworthy.
-- Not done: aperiodic (event-triggered) real-time processes, which is what
-  a reactive layer wants — an interrupt or a message releasing a process
-  with the same latency guarantee as a period does.
+- **Aperiodic (event-triggered) real-time processes — done.**
+  `env->rt_declare_event(event_id, min_interval_us)`, released by an
+  interrupt instead of a timer, and waiting in the *same* `rt_wait()` — a
+  control loop should be able to change what wakes it without being
+  rewritten. Measured pin-to-process: 7 µs idle, 15 µs on the first run
+  after boot while the radio writes NVS, 13 µs under `noise`, 41–51 µs
+  alongside a second real-time process. No events coalesced, none lost.
+- **Lateness is measured against the world, not against us.** The interrupt
+  handler stamps the clock before waking anyone, and keeps the *oldest*
+  unserviced stamp when several arrive — stamping the newest would subtract
+  the part of the delay that was our fault.
+- Not done: an edge arriving during a flash erase is not measured, because
+  every event source available without external wiring is software and
+  stalls in the same window. Needs a signal generator or a peripheral output
+  routed to an armed pin.
+- Not done: a scheduling policy *among* real-time processes. They share one
+  host priority and round-robin. The declared periods and inter-arrival
+  bounds are already recorded, which is what rate-monotonic or EDF needs.
 - **Bounded-latency I/O — done.** A path lookup was a lock plus two list
   walks; it is now a load from task-local storage, filled at `open`. Open
   and close stay unbounded on purpose: a control loop opens what it needs
@@ -289,9 +304,19 @@ control layer is late if it is late.
   descriptor option: the useful time to dim a display is while running.
   Not persisted, deliberately.
 - Not done: I2C and SPI as devices, which is what most sensors want.
-- Not done: interrupt-driven inputs — a pin change releasing a process.
-  That is the same mechanism aperiodic real-time needs, and doing both at
-  once is the sensible way round.
+- **Interrupt-driven inputs — done.** `setstat(path, RV9_PIO_SS_EDGE, ...)`
+  arms a pin; `getstat(path, RV9_PIO_GS_EVENT, ...)` says which event it
+  signals on. Generic PIO codes, not gpio-specific: any device that can
+  interrupt answers the same two, which is how a UART or a card will plug
+  into this without a new mechanism.
+- **A pin may be held by more than one process — fixed.** Opening a unit
+  used to reset the pin every time, silently undoing the previous opener's
+  direction, pull and arming. The reset happens on the first open only.
+- **`gpio_set_level` is now genuinely resident.** Phase 8 claimed it was, on
+  the strength of an ESP-IDF `noflash` mapping that is gated behind
+  `CONFIG_GPIO_CTRL_FUNC_IN_IRAM` — off by default. Marking our own code
+  IRAM and then calling into flash on the last instruction achieves nothing.
+  The option is set; `nm` on the image is the check.
 - **Bounded-latency I/O — done**, see phase 8. `/gpio` is reachable from a
   control loop with the flash cache off; `/pwm0` and `/adc0` are not, and
   making them so means driving LEDC and the ADC from registers rather than
@@ -308,12 +333,7 @@ control layer is late if it is late.
 
 ## Immediate next step
 
-Aperiodic real-time: an interrupt or a message releasing a process with the
-same guarantee a period gets. Interrupt-driven GPIO inputs are the same
-mechanism, and the reactive layer of the language this is being built for
-wants exactly that.
-
-Then phase 5. Storage: RBF, the `sdspi` driver, and `/sd0`.
+Phase 5. Storage: RBF, the `sdspi` driver, and `/sd0`.
 
 The SD card shares its SPI bus with the LCD, so bus arbitration is the new
 problem — the console and the card will contend. A PIPE file manager belongs

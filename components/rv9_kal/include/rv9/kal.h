@@ -197,25 +197,92 @@ void *rv9_task_local_get(void);
 void  rv9_task_local_set(void *value);
 
 /* ------------------------------------------------------------------ */
+/* Events -- something happened, and when                              */
+/*                                                                     */
+/* An event is a rendezvous between an interrupt and a thread. OS-9    */
+/* had these as first-class kernel objects (F$Event) and named them by */
+/* a small integer, which is what we do too: a driver creates one and  */
+/* hands out its id through getstat, and whoever wants waking asks to  */
+/* be released by that id. Neither end needs a pointer to the other,   */
+/* which is what keeps a driver above the seam from having to know     */
+/* that real-time tasks exist at all.                                  */
+/*                                                                     */
+/* The signal carries a timestamp taken in the interrupt handler. That */
+/* is the whole point: the number a reactive system is judged on is    */
+/* how long after the world changed the software noticed, and that     */
+/* cannot be measured from the far end.                                */
+/* ------------------------------------------------------------------ */
+
+typedef struct rv9_event *rv9_event_t;
+
+rv9_err_t rv9_event_create(rv9_event_t *out_event);
+void      rv9_event_destroy(rv9_event_t ev);
+
+/* Small integer naming an event. 0 is "no event"; ids start at 1. */
+int         rv9_event_id(rv9_event_t ev);
+rv9_event_t rv9_event_by_id(int id);
+
+/*
+ * Signal from an interrupt handler. Resident, because the interrupt that
+ * matters most is the one that arrives while the flash cache is off.
+ *
+ * The caller does not deal with waking anyone: yielding from an interrupt
+ * is the host kernel's business and stays on this side of the seam.
+ *
+ * (The attribute goes on the definition, not here. IRAM_ATTR names a unique
+ * section per use, so repeating it on the declaration puts the two in
+ * different sections and the compiler rightly objects.)
+ */
+void rv9_event_signal_from_isr(rv9_event_t ev);
+
+/* The same from ordinary code, for sources that are not interrupts. */
+void rv9_event_signal(rv9_event_t ev);
+
+/* ------------------------------------------------------------------ */
 /* Real-time tasks                                                     */
 /*                                                                     */
 /* A class of task that is late if it is late. These do not run on      */
 /* RV-9's cooperative scheduler -- a control loop cannot depend on      */
 /* every other thread being polite -- but on a preemptive scheduler at  */
-/* the top of the priority order, released by a hardware timer.         */
+/* the top of the priority order, released by a hardware timer or by a  */
+/* hardware event.                                                     */
 /*                                                                     */
 /* The shape is the one the native implementation will have when RV-9   */
 /* owns the machine, so control code written against this API does not  */
 /* get rewritten when the kernel underneath grows up.                   */
 /* ------------------------------------------------------------------ */
 
+/*
+ * The same six numbers describe both kinds of real-time task, because the
+ * questions are the same ones:
+ *
+ *   periodic        period_us is the declared period; max_jitter_us is how
+ *                   late the worst release was against the timer; overruns
+ *                   counts periods that elapsed while still working.
+ *
+ *   event-driven    period_us is the declared minimum inter-arrival, or 0
+ *                   for a source with no bound; max_jitter_us is how long
+ *                   the worst event waited between the interrupt and this
+ *                   task running; overruns counts events that arrived while
+ *                   still working and were coalesced into one activation.
+ *
+ * Lateness is one idea measured against two different clocks -- the timer
+ * we own, or the world we do not -- and control code that treats it as one
+ * idea is control code that can change its release source without being
+ * rewritten. That is why rv9_rt_wait() is the same call for both.
+ */
 typedef struct {
     uint32_t period_us;
     uint64_t activations;
-    uint64_t overruns;        /* periods that elapsed while still working */
+    uint64_t overruns;        /* periods missed, or events coalesced */
     uint32_t max_jitter_us;   /* worst lateness of a release */
     uint32_t max_exec_us;     /* worst time spent in one activation */
     uint32_t last_exec_us;
+
+    /* Event-driven only, and not in the module ABI: see below. */
+    bool     event_driven;
+    uint32_t min_interval_us; /* shortest gap between events actually seen */
+    uint64_t floods;          /* events closer together than declared */
 } rv9_rt_stats_t;
 
 rv9_err_t rv9_task_create_rt(rv9_task_fn fn, const char *name,
@@ -226,12 +293,28 @@ rv9_err_t rv9_task_create_rt(rv9_task_fn fn, const char *name,
 rv9_err_t rv9_rt_declare(uint32_t period_us);
 
 /*
- * Sleep until the next period. Returns how many periods were missed while
- * the caller was still working -- 0 when on time, negative on error.
+ * Declare this task released by an event rather than by a period.
  *
- * A missed deadline is reported rather than absorbed. A control loop that
- * silently falls behind is worse than one that stops, because it looks
- * correct right up until something hits something.
+ * min_interval_us is the shortest gap between events the caller is
+ * promising to cope with -- a sporadic task's equivalent of a period, and
+ * the thing that makes the load analysable at all. Pass 0 to say honestly
+ * that there is no bound; nothing is then promised, and the arrivals are
+ * still measured so that the bound can be discovered.
+ *
+ * An event source that fires faster than declared is not stopped. It is
+ * counted, because a control system whose inputs are arriving faster than
+ * its designer expected needs to be told, not throttled.
+ */
+rv9_err_t rv9_rt_declare_event(rv9_event_t ev, uint32_t min_interval_us);
+
+/*
+ * Wait for the next release -- the next period, or the next event.
+ *
+ * Returns how many releases were missed while the caller was still working
+ * (0 when on time), negative on error. A missed deadline is reported rather
+ * than absorbed. A control loop that silently falls behind is worse than one
+ * that stops, because it looks correct right up until something hits
+ * something.
  */
 int rv9_rt_wait(void);
 
