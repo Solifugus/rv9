@@ -351,6 +351,10 @@ static uint64_t env_time_ms(void)
     rv9_preempt_point();
     return rv9_time_ms();
 }
+
+/* No preemption point: this is what a control loop measures itself with,
+   and a measurement that can reschedule you measures something else. */
+static RV9_RT_CODE uint64_t env_time_us(void) { return rv9_time_us(); }
 static void     env_yield(void) { rv9_task_yield(); }
 static void     env_sleep_ms(uint32_t ms) { rv9_task_delay_ms(ms); }
 static uint32_t env_no_signals(void)
@@ -387,13 +391,13 @@ static int env_close(int path)
     return s_io_ops && s_io_ops->close ? s_io_ops->close(path) : -1;
 }
 
-static int env_read(int path, void *buf, uint32_t len)
+static RV9_RT_CODE int env_read(int path, void *buf, uint32_t len)
 {
     rv9_preempt_point();
     return s_io_ops && s_io_ops->read ? s_io_ops->read(path, buf, len) : -1;
 }
 
-static int env_write(int path, const void *buf, uint32_t len)
+static RV9_RT_CODE int env_write(int path, const void *buf, uint32_t len)
 {
     rv9_preempt_point();
     return s_io_ops && s_io_ops->write ? s_io_ops->write(path, buf, len) : -1;
@@ -586,6 +590,7 @@ void rv9_mod_env_init(rv9_mod_env_t *env, void *statics,
     env->rt_wait      = NULL;
     env->rt_stats     = NULL;
     env->fork_rt      = env_fork_rt;
+    env->time_us      = env_time_us;
 }
 
 rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result)

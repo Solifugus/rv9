@@ -24,6 +24,36 @@ extern "C" {
 #endif
 
 /* ------------------------------------------------------------------ */
+/* Where real-time code lives                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * RV9_RT_CODE marks a function that a control loop runs while a deadline
+ * is pending, and that therefore must be reachable at all times.
+ *
+ * On this host that means IRAM. The flash on an ESP32 is memory-mapped
+ * through a cache, and the cache is switched off for the duration of every
+ * write to flash -- which the radio does by itself, storing calibration
+ * data after it associates. Code sitting in flash simply is not there
+ * while that happens. Measured on the C5: the first real-time loop after a
+ * boot with WiFi enabled lost 200 ms in one piece, and the same loop with
+ * the radio off never lost more than 12 us.
+ *
+ * So this is not an optimisation. A loop whose code can vanish for a fifth
+ * of a second is not a real-time loop, however good its average looks.
+ *
+ * When RV-9 owns the machine there is no cache to lose and this becomes
+ * nothing -- which is the point of naming the property rather than the
+ * mechanism.
+ */
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#define RV9_RT_CODE IRAM_ATTR
+#else
+#define RV9_RT_CODE
+#endif
+
+/* ------------------------------------------------------------------ */
 /* Status                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -150,6 +180,21 @@ rv9_err_t rv9_lock_create(rv9_lock_t *out_lock);
 void      rv9_lock_destroy(rv9_lock_t lock);
 void      rv9_lock_acquire(rv9_lock_t lock);
 void      rv9_lock_release(rv9_lock_t lock);
+
+/* ------------------------------------------------------------------ */
+/* Task-local storage                                                   */
+/*                                                                     */
+/* One pointer belonging to whichever task or thread is running. Used   */
+/* by the I/O manager to remember where a process's path table is, so   */
+/* that reading and writing a path costs a dereference instead of a     */
+/* lock and a search.                                                   */
+/*                                                                     */
+/* That matters for real-time work: a control loop should not have to   */
+/* acquire a lock shared with the shell in order to move a servo.       */
+/* ------------------------------------------------------------------ */
+
+void *rv9_task_local_get(void);
+void  rv9_task_local_set(void *value);
 
 /* ------------------------------------------------------------------ */
 /* Real-time tasks                                                     */

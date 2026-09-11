@@ -106,7 +106,14 @@ static rv9_io_err_t gpio_unit_close(rv9_dev_t *dev, void *state)
     return RV9_IO_OK;
 }
 
-static rv9_io_err_t gpio_unit_read(rv9_dev_t *dev, void *state, uint32_t *value)
+/*
+ * Resident, and so are the two ESP-IDF calls they make: gpio_set_level and
+ * gpio_get_level are mapped 'noflash'. A pin is therefore the one device a
+ * control loop can drive while the flash cache is off. PWM and the ADC are
+ * not: their drivers take mutexes and live in flash.
+ */
+static RV9_RT_CODE rv9_io_err_t gpio_unit_read(rv9_dev_t *dev, void *state,
+                                               uint32_t *value)
 {
     (void)dev;
     gpio_unit_t *u = (gpio_unit_t *)state;
@@ -116,7 +123,8 @@ static rv9_io_err_t gpio_unit_read(rv9_dev_t *dev, void *state, uint32_t *value)
     return RV9_IO_OK;
 }
 
-static rv9_io_err_t gpio_unit_write(rv9_dev_t *dev, void *state, uint32_t value)
+static RV9_RT_CODE rv9_io_err_t gpio_unit_write(rv9_dev_t *dev, void *state,
+                                                uint32_t value)
 {
     (void)dev;
     gpio_unit_t *u = (gpio_unit_t *)state;

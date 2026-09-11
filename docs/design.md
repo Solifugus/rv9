@@ -1002,6 +1002,148 @@ registration in `io_bringup` is checked. **A registration that fails is a
 device that will not exist: complain where it happens, not where it is
 missed.**
 
+## 14. Bounded-latency I/O
+
+A control loop and the shell used to take the same lock to do the same
+thing. `rv9_io_read`/`write` looked up the caller's path by asking the
+process manager for the current pid — taking the process lock and scanning
+the process list — and then walked the path-table list with no lock at all.
+Slow where it mattered, and a race everywhere else.
+
+Now each task finds its path table once and keeps it in task-local storage.
+The table is filled at `open`, where blocking is allowed, so by the time a
+deadline exists a write is a load and an index. The cached pointer is safe
+to keep: a table belongs to a process, is created before that process can
+run and freed after it has stopped, so no task can watch its own table
+disappear.
+
+Open and close are deliberately *not* bounded. They allocate, and closing a
+file on a volume writes flash. **A control loop opens what it needs before
+its first period and then only reads and writes** — which is the discipline
+this design asks for rather than pretends to remove.
+
+### What the measurement actually found
+
+`rt iolat` runs 2000 activations at 1 kHz writing `/gpio/3` and reports the
+worst single write, not the average. The first version said:
+
+```
+  worst write    26 us
+  worst jitter   198902 us
+  overruns       7
+```
+
+199 milliseconds, in one piece, in a 1 kHz loop. It happened on the first
+run after every boot and never again on that boot, and it did not happen at
+all with the radio off. That is the WiFi stack storing its calibration data:
+a write to flash.
+
+**On this chip, flash is memory-mapped through a cache, and every write to
+flash switches that cache off.** Code sitting in flash is not merely slow
+then — it is not there. RV-9's timer ISR was already in IRAM for exactly
+this reason; the *task* it releases was not, so it woke into nothing.
+
+So `RV9_RT_CODE` (rv9/kal.h) marks the code a control loop runs while a
+deadline is pending, and the whole path carries it: the module's env
+thunks, `rv9_io_read`/`write` and the path lookup, PIO, the GPIO driver,
+`rv9_rt_wait`, `rv9_time_us`. ESP-IDF's `gpio_set_level` and `gpio_get_level`
+are already mapped `noflash`, so a pin is reachable end to end. PWM and the
+ADC are not, and are not claimed to be: their drivers take mutexes and live
+in flash.
+
+This is not an optimisation. A loop whose code can vanish for a fifth of a
+second is not a real-time loop, however good its average looks. When RV-9
+owns the machine there is no cache to lose and the attribute becomes
+nothing — which is why it names the property and not the mechanism.
+
+Same board, same radio, first run after boot:
+
+```
+iolat: 2000 writes to /gpio/3 at 1000 us
+  worst write    13 us (activation 1932)
+  mean write     2 us
+  worst wakeup   9 us late
+  periods missed 0
+```
+
+20,000 activations across ten runs with the shell in use: worst write 10-15
+µs, worst wakeup 8-12 µs late, nothing missed.
+
+### The part that is still not bounded, stated plainly
+
+`noise` exists to make the system busy in the two ways that hurt: writing
+and closing a file on `/f0`, and forking. Run from the network shell while
+`iolat` runs on the console — two shells, one machine, which is what `rshd`
+is for — it gives:
+
+```
+iolat: 2000 writes to /gpio/3 at 1000 us
+  worst write    13 us (activation 441)
+  mean write     2 us
+  worst wakeup   82588 us late
+  periods missed 1879
+```
+
+**The write stayed at 13 µs. Being scheduled at all did not.** 82
+milliseconds is one flash erase. Residency keeps the loop's code reachable;
+it does not give the loop a CPU while the flash driver holds the bus with
+interrupts off.
+
+So the honest statement of what RV-9 offers today is: *I/O from a real-time
+process is bounded; concurrent flash writes are not, and the two do not
+belong in the same second.* A control loop and a log that writes to `/f0`
+are in conflict on this hardware, and saying so is more useful than an
+average that hides it.
+
+The known lever is the flash chip's suspend/resume feature
+(`SPI_FLASH_AUTO_SUSPEND`), which lets an erase be interrupted. It is
+deliberately **not** enabled: it works only on specific flash parts,
+Espressif tells new applications not to turn it on, and this board reports
+`detected chip: generic` — ESP-IDF does not recognise the part well enough
+to have a driver for it. Enabling it here would trade a measurable stall
+for an unmeasurable risk of corrupting the module store.
+
+### An instrument that saturated where it mattered
+
+The old report said seven overruns for a 199 ms stall, twice. `rv9_rt_wait`
+counted missed periods by draining the release semaphore, which holds
+eight — and then reported jitter as the *remainder* after whole periods
+were subtracted, which can never exceed one period. Two different ways of
+saying "late by a little" about a loop that had stopped.
+
+**A measurement that saturates exactly where the trouble is is worse than
+no measurement.** Lateness is now the whole overshoot, measured against the
+clock; missed periods fall out of it.
+
+### The bug underneath: whose thread am I?
+
+Once in roughly eight runs the machine died in the kernel's host task with
+a return address made of text. The cause was `rv9k_self()`.
+
+It returns the kernel's current thread, and that stays set for as long as
+that thread is running. A real-time process is a *host* task that preempts
+the kernel's host task mid-thread — so asking `rv9k_self()` from there
+answers with whatever RV-9 thread it interrupted. The real-time process
+was told it was the shell.
+
+That is not a cosmetic confusion. It hands over another process's identity:
+its pid, its path table, its place in the lock's priority inheritance. A
+real-time process that cached *its* path table into the shell's thread and
+then exited left the shell reading freed memory — which surfaced, much
+later and three layers away, as the kernel jumping into the middle of a
+string.
+
+Only the KAL can answer the question, because only the KAL knows which host
+task the kernel runs in. `rv9_kal_self_thread()` compares the two and
+returns NULL for everyone else; the kernel stays ignorant of hosts, which
+is the arrangement worth keeping. Every "am I an RV-9 thread?" in the KAL
+now goes through it — including the lock, which had been boosting and
+un-boosting an innocent thread.
+
+Third one of this family, and the pattern is stated in §10 already: **not
+every caller of the KAL is an RV-9 thread.** The first two failed loudly
+and immediately. This one ran perfectly for weeks.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

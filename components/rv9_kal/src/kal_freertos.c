@@ -10,6 +10,7 @@
  * expected.
  */
 #include "rv9/kal.h"
+#include "kal_internal.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -56,7 +57,7 @@ const char *rv9_strerror(rv9_err_t err)
 
 /* ---------------- time ---------------- */
 
-uint64_t rv9_time_us(void) { return (uint64_t)esp_timer_get_time(); }
+RV9_RT_CODE uint64_t rv9_time_us(void) { return (uint64_t)esp_timer_get_time(); }
 uint64_t rv9_time_ms(void) { return (uint64_t)esp_timer_get_time() / 1000ULL; }
 
 uint32_t rv9_ms_to_ticks(uint32_t ms) { return (uint32_t)pdMS_TO_TICKS(ms); }
@@ -120,6 +121,31 @@ bool rv9_sched_ages(void) { return false; }
 
 /* Nothing to do: this scheduler takes the CPU whenever it wants it. */
 void rv9_preempt_point(void) { }
+
+/* There are no RV-9 threads in this build; everyone is a host task. The
+   lock code asks anyway, because it is built either way. */
+RV9_RT_CODE rv9k_thread_t *rv9_kal_self_thread(void) { return NULL; }
+
+/* ---------------- task-local storage ---------------- */
+
+/*
+ * Index 1, not 0.
+ *
+ * ESP-IDF's pthread support owns index 0, and the default configuration
+ * allocates exactly one slot -- so the obvious choice silently overwrote
+ * somebody else's pointer. See sdkconfig.defaults.
+ */
+#define RV9_TLS_INDEX 1
+
+RV9_RT_CODE void *rv9_task_local_get(void)
+{
+    return pvTaskGetThreadLocalStoragePointer(NULL, RV9_TLS_INDEX);
+}
+
+RV9_RT_CODE void rv9_task_local_set(void *value)
+{
+    vTaskSetThreadLocalStoragePointer(NULL, RV9_TLS_INDEX, value);
+}
 
 /* ---------------- semaphores ---------------- */
 

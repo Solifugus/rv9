@@ -20,6 +20,7 @@
  */
 #include "rv9/kal.h"
 #include "rv9/kernel.h"
+#include "kal_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -107,7 +108,7 @@ const char *rv9_strerror(rv9_err_t err)
 
 /* ---------------- time ---------------- */
 
-uint64_t rv9_time_us(void) { return (uint64_t)esp_timer_get_time(); }
+RV9_RT_CODE uint64_t rv9_time_us(void) { return (uint64_t)esp_timer_get_time(); }
 uint64_t rv9_time_ms(void) { return (uint64_t)esp_timer_get_time() / 1000ULL; }
 
 uint32_t rv9_ms_to_ticks(uint32_t ms) { return RV9K_MS_TO_TICKS(ms); }
@@ -122,10 +123,21 @@ static void *task_stack_alloc(size_t n)
 }
 
 
+/* The one host task RV-9's threads run inside. Recorded so that anyone
+   asking "am I an RV-9 thread?" can be told the truth; see kal_internal.h. */
+static TaskHandle_t s_kernel_task;
+
 static void kernel_host_task(void *arg)
 {
     (void)arg;
+    s_kernel_task = xTaskGetCurrentTaskHandle();
     rv9k_serve();        /* never returns */
+}
+
+RV9_RT_CODE rv9k_thread_t *rv9_kal_self_thread(void)
+{
+    if (xTaskGetCurrentTaskHandle() != s_kernel_task) return NULL;
+    return rv9k_self();
 }
 
 rv9_err_t rv9_kal_start(rv9_task_fn fn, const char *name, size_t stack_bytes,
@@ -204,7 +216,7 @@ void rv9_task_delete(rv9_task_t task)
      * treats as a fatal error, correctly. The same oversight as delays:
      * not every caller of the KAL is an RV-9 thread.
      */
-    if (rv9k_self() != NULL) rv9k_exit();
+    if (rv9_kal_self_thread() != NULL) rv9k_exit();
     else                     vTaskDelete(NULL);
 }
 
@@ -221,7 +233,7 @@ void rv9_task_delete(rv9_task_t task)
  */
 rv9_task_t rv9_task_self(void)
 {
-    rv9k_thread_t *t = rv9k_self();
+    rv9k_thread_t *t = rv9_kal_self_thread();
     if (t != NULL) return (rv9_task_t)t;
     return (rv9_task_t)xTaskGetCurrentTaskHandle();
 }
@@ -234,13 +246,13 @@ rv9_task_t rv9_task_self(void)
  */
 void rv9_task_yield(void)
 {
-    if (rv9k_self() != NULL) rv9k_yield();
+    if (rv9_kal_self_thread() != NULL) rv9k_yield();
     else                     taskYIELD();
 }
 
 void rv9_task_delay_ms(uint32_t ms)
 {
-    if (rv9k_self() != NULL) {
+    if (rv9_kal_self_thread() != NULL) {
         rv9k_sleep_ms(ms);
     } else {
         TickType_t t = pdMS_TO_TICKS(ms);
@@ -257,7 +269,40 @@ rv9_err_t rv9_task_priority_set(rv9_task_t task, int priority)
 /* The kernel ages threads itself; nobody should be doing it from above. */
 bool rv9_sched_ages(void) { return true; }
 
-void rv9_preempt_point(void) { rv9k_preempt_point(); }
+RV9_RT_CODE void rv9_preempt_point(void)
+{
+    /* Only a thread of RV-9's own can be preempted by RV-9. */
+    if (rv9_kal_self_thread() != NULL) rv9k_preempt_point();
+}
+
+/* ---------------- task-local storage ---------------- */
+
+/*
+ * Index 1, not 0.
+ *
+ * ESP-IDF's pthread support owns index 0, and the default configuration
+ * allocates exactly one slot -- so the obvious choice silently overwrote
+ * somebody else's pointer. See sdkconfig.defaults.
+ */
+#define RV9_TLS_INDEX 1
+
+/*
+ * Whichever scheduler owns the caller holds the slot. An RV-9 thread
+ * carries its own; a real-time process is a host task and uses the host's.
+ */
+RV9_RT_CODE void *rv9_task_local_get(void)
+{
+    rv9k_thread_t *t = rv9_kal_self_thread();
+    if (t != NULL) return rv9k_thread_local_get(t);
+    return pvTaskGetThreadLocalStoragePointer(NULL, RV9_TLS_INDEX);
+}
+
+RV9_RT_CODE void rv9_task_local_set(void *value)
+{
+    rv9k_thread_t *t = rv9_kal_self_thread();
+    if (t != NULL) { rv9k_thread_local_set(t, value); return; }
+    vTaskSetThreadLocalStoragePointer(NULL, RV9_TLS_INDEX, value);
+}
 
 /* ---------------- semaphores ---------------- */
 

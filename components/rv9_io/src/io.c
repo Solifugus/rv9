@@ -242,10 +242,42 @@ static proc_paths_t *table_for(rv9_pid_t pid, bool create)
     return t;
 }
 
-static rv9_path_t *path_for(rv9_pid_t pid, int num)
+/*
+ * The path table of whoever is calling.
+ *
+ * Found once per task and then remembered in task-local storage. Every
+ * read and write used to ask the process manager for the caller's pid --
+ * taking the process lock and scanning the process list -- and then walk
+ * the table list with no lock at all, which was both slower than necessary
+ * and a race against anyone creating a table.
+ *
+ * The cached pointer is safe to keep: a table belongs to a process, is
+ * created before that process can run and destroyed after it has stopped,
+ * so a task can never observe its own table being freed.
+ *
+ * This is what makes I/O bounded for real-time work. A control loop moving
+ * a servo does a dereference and an index, and never contends with the
+ * shell for a lock. Opening and closing a path are *not* bounded -- they
+ * allocate, and closing a file on a volume writes to flash -- so a control
+ * loop opens what it needs before its first period, not inside the loop.
+ */
+static RV9_RT_CODE proc_paths_t *my_table(void)
+{
+    proc_paths_t *t = (proc_paths_t *)rv9_task_local_get();
+    if (t != NULL) return t;
+
+    rv9_lock_acquire(s_lock);
+    t = table_for(rv9_proc_current_pid(), false);
+    rv9_lock_release(s_lock);
+
+    if (t != NULL) rv9_task_local_set(t);
+    return t;
+}
+
+static RV9_RT_CODE rv9_path_t *path_for_caller(int num)
 {
     if (num < 0 || num >= RV9_MAX_PATHS) return NULL;
-    proc_paths_t *t = table_for(pid, false);
+    proc_paths_t *t = my_table();
     return t ? t->paths[num] : NULL;
 }
 
@@ -356,6 +388,11 @@ int rv9_io_open(const char *name, uint32_t mode)
         return -RV9_IO_ERR_NOMEM;
     }
 
+    /* Warm the cache here, where blocking is allowed. A real-time process
+       opens its pin before it declares a period, so by the time a deadline
+       exists the lookup below is a load and nothing else. */
+    rv9_task_local_set(t);
+
     int num = -1;
     for (int i = 0; i < RV9_MAX_PATHS; i++) {
         if (t->paths[i] == NULL) { num = i; break; }
@@ -395,8 +432,9 @@ rv9_io_err_t rv9_io_close(int num)
 {
     rv9_lock_acquire(s_lock);
 
-    rv9_pid_t pid = rv9_proc_current_pid();
-    proc_paths_t *t = table_for(pid, false);
+    /* table_for, not my_table: the cache filler takes this same lock, and it
+       does not nest. */
+    proc_paths_t *t = table_for(rv9_proc_current_pid(), false);
     if (t == NULL || num < 0 || num >= RV9_MAX_PATHS || t->paths[num] == NULL) {
         rv9_lock_release(s_lock);
         return RV9_IO_ERR_BADPATH;
@@ -411,12 +449,20 @@ rv9_io_err_t rv9_io_close(int num)
 
 /* ---- transfers ---- */
 
-rv9_io_err_t rv9_io_read(int num, void *buf, size_t len, size_t *done)
+/*
+ * Reads and writes are RV9_RT_CODE: a control loop runs them with a
+ * deadline pending, so they must still be there when the flash cache is
+ * not. What they call is not automatically resident -- SCF ends up in the
+ * USB driver and RBF in the flash driver, neither of which can run then --
+ * so this guarantee reaches as far as PIO and its peripheral drivers,
+ * which is where control loops actually go. See RV9_RT_CODE in rv9/kal.h.
+ */
+RV9_RT_CODE rv9_io_err_t rv9_io_read(int num, void *buf, size_t len, size_t *done)
 {
     if (buf == NULL) return RV9_IO_ERR_INVAL;
     if (done) *done = 0;
 
-    rv9_path_t *p = path_for(rv9_proc_current_pid(), num);
+    rv9_path_t *p = path_for_caller(num);
     if (p == NULL) return RV9_IO_ERR_BADPATH;
     if (!(p->mode & RV9_MODE_READ)) return RV9_IO_ERR_MODE;
     if (p->dev->fmgr->read == NULL) return RV9_IO_ERR_UNSUPPORTED;
@@ -427,12 +473,13 @@ rv9_io_err_t rv9_io_read(int num, void *buf, size_t len, size_t *done)
     return err;
 }
 
-rv9_io_err_t rv9_io_write(int num, const void *buf, size_t len, size_t *done)
+RV9_RT_CODE rv9_io_err_t rv9_io_write(int num, const void *buf, size_t len,
+                                      size_t *done)
 {
     if (buf == NULL) return RV9_IO_ERR_INVAL;
     if (done) *done = 0;
 
-    rv9_path_t *p = path_for(rv9_proc_current_pid(), num);
+    rv9_path_t *p = path_for_caller(num);
     if (p == NULL) return RV9_IO_ERR_BADPATH;
     if (!(p->mode & RV9_MODE_WRITE)) return RV9_IO_ERR_MODE;
     if (p->dev->fmgr->write == NULL) return RV9_IO_ERR_UNSUPPORTED;
@@ -456,8 +503,8 @@ rv9_io_err_t rv9_io_dup2(int from, int to)
 
     rv9_lock_acquire(s_lock);
 
-    rv9_pid_t pid = rv9_proc_current_pid();
-    proc_paths_t *t = table_for(pid, true);
+    proc_paths_t *t = table_for(rv9_proc_current_pid(), true);
+    if (t != NULL) rv9_task_local_set(t);
     if (t == NULL || from < 0 || from >= RV9_MAX_PATHS ||
         t->paths[from] == NULL) {
         rv9_lock_release(s_lock);
@@ -500,7 +547,7 @@ rv9_io_err_t rv9_io_puts(int num, const char *s)
 
 rv9_io_err_t rv9_io_seek(int num, int64_t offset, int whence)
 {
-    rv9_path_t *p = path_for(rv9_proc_current_pid(), num);
+    rv9_path_t *p = path_for_caller(num);
     if (p == NULL) return RV9_IO_ERR_BADPATH;
     if (p->dev->fmgr->seek == NULL) return RV9_IO_ERR_UNSUPPORTED;
     return p->dev->fmgr->seek(p, offset, whence);
@@ -508,7 +555,7 @@ rv9_io_err_t rv9_io_seek(int num, int64_t offset, int whence)
 
 rv9_io_err_t rv9_io_getstat(int num, uint32_t code, void *arg)
 {
-    rv9_path_t *p = path_for(rv9_proc_current_pid(), num);
+    rv9_path_t *p = path_for_caller(num);
     if (p == NULL) return RV9_IO_ERR_BADPATH;
     if (p->dev->fmgr->getstat == NULL) return RV9_IO_ERR_UNSUPPORTED;
     return p->dev->fmgr->getstat(p, code, arg);
@@ -516,7 +563,7 @@ rv9_io_err_t rv9_io_getstat(int num, uint32_t code, void *arg)
 
 rv9_io_err_t rv9_io_setstat(int num, uint32_t code, void *arg)
 {
-    rv9_path_t *p = path_for(rv9_proc_current_pid(), num);
+    rv9_path_t *p = path_for_caller(num);
     if (p == NULL) return RV9_IO_ERR_BADPATH;
     if (p->dev->fmgr->setstat == NULL) return RV9_IO_ERR_UNSUPPORTED;
     return p->dev->fmgr->setstat(p, code, arg);
@@ -582,6 +629,12 @@ static void io_on_exit(rv9_pid_t pid)
             t->paths[i] = NULL;
         }
         *pp = t->next;
+
+        /* The exiting process is the caller here, so clear its cached
+           pointer before the table goes: a thread slot that gets reused
+           must not inherit a pointer to freed memory. */
+        if (rv9_task_local_get() == t) rv9_task_local_set(NULL);
+
         rv9_free(t);
     }
 
@@ -611,14 +664,14 @@ static int io_close_op(int path)
     return (err == RV9_IO_OK) ? 0 : -(int)err;
 }
 
-static int io_read_op(int path, void *buf, uint32_t len)
+static RV9_RT_CODE int io_read_op(int path, void *buf, uint32_t len)
 {
     size_t done = 0;
     rv9_io_err_t err = rv9_io_read(path, buf, len, &done);
     return (err == RV9_IO_OK) ? (int)done : -(int)err;
 }
 
-static int io_write_op(int path, const void *buf, uint32_t len)
+static RV9_RT_CODE int io_write_op(int path, const void *buf, uint32_t len)
 {
     size_t done = 0;
     rv9_io_err_t err = rv9_io_write(path, buf, len, &done);

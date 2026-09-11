@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     10
+#define RV9_MODULE_ABI     11
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -198,6 +198,12 @@ typedef struct {
     /* Fork another module into the real-time class. */
     int       (*fork_rt)(const char *module, uint32_t period_us,
                          const char *arg);
+
+    /* --- ABI 11 --- */
+    /* Microseconds. Milliseconds are too coarse for control code to
+       measure itself with, and a loop that cannot measure itself cannot
+       report that it has stopped being trustworthy. */
+    uint64_t  (*time_us)(void);
 } rv9_mod_env_t;
 
 /* Seek whence, matching the I/O manager. */

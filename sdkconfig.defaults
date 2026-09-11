@@ -48,3 +48,9 @@ CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD=y
 # scheduled by rv9_kernel rather than by FreeRTOS, which is left holding
 # one task for the kernel to live in. Set to n for the FreeRTOS reference.
 CONFIG_RV9_KERNEL_NATIVE=y
+
+# RV-9 keeps each task's path table in thread-local storage so that reading
+# or writing a path costs a dereference rather than a lock and a search.
+# Index 0 belongs to ESP-IDF's pthread support, so RV-9 uses index 1 and
+# there must be room for it.
+CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS=2

@@ -102,7 +102,7 @@ static int env_rt_declare(uint32_t period_us)
     return rv9_rt_declare(period_us) == RV9_OK ? 0 : -2;
 }
 
-static int env_rt_wait(void)
+static RV9_RT_CODE int env_rt_wait(void)
 {
     return rv9_rt_wait();
 }

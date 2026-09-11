@@ -120,6 +120,7 @@ rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
     t->ran_ticks          = 0;
     t->entered_tick       = 0;
     t->last_ran_seq       = 0;
+    t->local              = NULL;
 
     return t;
 }
@@ -694,6 +695,13 @@ const rv9k_thread_t *rv9k_thread_at(int index)
 {
     if (index < 0 || index >= RV9K_MAX_THREADS) return NULL;
     return &s_threads[index];
+}
+
+void *rv9k_thread_local_get(rv9k_thread_t *t) { return t ? t->local : NULL; }
+
+void rv9k_thread_local_set(rv9k_thread_t *t, void *value)
+{
+    if (t) t->local = value;
 }
 
 uint64_t rv9k_switch_count(void) { return s_switches; }

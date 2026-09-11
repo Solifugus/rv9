@@ -30,6 +30,7 @@
  */
 #include "rv9/kal.h"
 #include "rv9/kernel.h"
+#include "kal_internal.h"
 
 #include <string.h>
 
@@ -144,7 +145,7 @@ void rv9_lock_acquire(rv9_lock_t lock)
     /* Uncontended: nothing to inherit, and nothing to pay for it. */
     if (xSemaphoreTake(l->mux, 0) == pdTRUE) {
         portENTER_CRITICAL(&s_lock_guard);
-        l->holder = rv9k_self();
+        l->holder = rv9_kal_self_thread();
         portEXIT_CRITICAL(&s_lock_guard);
         return;
     }
@@ -177,7 +178,7 @@ void rv9_lock_acquire(rv9_lock_t lock)
      * So an RV-9 thread yields through its own scheduler instead, which
      * gives the (now boosted) holder the CPU.
      */
-    if (rv9k_self() != NULL) {
+    if (rv9_kal_self_thread() != NULL) {
         /*
          * Sleep, do not yield.
          *
@@ -199,7 +200,7 @@ void rv9_lock_acquire(rv9_lock_t lock)
     }
 
     portENTER_CRITICAL(&s_lock_guard);
-    l->holder = rv9k_self();
+    l->holder = rv9_kal_self_thread();
     portEXIT_CRITICAL(&s_lock_guard);
 }
 
@@ -222,7 +223,7 @@ void rv9_lock_release(rv9_lock_t lock)
     xSemaphoreGive(l->mux);
 }
 
-static rt_task_t *slot_for(TaskHandle_t t)
+static RV9_RT_CODE rt_task_t *slot_for(TaskHandle_t t)
 {
     for (int i = 0; i < MAX_RT_TASKS; i++) {
         if (s_rt[i].in_use && s_rt[i].task == t) return &s_rt[i];
@@ -293,7 +294,12 @@ rv9_err_t rv9_rt_declare(uint32_t period_us)
     return RV9_OK;
 }
 
-int rv9_rt_wait(void)
+/*
+ * Resident. This is the call a control loop is sitting in when the radio
+ * decides to write its calibration data to flash; if it lived in flash the
+ * loop would not be able to wake up and find out how late it was.
+ */
+RV9_RT_CODE int rv9_rt_wait(void)
 {
     rt_task_t *rt = slot_for(xTaskGetCurrentTaskHandle());
     if (rt == NULL) return -1;
@@ -307,23 +313,36 @@ int rv9_rt_wait(void)
 
     if (xSemaphoreTake(rt->release, portMAX_DELAY) != pdTRUE) return -1;
 
-    /*
-     * Anything still queued is a period that came and went while this task
-     * was busy. Drain it, count it, and tell the caller -- a control loop
-     * that has fallen behind usually needs to know, and sometimes needs to
-     * skip ahead rather than work through a backlog.
-     */
-    int missed = 0;
-    while (uxSemaphoreGetCount(rt->release) > 0) {
-        xSemaphoreTake(rt->release, 0);
-        missed++;
-    }
+    /* Drop any releases still queued: they are periods that came and went
+       while this task was elsewhere, and working through a backlog of stale
+       deadlines is not what a control loop wants. */
+    while (uxSemaphoreGetCount(rt->release) > 0) xSemaphoreTake(rt->release, 0);
 
     uint64_t woken = rv9_time_us();
-    uint64_t expected = rt->released_at_us + (uint64_t)rt->period_us
-                        * (uint64_t)(missed + 1);
-    uint32_t jitter = (woken > expected) ? (uint32_t)(woken - expected) : 0;
+
+    /*
+     * Count what was missed from the clock, not from the semaphore.
+     *
+     * The semaphore holds at most MISS_BACKLOG releases, so counting drains
+     * stopped at 8 however long the stall was -- a 200 ms hole in a 1 kHz
+     * loop reported seven missed periods instead of a hundred and ninety
+     * nine. An instrument that saturates just where it matters is worse than
+     * none: it says "slightly late" about a loop that stopped.
+     */
+    uint64_t gap = (woken > rt->released_at_us)
+                   ? (woken - rt->released_at_us) : 0;
+
+    /*
+     * Lateness is the whole overshoot, not the remainder after whole
+     * periods are taken out of it. Reporting the remainder was the same
+     * mistake in a different place: a loop stalled for 200 ms and one
+     * stalled for 200 us both came back "late by a little".
+     */
+    uint32_t jitter = (gap > rt->period_us)
+                      ? (uint32_t)(gap - rt->period_us) : 0;
     if (jitter > rt->max_jitter_us) rt->max_jitter_us = jitter;
+
+    int missed = (int)(jitter / rt->period_us);
 
     rt->released_at_us = woken;
     rt->activations++;

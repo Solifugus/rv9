@@ -213,7 +213,7 @@ useful, working preparation, but preparation.*
 
 ---
 
-## Phase 8 — Real-time  ◐ periodic processes done
+## Phase 8 — Real-time  ◐ periodic processes and bounded I/O done
 
 Driven by a real use: RV-9 as a target for autonomous systems, where the
 control layer is late if it is late.
@@ -228,9 +228,30 @@ control layer is late if it is late.
 - Not done: aperiodic (event-triggered) real-time processes, which is what
   a reactive layer wants — an interrupt or a message releasing a process
   with the same latency guarantee as a period does.
-- Not done: bounded-latency I/O for real-time processes. Writing to a
-  device from a control loop currently takes the same locks as everyone
-  else.
+- **Bounded-latency I/O — done.** A path lookup was a lock plus two list
+  walks; it is now a load from task-local storage, filled at `open`. Open
+  and close stay unbounded on purpose: a control loop opens what it needs
+  before its first period.
+- **The real-time path is resident (`RV9_RT_CODE`) — done, and it was the
+  whole story.** Every write to flash switches off the cache that makes
+  flash readable, so code in flash is *gone* while the radio stores its
+  calibration data. Measured before: 199 ms lost in one piece, first run
+  after every boot. After: worst write 13 µs, worst wakeup 9 µs late, no
+  periods missed, over 20,000 activations. Reaches `/gpio`; PWM and the
+  ADC are not resident and are not claimed to be.
+- **Missed periods and lateness are measured against the clock**, not by
+  draining the release semaphore (which held eight) and not as the
+  remainder after whole periods (which cannot exceed one). A 199 ms stall
+  used to report "seven overruns, 199 µs late".
+- **Not bounded, and now measured: being scheduled while another process
+  writes flash.** Under `noise`, the write itself held at 13 µs and the
+  worst wakeup was 82 ms — one flash erase. Flash suspend/resume is the
+  known lever and is deliberately not enabled; see design §14.
+- **`rv9_kal_self_thread()` — a real-time process is no longer told it is
+  the shell.** `rv9k_self()` answers with whatever RV-9 thread a host task
+  preempted, which handed real-time processes another process's pid, path
+  table and priority-inheritance identity. One crash in eight runs, in a
+  place unrelated to the cause. See design §14.
 - **Priority inheritance on `rv9_lock_t` — done.** In both schedulers: the
   host mutex lends to the task so the kernel runs, and the lock boosts the
   holding RV-9 thread so the kernel runs *it*. Measured at 504 ms → 397 ms
@@ -271,10 +292,10 @@ control layer is late if it is late.
 - Not done: interrupt-driven inputs — a pin change releasing a process.
   That is the same mechanism aperiodic real-time needs, and doing both at
   once is the sensible way round.
-- Not done: **bounded-latency I/O for real-time processes.** A control loop
-  writing `/pwm0` takes the same locks as the shell, and design §12 now
-  explains exactly why that matters: the hold time bounds how long the
-  whole system runs at real-time priority.
+- **Bounded-latency I/O — done**, see phase 8. `/gpio` is reachable from a
+  control loop with the flash cache off; `/pwm0` and `/adc0` are not, and
+  making them so means driving LEDC and the ADC from registers rather than
+  through ESP-IDF's drivers.
 
 ## Sequencing notes
 
@@ -287,7 +308,12 @@ control layer is late if it is late.
 
 ## Immediate next step
 
-Phase 5. Storage: RBF, the `sdspi` driver, and `/sd0`.
+Aperiodic real-time: an interrupt or a message releasing a process with the
+same guarantee a period gets. Interrupt-driven GPIO inputs are the same
+mechanism, and the reactive layer of the language this is being built for
+wants exactly that.
+
+Then phase 5. Storage: RBF, the `sdspi` driver, and `/sd0`.
 
 The SD card shares its SPI bus with the LCD, so bus arbitration is the new
 problem — the console and the card will contend. A PIPE file manager belongs

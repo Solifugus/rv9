@@ -87,8 +87,9 @@ static rv9_io_err_t pio_close(rv9_path_t *path)
     return RV9_IO_OK;
 }
 
-static rv9_io_err_t pio_read(rv9_path_t *path, void *buf, size_t len,
-                             size_t *done)
+/* Resident: this is the file manager a control loop uses. */
+static RV9_RT_CODE rv9_io_err_t pio_read(rv9_path_t *path, void *buf, size_t len,
+                                         size_t *done)
 {
     pio_path_t *st = (pio_path_t *)path->fm_state;
     if (st == NULL) return RV9_IO_ERR_IO;
@@ -105,8 +106,8 @@ static rv9_io_err_t pio_read(rv9_path_t *path, void *buf, size_t len,
     return RV9_IO_OK;
 }
 
-static rv9_io_err_t pio_write(rv9_path_t *path, const void *buf, size_t len,
-                              size_t *done)
+static RV9_RT_CODE rv9_io_err_t pio_write(rv9_path_t *path, const void *buf,
+                                          size_t len, size_t *done)
 {
     pio_path_t *st = (pio_path_t *)path->fm_state;
     if (st == NULL) return RV9_IO_ERR_IO;

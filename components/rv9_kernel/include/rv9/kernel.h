@@ -90,8 +90,14 @@ struct rv9k_thread {
     uint32_t       entered_tick;    /* when this thread last got the CPU */
     uint64_t       last_ran_seq;    /* selection order, for round-robin */
 
+    void          *local;           /* one pointer belonging to this thread */
+
     rv9k_thread_t *next;
 };
+
+/* Task-local storage: one pointer, whoever wants it. */
+void *rv9k_thread_local_get(rv9k_thread_t *t);
+void  rv9k_thread_local_set(rv9k_thread_t *t, void *value);
 
 /*
  * A queue of threads waiting for something. Threads are linked through

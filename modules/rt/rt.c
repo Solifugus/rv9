@@ -38,7 +38,17 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         return -3;
     }
 
+    m_say(env, RV9_STDOUT, "rt: started ");
+    m_say(env, RV9_STDOUT, name);
+    m_say(env, RV9_STDOUT, " as pid ");
+    m_num(env, RV9_STDOUT, pid);
+    m_say(env, RV9_STDOUT, "\n");
+
     int status = 0;
-    env->wait(pid, &status, 60000);
+    int w = env->wait(pid, &status, 60000);
+    if (w < 0) {
+        m_say(env, RV9_STDOUT, "rt: wait failed\n");
+        return -6;
+    }
     return status;
 }
