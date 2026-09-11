@@ -17,6 +17,7 @@
 #include "conformance.h"
 
 #define RV9_RUN_KERNEL_TEST 1
+#define RV9_RUN_INVERSION_DEMO 0
 
 #include "esp_chip_info.h"
 #include "esp_flash.h"
@@ -248,6 +249,115 @@ static void term_banner(void)
  * needs a log path that cannot deadlock against the I/O manager it logs
  * through, so it waits for a phase with time to do it properly.
  */
+/*
+ * Priority inversion, measured.
+ *
+ * The classic three actors:
+ *
+ *   low     an ordinary process that takes a lock and then works
+ *   medium  an ordinary process that just burns CPU, and wants nothing
+ *   urgent  a real-time task that needs the lock
+ *
+ * Without inheritance, urgent waits for low, and low waits behind medium --
+ * so urgent is delayed by a process it does not share anything with. With
+ * inheritance, low runs at urgent's priority until it lets go.
+ *
+ * The number that matters is how long urgent waited.
+ */
+#define INV_HOLD_MS   400     /* how long the holder keeps the lock */
+#define INV_MEDIUM_MS 600     /* how long the irrelevant hog runs */
+
+static rv9_lock_t s_inv_lock;
+static volatile bool s_inv_go;
+static volatile uint32_t s_inv_wait_ms;
+
+static void inv_low(void *arg)
+{
+    (void)arg;
+    rv9_lock_acquire(s_inv_lock);
+    s_inv_go = true;
+
+    /* Work while holding it -- deliberately by spinning, so that making
+       progress requires actually being scheduled. */
+    uint64_t end = rv9_time_ms() + INV_HOLD_MS;
+    while (rv9_time_ms() < end) {
+        volatile uint32_t acc = 0;
+        for (uint32_t i = 0; i < 500; i++) acc += i;
+        rv9_preempt_point();
+    }
+
+    rv9_lock_release(s_inv_lock);
+    rv9_task_delete(NULL);
+}
+
+static void inv_medium(void *arg)
+{
+    (void)arg;
+    uint64_t end = rv9_time_ms() + INV_MEDIUM_MS;
+    while (rv9_time_ms() < end) {
+        volatile uint32_t acc = 0;
+        for (uint32_t i = 0; i < 500; i++) acc += i;
+        rv9_preempt_point();
+    }
+    rv9_task_delete(NULL);
+}
+
+static void inv_urgent(void *arg)
+{
+    (void)arg;
+
+    uint64_t t0 = rv9_time_ms();
+    rv9_lock_acquire(s_inv_lock);
+    s_inv_wait_ms = (uint32_t)(rv9_time_ms() - t0);
+    rv9_lock_release(s_inv_lock);
+
+    rv9_task_delete(NULL);
+}
+
+static uint32_t inversion_round(bool inherit)
+{
+    rv9_lock_set_inheritance(inherit);
+    s_inv_go = false;
+    s_inv_wait_ms = 0;
+
+    rv9_task_create(inv_low, "inv-low", 8192, NULL, RV9_PRIO_LOW, NULL);
+
+    /* Wait until the lock is actually held before the others start. */
+    for (int i = 0; i < 200 && !s_inv_go; i++) rv9_task_delay_ms(5);
+
+    rv9_task_create(inv_medium, "inv-med", 8192, NULL, RV9_PRIO_HIGH, NULL);
+    rv9_task_create_rt(inv_urgent, "inv-urgent", 4096, NULL, NULL);
+
+    for (int i = 0; i < 400 && s_inv_wait_ms == 0; i++) rv9_task_delay_ms(10);
+
+    rv9_task_delay_ms(INV_MEDIUM_MS);   /* let the hog finish */
+    return s_inv_wait_ms;
+}
+
+static void inversion_demo(void)
+{
+    if (rv9_lock_create(&s_inv_lock) != RV9_OK) return;
+
+    ESP_LOGI(TAG, "--- priority inversion ---");
+
+    uint32_t without = inversion_round(false);
+    uint32_t with    = inversion_round(true);
+
+    ESP_LOGI(TAG, "urgent waited %lu ms without inheritance, %lu ms with",
+             (unsigned long)without, (unsigned long)with);
+
+    if (with < without) {
+        ESP_LOGI(TAG, "inheritance cut the wait by %lu ms: the holder ran "
+                      "instead of the hog", (unsigned long)(without - with));
+    } else {
+        ESP_LOGW(TAG, "inheritance made no measurable difference here");
+    }
+
+    rv9_lock_set_inheritance(true);
+    rv9_lock_destroy(s_inv_lock);
+    s_inv_lock = NULL;
+}
+
 /* A shell on the network, alongside the one on the cable. */
 static void start_rshd(void)
 {
@@ -501,6 +611,9 @@ static void rv9_init_task(void *arg)
 
     phase2_demo();
     phase3_demo();
+#if RV9_RUN_INVERSION_DEMO
+    inversion_demo();
+#endif
     init_shell_loop();
 
     rv9_task_delete(NULL);

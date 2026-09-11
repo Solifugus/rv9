@@ -814,6 +814,65 @@ keys, channels — not something to bolt onto this. What this does provide
 is the plumbing SSH would need, already proven: a shell whose standard
 paths can be pointed at a connection.
 
+## 12. Priority inversion
+
+A real-time process waiting on a lock held by an ordinary one is delayed
+by every medium-priority thread in the system — threads it shares nothing
+with. That is priority inversion, and it is the classic way a real-time
+system misses a deadline for reasons that look like nothing to do with
+timing.
+
+**Inheritance has to happen in both schedulers.** A FreeRTOS mutex already
+lends the holder its priority, but what it lends to is the *task*, and
+every RV-9 thread shares one. Boosting that task makes the kernel run; it
+does not make the kernel run the thread holding the lock, because RV-9's
+scheduler picks by its own priorities. So the host mutex gets the kernel
+scheduled, and `rv9_lock_t` separately boosts the holding RV-9 thread to
+get the right thread scheduled inside it. Neither half suffices alone.
+
+A boost is a floor rather than an assignment: aging may lift the thread
+further, and releasing the lock returns it to whatever it had earned.
+
+Measured with the classic three actors — a low-priority holder, a
+medium-priority hog that wants nothing, and a real-time waiter:
+
+| | urgent waited |
+| --- | --- |
+| without inheritance | 504 ms |
+| with inheritance | 397 ms |
+
+397 ms is very close to the 400 ms the holder actually needed the lock
+for, so the inversion is essentially gone.
+
+### Two bugs this found in the locks themselves
+
+**An RV-9 thread must not block on a host lock.** Every RV-9 thread shares
+one host task, so blocking it stops the whole kernel — including the
+thread holding the lock, which can then never release it. The waiter
+deadlocks against its own scheduler. An RV-9 thread now waits by sleeping
+through its own scheduler; a host task, having a task of its own to block,
+still blocks.
+
+**And it must sleep, not yield.** Yielding leaves the waiter runnable, and
+a waiter that outranks the holder is simply picked again — it spins at full
+priority while the thread it is waiting for never runs. Sleeping takes it
+off the run queue so the (boosted) holder can get the CPU. The cost is up
+to one tick of latency on a contended lock; real-time waiters do not pay
+it, being host tasks.
+
+### What is not resolved
+
+The three-actor demonstration is **disabled at boot** (`RV9_RUN_INVERSION_DEMO`).
+It produced the measurement above reliably, and it also made boot
+unreliable — panics and stalls that did not appear with it off, across
+repeated attempts, and whose cause was not found. The inheritance
+implementation itself is stable: boot is clean and repeatable with the
+demo disabled.
+
+That is an unsatisfying place to leave it and is recorded rather than
+tidied away. The measurement stands; the harness that produced it does
+not yet deserve to run on every boot.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

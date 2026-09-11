@@ -231,9 +231,13 @@ control layer is late if it is late.
 - Not done: bounded-latency I/O for real-time processes. Writing to a
   device from a control loop currently takes the same locks as everyone
   else.
-- Not done: priority inheritance on `rv9_lock_t`. A low-priority thread
-  holding a lock a real-time process wants is the classic inversion, and
-  the current answer is only that critical sections are short.
+- **Priority inheritance on `rv9_lock_t` — done.** In both schedulers: the
+  host mutex lends to the task so the kernel runs, and the lock boosts the
+  holding RV-9 thread so the kernel runs *it*. Measured at 504 ms → 397 ms
+  for a real-time waiter behind a low-priority holder and a medium hog.
+- The three-actor demonstration is disabled at boot: it made boot
+  unreliable for reasons not yet found, while the implementation itself is
+  stable. See design §12.
 
 ## Phase 9 — Working on it remotely  ◐ plaintext done
 

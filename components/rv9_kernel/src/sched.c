@@ -113,6 +113,7 @@ rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
     t->base_priority      = priority;
     t->effective_priority = priority;
     t->age                = 0;
+    t->boost              = 0;
     t->state              = RV9K_READY;
     t->wake_at_tick       = 0;
     t->blocked_on         = NULL;
@@ -154,6 +155,11 @@ static void age_threads(void)
 
         int eff = th->base_priority + th->age;
         if (eff > RV9K_PRIO_MAX) eff = RV9K_PRIO_MAX;
+
+        /* An inherited priority is a floor: aging may lift a thread above
+           it, but nothing drops it below while it holds the lock. */
+        if (th->boost > eff) eff = th->boost;
+
         th->effective_priority = eff;
     }
 }
@@ -464,15 +470,41 @@ void rv9_thread_exited(void)
 
 rv9k_thread_t *rv9k_self(void) { return s_current; }
 
+static void recompute_priority(rv9k_thread_t *t)
+{
+    int eff = t->base_priority + t->age;
+    if (eff > RV9K_PRIO_MAX) eff = RV9K_PRIO_MAX;
+    if (t->boost > eff) eff = t->boost;
+    t->effective_priority = eff;
+}
+
 void rv9k_priority_set(rv9k_thread_t *t, int priority)
 {
     if (t == NULL) return;
     if (priority < RV9K_PRIO_MIN) priority = RV9K_PRIO_MIN;
     if (priority > RV9K_PRIO_MAX) priority = RV9K_PRIO_MAX;
 
-    t->base_priority      = priority;
-    t->age                = 0;
-    t->effective_priority = priority;
+    t->base_priority = priority;
+    t->age           = 0;
+    recompute_priority(t);
+}
+
+void rv9k_priority_boost(rv9k_thread_t *t, int priority)
+{
+    if (t == NULL) return;
+    if (priority > RV9K_PRIO_MAX) priority = RV9K_PRIO_MAX;
+    if (priority <= t->boost) return;      /* already at least this high */
+
+    t->boost = priority;
+    recompute_priority(t);
+}
+
+void rv9k_priority_unboost(rv9k_thread_t *t)
+{
+    if (t == NULL || t->boost == 0) return;
+
+    t->boost = 0;
+    recompute_priority(t);
 }
 
 void rv9k_run(void)

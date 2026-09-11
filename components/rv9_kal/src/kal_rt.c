@@ -29,6 +29,7 @@
  * misses deadlines is worse than one that stops.
  */
 #include "rv9/kal.h"
+#include "rv9/kernel.h"
 
 #include <string.h>
 
@@ -73,30 +74,152 @@ static rt_task_t s_rt[MAX_RT_TASKS];
 /* host's scheduler knows about both.                                   */
 /* ------------------------------------------------------------------ */
 
+/*
+ * PRIORITY INHERITANCE, IN BOTH SCHEDULERS
+ *
+ * A FreeRTOS mutex already lends its priority to whoever holds it -- but
+ * what it lends to is the *task*, and every RV-9 thread shares one task.
+ * Boosting that task makes the kernel run; it does not make the kernel run
+ * the thread that holds the lock. RV-9's scheduler picks by its own
+ * priorities and will happily run something else while the waiter waits.
+ *
+ * So inheritance happens twice. The host mutex lends to the task, which
+ * gets the kernel scheduled. The lock separately boosts the holding RV-9
+ * thread, which gets the *right* thread scheduled inside it. Neither half
+ * is sufficient alone.
+ *
+ * This matters because the waiter is often a control loop. A missed
+ * deadline caused by inversion looks like nothing to do with timing: the
+ * loop was ready, the lock was held by something trivial, and something
+ * medium-priority and irrelevant ran instead.
+ */
+typedef struct {
+    SemaphoreHandle_t mux;
+    rv9k_thread_t    *holder;      /* non-NULL when an RV-9 thread holds it */
+    bool              boosted;
+} lock_impl_t;
+
+static portMUX_TYPE s_lock_guard = portMUX_INITIALIZER_UNLOCKED;
+
+/* Off by default nowhere -- this exists so the demonstration can show what
+   inversion costs by turning it off. */
+static bool s_inherit = true;
+
+void rv9_lock_set_inheritance(bool on) { s_inherit = on; }
+bool rv9_lock_get_inheritance(void)    { return s_inherit; }
+
 rv9_err_t rv9_lock_create(rv9_lock_t *out_lock)
 {
     if (out_lock == NULL) return RV9_ERR_INVAL;
 
-    SemaphoreHandle_t h = xSemaphoreCreateMutex();
-    if (h == NULL) return RV9_ERR_NOMEM;
+    lock_impl_t *l = (lock_impl_t *)calloc(1, sizeof(*l));
+    if (l == NULL) return RV9_ERR_NOMEM;
 
-    *out_lock = (rv9_lock_t)h;
+    /* A mutex, not a binary semaphore: the difference is that FreeRTOS
+       lends the holder's task its priority. */
+    l->mux = xSemaphoreCreateMutex();
+    if (l->mux == NULL) {
+        free(l);
+        return RV9_ERR_NOMEM;
+    }
+
+    *out_lock = (rv9_lock_t)l;
     return RV9_OK;
 }
 
 void rv9_lock_destroy(rv9_lock_t lock)
 {
-    if (lock) vSemaphoreDelete((SemaphoreHandle_t)lock);
+    lock_impl_t *l = (lock_impl_t *)lock;
+    if (l == NULL) return;
+
+    vSemaphoreDelete(l->mux);
+    free(l);
 }
 
 void rv9_lock_acquire(rv9_lock_t lock)
 {
-    if (lock) xSemaphoreTake((SemaphoreHandle_t)lock, portMAX_DELAY);
+    lock_impl_t *l = (lock_impl_t *)lock;
+    if (l == NULL) return;
+
+    /* Uncontended: nothing to inherit, and nothing to pay for it. */
+    if (xSemaphoreTake(l->mux, 0) == pdTRUE) {
+        portENTER_CRITICAL(&s_lock_guard);
+        l->holder = rv9k_self();
+        portEXIT_CRITICAL(&s_lock_guard);
+        return;
+    }
+
+    /*
+     * Contended. If an RV-9 thread is holding it, lift that thread so the
+     * kernel runs it rather than whatever else is runnable. The host mutex
+     * takes care of getting the kernel itself scheduled.
+     */
+    rv9k_thread_t *holder = NULL;
+
+    if (s_inherit) {
+        portENTER_CRITICAL(&s_lock_guard);
+        holder = l->holder;
+        if (holder != NULL) l->boosted = true;
+        portEXIT_CRITICAL(&s_lock_guard);
+
+        if (holder != NULL) rv9k_priority_boost(holder, RV9K_PRIO_MAX);
+    }
+
+    /*
+     * How to wait depends on who is waiting.
+     *
+     * A host task blocks: that costs it nothing and lets everything else
+     * run. An RV-9 thread must NOT block, because every RV-9 thread shares
+     * one host task -- blocking it stops the whole kernel, including the
+     * thread holding the lock, which can then never release it. The waiter
+     * would be deadlocking against its own scheduler.
+     *
+     * So an RV-9 thread yields through its own scheduler instead, which
+     * gives the (now boosted) holder the CPU.
+     */
+    if (rv9k_self() != NULL) {
+        /*
+         * Sleep, do not yield.
+         *
+         * Yielding leaves the waiter runnable, and a waiter that outranks
+         * the holder is simply picked again -- it spins at full priority
+         * while the thread it is waiting for never runs. Sleeping takes it
+         * off the run queue entirely, so the holder (boosted above) gets
+         * the CPU and can let go.
+         *
+         * The cost is up to one tick of latency for a contended lock held
+         * by an RV-9 thread. Real-time waiters do not pay it: they are
+         * host tasks and take the branch below.
+         */
+        while (xSemaphoreTake(l->mux, 0) != pdTRUE) {
+            rv9k_sleep_ticks(1);
+        }
+    } else {
+        xSemaphoreTake(l->mux, portMAX_DELAY);
+    }
+
+    portENTER_CRITICAL(&s_lock_guard);
+    l->holder = rv9k_self();
+    portEXIT_CRITICAL(&s_lock_guard);
 }
 
 void rv9_lock_release(rv9_lock_t lock)
 {
-    if (lock) xSemaphoreGive((SemaphoreHandle_t)lock);
+    lock_impl_t *l = (lock_impl_t *)lock;
+    if (l == NULL) return;
+
+    portENTER_CRITICAL(&s_lock_guard);
+    rv9k_thread_t *holder = l->holder;
+    bool boosted = l->boosted;
+    l->holder  = NULL;
+    l->boosted = false;
+    portEXIT_CRITICAL(&s_lock_guard);
+
+    /* Give the borrowed priority back before letting go, so the thread
+       cannot keep it by grabbing the lock again immediately. */
+    if (boosted && holder != NULL) rv9k_priority_unboost(holder);
+
+    xSemaphoreGive(l->mux);
 }
 
 static rt_task_t *slot_for(TaskHandle_t t)

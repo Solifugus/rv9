@@ -81,6 +81,7 @@ struct rv9k_thread {
     int            base_priority;
     int            age;
     int            effective_priority;
+    int            boost;           /* floor imposed by priority inheritance */
 
     uint32_t       wake_at_tick;    /* when sleeping */
     void          *blocked_on;      /* which primitive, when blocked */
@@ -188,6 +189,22 @@ void rv9k_exit(void);
 
 rv9k_thread_t *rv9k_self(void);
 void           rv9k_priority_set(rv9k_thread_t *t, int priority);
+
+/*
+ * Priority inheritance, the scheduler's half.
+ *
+ * A thread holding a lock that something more urgent is waiting for runs
+ * at the waiter's priority until it lets go. Without this, the holder sits
+ * behind every medium-priority thread in the system while the waiter --
+ * which may be a control loop -- waits on it. That is priority inversion,
+ * and it is the classic way a real-time system misses a deadline for
+ * reasons that look like nothing to do with timing.
+ *
+ * A boost is a floor, not an assignment: aging may raise the thread
+ * further, and releasing the lock returns it to whatever it had earned.
+ */
+void rv9k_priority_boost(rv9k_thread_t *t, int priority);
+void rv9k_priority_unboost(rv9k_thread_t *t);
 
 void rv9k_sem_init(rv9k_sem_t *sem, int32_t initial, int32_t max);
 bool rv9k_sem_take(rv9k_sem_t *sem, uint32_t timeout_ms);

@@ -139,6 +139,13 @@ void rv9_preempt_point(void);
 
 typedef struct rv9_lock *rv9_lock_t;
 
+/*
+ * Priority inheritance is on. It can be turned off, which exists so that
+ * the cost of inversion can be demonstrated rather than asserted.
+ */
+void rv9_lock_set_inheritance(bool on);
+bool rv9_lock_get_inheritance(void);
+
 rv9_err_t rv9_lock_create(rv9_lock_t *out_lock);
 void      rv9_lock_destroy(rv9_lock_t lock);
 void      rv9_lock_acquire(rv9_lock_t lock);

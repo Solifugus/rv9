@@ -23,7 +23,17 @@ static const char *TAG = "rv9-proc";
 #define AGE_MAX         10
 #define PRIO_CEILING    RV9_PROC_PRIO_CEILING
 
-#define PROC_DEFAULT_STACK 4096
+/*
+ * Interrupts land on whichever stack is current.
+ *
+ * Under RV-9's own kernel a process runs on a heap stack the host knows
+ * nothing about, and the host's interrupt frames -- WiFi's especially --
+ * are pushed onto it like anyone else's. A stack sized for the process's
+ * own needs is not sized for that, and the failure is a corrupted saved
+ * context: the thread resumes into a null return address, a long way from
+ * whatever actually overflowed.
+ */
+#define PROC_DEFAULT_STACK 8192
 
 static rv9_proc_t *s_procs;
 static rv9_lock_t s_lock;
