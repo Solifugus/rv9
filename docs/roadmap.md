@@ -435,9 +435,29 @@ control layer is late if it is late.
 
 ## Immediate next step
 
-Phase 5. Storage: RBF, the `sdspi` driver, and `/sd0`.
+**Phase 5. Storage: the `sdspi` driver and `/sd0`**, when the card arrives.
 
-The SD card shares its SPI bus with the LCD, so bus arbitration is the new
-problem — the console and the card will contend. A PIPE file manager belongs
-in this phase too, since it is a file manager and wants the same attention
-as RBF.
+The card shares its SPI bus with the panel, so bus arbitration is the new
+problem and the console will contend with it. `panel.c` already owns that
+bus and serialises transfers, which is most of the answer — the driver
+below it becomes a second client rather than a second owner. A PIPE file
+manager belongs in this phase too, being a file manager wanting the same
+attention as RBF.
+
+### Waiting on a normal network
+
+- **Short SSH sessions lose their output on a poor link** (phase 9). A
+  packet capture is the first move.
+
+### Ready whenever
+
+- **Documents larger than 4 KB for `/w0`.** The source is re-read once per
+  band, so it need not be in RAM at all: re-read it from a file and the
+  limit becomes storage. Wants the card, and is what maps need.
+- **`RV9_CON_SS_SIZE` and `RV9_SIG_WINCH`** — a session telling a path its
+  real size, and a program being told the window changed. Both want the
+  SSH work finished first.
+- **`/w0`:** font weights, rotated text, arc x-axis-rotation, opacity,
+  gradients.
+- **Phase 7 steps 3-5:** the WiFi blobs on RV-9 primitives, lwIP's
+  `sys_arch`, and PMP process isolation.
