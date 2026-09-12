@@ -22,21 +22,21 @@ SRC="$HERE/../../components/rv9_io/src"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 
-cp "$SRC"/raster.c "$SRC"/raster.h "$SRC"/drv_svgwin.c "$OUT/"
+cp "$SRC"/raster.c "$SRC"/raster.h "$SRC"/drv_svgwin.c "$SRC"/font.c "$SRC"/font.h "$OUT/"
 
 CC=${CC:-gcc}
 FLAGS="-O1 -Wall -Wextra -I$HERE/stub -I$OUT"
 
 if [[ $# -ge 1 ]]; then
-    $CC $FLAGS -o "$OUT/render" "$HERE/render.c" "$OUT/raster.c"
+    $CC $FLAGS -o "$OUT/render" "$HERE/render.c" "$OUT/raster.c" "$OUT/font.c"
     ( cd "$OUT" && ./render "$HERE/$1" )
     cp "$OUT/out.ppm" "$HERE/out.ppm"
     echo "wrote $HERE/out.ppm"
     exit 0
 fi
 
-$CC $FLAGS -o "$OUT/raster_test" "$HERE/raster_test.c" "$OUT/raster.c"
-$CC $FLAGS -o "$OUT/path_test"   "$HERE/path_test.c"   "$OUT/raster.c"
+$CC $FLAGS -o "$OUT/raster_test" "$HERE/raster_test.c" "$OUT/raster.c" "$OUT/font.c"
+$CC $FLAGS -o "$OUT/path_test"   "$HERE/path_test.c"   "$OUT/raster.c" "$OUT/font.c"
 
 "$OUT/raster_test"
 "$OUT/path_test" | grep -v '^I rv9-svgwin'

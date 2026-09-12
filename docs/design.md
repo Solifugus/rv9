@@ -1886,12 +1886,50 @@ The fix is to take the points back out, not merely to stop counting them.
 It is the third bug in this renderer of exactly one kind: two things
 disagreeing about how big something is.
 
+### `<text>`, and the font that was private
+
+A chart without labels is a picture of a chart, so this is not a flourish.
+
+The font is the console's own — 10x20 cells with four bits of coverage per
+pixel — and it moved into a shared `font.h` to get here. It was `lcdcon`'s
+private business until something else needed to draw a character, and the
+alternative was a second copy of the geometry constants beside a second
+extern. Two copies of a number like *the baseline is at row 15* is how a
+renderer comes to disagree with itself about where text sits.
+
+That number had to be found by looking: `H` and `x` stop at row 14, `g` and
+`p` descend to 17, so the baseline is 15 of 20. The console never needed
+it — it puts a glyph in a cell and the cells line up by construction — but
+SVG positions text by its baseline, so it has to be written down.
+
+Glyphs carry their own anti-aliasing, so there is no scanline conversion:
+each destination pixel samples the glyph and blends by what it finds.
+Labels are usually *smaller* than twenty rows, and nearest-neighbour
+downscaling of an anti-aliased face looks like gravel, so each destination
+pixel takes nine samples in a 3x3 grid and averages them. At label sizes
+that costs nothing and keeps thin strokes grey rather than missing.
+
+**`font-size` and `text-anchor` inherit**, and getting that wrong was
+instructive: reading them only from the element they appear on *looks like
+it works*, because the text still draws. It just silently ignores every
+group meant to style it — which is the normal way to write SVG, one group
+per axis. The symptom was labels at the wrong size in the wrong place, with
+nothing in the parser to suggest why.
+
+One font, one face. `font-family` is accepted and ignored, because there is
+exactly one in the system and pretending otherwise would be a lie told in a
+parser.
+
 ### What it does not do
 
-- **`<text>`** — the font renderer exists in `lcdcon` and is not shared yet.
 - **x-axis-rotation on arcs**, which is parsed and ignored. A rotated
   ellipse needs the full endpoint-to-centre conversion with a rotation
   matrix, and nothing that draws a pie chart or a map outline asks for one.
+- **Text families, weights, styles and rotation.** One face, upright.
+- **Documents over 4 KB.** Enough for a chart, not for a map. The way out is
+  already implied by the design: the source is re-read once per band, so it
+  need not be in RAM at all -- it could be re-read from a file, and the
+  limit would become storage rather than memory.
 - **Rotation and skew.** `transform` handles translate and scale, which is
   what a dial or a plot needs; anything else means carrying a full matrix
   through the point pipeline.

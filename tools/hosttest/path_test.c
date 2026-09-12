@@ -104,6 +104,77 @@ int main(void)
     draw("<svg viewBox=\"0 0 320 172\"><path d=\"M10 10 H110 V110 H10 Z K 5 5\" fill=\"#ffffff\"/></svg>");
     CHECK(px(60,60)==W, "path before an unknown command was discarded");
 
+    /* ---- <text> ---- */
+
+    /* Where the ink actually landed, which is the only honest way to test
+       placement: the numbers in the SVG are a claim, the pixels are not. */
+    int x0,y0,x1,y1;
+    #define INK() do {                                              \
+        x0 = PW; y0 = PH; x1 = -1; y1 = -1;                           \
+        for (int yy = 0; yy < PH; yy++) {                             \
+            for (int xx = 0; xx < PW; xx++) {                         \
+                if (!px(xx, yy)) continue;                            \
+                if (xx < x0) x0 = xx;                                 \
+                if (xx > x1) x1 = xx;                                 \
+                if (yy < y0) y0 = yy;                                 \
+                if (yy > y1) y1 = yy;                                 \
+            }                                                         \
+        }                                                             \
+    } while (0)
+
+    /* A 40-tall cell, baseline at y=100, so the cell spans 70..110 and an
+       'H' -- glyph rows 3..14 of 20 -- lands between 76 and 100. */
+    draw("<svg viewBox=\"0 0 320 172\"><text x=\"100\" y=\"100\" font-size=\"40\""
+         " fill=\"#ffffff\">H</text></svg>");
+    INK();
+    CHECK(x1 >= 0, "text drew nothing at all");
+    CHECK(x0 >= 100 && x1 <= 120, "glyph outside its cell horizontally");
+    CHECK(y0 >= 74 && y0 <= 78, "glyph top is not on the baseline's cap");
+    CHECK(y1 >= 97 && y1 <= 102, "glyph does not sit on the baseline");
+
+    /* text-anchor moves the run, not the glyphs within it. */
+    draw("<svg viewBox=\"0 0 320 172\"><text x=\"100\" y=\"100\" font-size=\"40\""
+         " text-anchor=\"end\" fill=\"#ffffff\">H</text></svg>");
+    INK();
+    CHECK(x0 >= 80 && x1 <= 100, "text-anchor=end did not shift a cell left");
+
+    draw("<svg viewBox=\"0 0 320 172\"><text x=\"100\" y=\"100\" font-size=\"40\""
+         " text-anchor=\"middle\" fill=\"#ffffff\">H</text></svg>");
+    INK();
+    CHECK(x0 >= 90 && x1 <= 110, "text-anchor=middle did not centre a cell");
+
+    /* Both properties inherit from a group, which is the whole reason for
+       putting them there: one axis of labels, one size, one alignment. */
+    draw("<svg viewBox=\"0 0 320 172\"><g font-size=\"40\" fill=\"#ffffff\">"
+         "<text x=\"100\" y=\"100\">H</text></g></svg>");
+    INK();
+    CHECK(y1 - y0 >= 20, "font-size did not inherit from the group");
+    CHECK(x1 - x0 <= 20, "inherited font-size came out too wide");
+
+    draw("<svg viewBox=\"0 0 320 172\"><g font-size=\"40\" text-anchor=\"end\""
+         " fill=\"#ffffff\"><text x=\"100\" y=\"100\">H</text></g></svg>");
+    INK();
+    CHECK(x1 <= 100, "text-anchor did not inherit from the group");
+
+    /* Three characters advance three cells and no more. */
+    draw("<svg viewBox=\"0 0 320 172\"><text x=\"100\" y=\"100\" font-size=\"40\""
+         " fill=\"#ffffff\">HHH</text></svg>");
+    INK();
+    CHECK(x0 >= 100 && x1 <= 160, "three glyphs did not occupy three cells");
+    CHECK(x1 > 130, "later glyphs in the run were not advanced");
+
+    /* Whitespace around the content is not part of the text. */
+    draw("<svg viewBox=\"0 0 320 172\"><text x=\"100\" y=\"100\" font-size=\"40\""
+         " fill=\"#ffffff\">\n      H\n   </text></svg>");
+    INK();
+    CHECK(x0 >= 100 && x1 <= 120, "leading whitespace shifted the text");
+
+    /* fill=none means no text, not black text. */
+    draw("<svg viewBox=\"0 0 320 172\"><text x=\"100\" y=\"100\" font-size=\"40\""
+         " fill=\"none\">H</text></svg>");
+    INK();
+    CHECK(x1 < 0, "text drew despite fill=none");
+
     printf(fails ? "\n%d check(s) failed\n" : "\nall path checks passed\n", fails);
     return fails!=0;
 }

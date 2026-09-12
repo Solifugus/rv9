@@ -15,6 +15,7 @@
 
 #include <string.h>
 
+#include "font.h"
 #include "panel.h"
 
 #include "esp_log.h"
@@ -65,17 +66,15 @@ static const char *TAG = "rv9-lcdcon";
 
 /* Waveshare ESP32-C5-LCD-1.47 */
 
-#define GLYPH_W       10
-#define GLYPH_H       20
-#define GLYPH_STRIDE  ((GLYPH_W + 1) / 2)   /* two 4-bit pixels per byte */
+#define GLYPH_W       RV9_GLYPH_W
+#define GLYPH_H       RV9_GLYPH_H
+#define GLYPH_STRIDE  RV9_GLYPH_STRIDE
 #define SHADES        16
 
-#define FONT_FIRST    32
-#define FONT_LAST     126
+#define FONT_FIRST    RV9_FONT_FIRST
+#define FONT_LAST     RV9_FONT_LAST
 
 /* 4 bits of coverage per pixel; see tools/mkfont.py. */
-extern const unsigned char rv9_font[FONT_LAST - FONT_FIRST + 1]
-                                   [GLYPH_H][GLYPH_STRIDE];
 
 /* RGB565 defaults. */
 #define DEFAULT_FG    0xFFFF      /* pure white */

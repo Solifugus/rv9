@@ -18,6 +18,7 @@
  * So the SVG source *is* the display list: there is no compiled form to
  * build, size, or keep in step with the source it came from.
  */
+#include "font.h"
 #include "panel.h"
 #include "raster.h"
 
@@ -254,6 +255,8 @@ static uint32_t attr_colour(const char *tag, const char *tend,
  */
 typedef struct {
     bool     evenodd;          /* fill-rule */
+    int32_t  font_size;        /* 8.8 user units, the cell height */
+    uint8_t  anchor;           /* 0 start, 1 middle, 2 end */
     uint32_t fill, stroke;
     int32_t  stroke_w;         /* 8.8 */
     int32_t  sx, sy;           /* 8.8 scale */
@@ -912,6 +915,101 @@ static void do_path(rband_t *b, const char *t, const char *te,
     }
 }
 
+
+/* ------------------------------------------------------------------ */
+/* <text>                                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Text, from the console's font.
+ *
+ * A chart without labels is a picture of a chart, so this is not a
+ * flourish. The font is the one the console uses -- 10x20 cells with four
+ * bits of coverage per pixel -- which means the glyphs already carry
+ * anti-aliasing and need no scanline conversion: each destination pixel
+ * samples the glyph and blends by what it finds.
+ *
+ * Labels are usually *smaller* than the font's native twenty rows, and
+ * nearest-neighbour downscaling of an anti-aliased face looks like gravel.
+ * So each destination pixel takes nine samples in a 3x3 grid and averages
+ * them, which costs nothing at label sizes and keeps thin strokes grey
+ * rather than missing.
+ *
+ * One font, one size, no families: `font-family` is accepted and ignored,
+ * because there is exactly one face in the system and pretending otherwise
+ * would be a lie told in a parser.
+ */
+static void do_text(rband_t *b, const char *t, const char *te,
+                    const char *str, size_t n, const gstate_t *g)
+{
+    if (g->fill == NO_PAINT) return;
+
+    while (n > 0 && is_space(*str)) { str++; n--; }
+    while (n > 0 && is_space(str[n - 1])) n--;
+    if (n == 0) return;
+
+    /* font-size is the cell height, which is the whole em box including
+       room for descenders -- not the cap height. */
+    int32_t h = fmul(g->font_size, g->sy);
+    int32_t w = (int32_t)(((int64_t)h * RV9_GLYPH_W) / RV9_GLYPH_H);
+    if (h <= 0 || w <= 0) return;
+
+    int32_t x, y;
+    pt(g, attr_num(t, te, "x", 0), attr_num(t, te, "y", 0), &x, &y);
+
+    if (g->anchor != 0) {
+        int32_t total = (int32_t)n * w;
+        x -= (g->anchor == 1) ? total / 2 : total;
+    }
+
+    /* SVG puts y on the baseline; the cell hangs above it. */
+    int32_t top = y - (int32_t)(((int64_t)h * RV9_FONT_BASELINE) / RV9_GLYPH_H);
+
+    int py0 = (int)(top >> 8);
+    int py1 = (int)((top + h + 255) >> 8);
+    if (py1 <= b->y0 || py0 >= b->y0 + b->rows) return;
+    if (py0 < b->y0) py0 = b->y0;
+    if (py1 > b->y0 + b->rows) py1 = b->y0 + b->rows;
+
+    for (size_t i = 0; i < n; i++) {
+        int ch = (unsigned char)str[i];
+        if (ch == '\n' || ch == '\t') ch = ' ';
+
+        int32_t cx = x + (int32_t)i * w;
+
+        int px0 = (int)(cx >> 8);
+        int px1 = (int)((cx + w + 255) >> 8);
+        if (px1 <= 0 || px0 >= b->w) continue;
+        if (px0 < 0) px0 = 0;
+        if (px1 > b->w) px1 = b->w;
+
+        for (int py = py0; py < py1; py++) {
+            for (int pxi = px0; pxi < px1; pxi++) {
+                int sum = 0;
+
+                for (int k = 0; k < 3; k++) {
+                    int32_t sy = ((int32_t)py << 8) + (256 * (2 * k + 1)) / 6
+                                 - top;
+                    int gy = (int)(((int64_t)sy * RV9_GLYPH_H) / h);
+
+                    for (int l = 0; l < 3; l++) {
+                        int32_t sx = ((int32_t)pxi << 8)
+                                     + (256 * (2 * l + 1)) / 6 - cx;
+                        int gx = (int)(((int64_t)sx * RV9_GLYPH_W) / w);
+                        sum += rv9_glyph_cov(ch, gx, gy);
+                    }
+                }
+
+                /* Nine samples of 0..15 become one alpha of 0..255. */
+                if (sum > 0) {
+                    rv9_raster_pixel(b, pxi, py, (uint16_t)g->fill,
+                                     sum * 255 / (9 * 15));
+                }
+            }
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* One pass over the document, for one band                            */
 /* ------------------------------------------------------------------ */
@@ -923,6 +1021,7 @@ static void render_band(svgwin_t *s, rband_t *b)
 
     gstate_t base = {
         .fill = 0x0000, .stroke = NO_PAINT, .stroke_w = RV9_FIX(1),
+        .font_size = RV9_FIX(16), .anchor = 0,
         .sx = 256, .sy = 256, .tx = 0, .ty = 0,
     };
     stack[0] = base;
@@ -967,6 +1066,20 @@ static void render_band(svgwin_t *s, rband_t *b)
             g.evenodd = name_is(v, vn, "evenodd");
         }
 
+        /*
+         * Text properties inherit, which is the point of putting them on a
+         * <g>: a whole axis of labels shares one size and one alignment.
+         * Reading them only from the element they are used on looks like it
+         * works -- the text still appears -- and quietly ignores every
+         * group that was meant to style it.
+         */
+        g.font_size = attr_num(tag, tend, "font-size", g.font_size);
+
+        if (attr(tag, tend, "text-anchor", &v, &vn)) {
+            g.anchor = name_is(v, vn, "middle") ? 1 :
+                       name_is(v, vn, "end")    ? 2 : 0;
+        }
+
         if (name_is(ns, nl, "svg")) {
             /* viewBox maps user units onto the panel, which is what lets
                the same drawing suit a phone and a 320x172 strip. */
@@ -991,6 +1104,14 @@ static void render_band(svgwin_t *s, rband_t *b)
 
         if (name_is(ns, nl, "g")) {
             if (!self_close && depth + 1 < MAX_DEPTH) stack[++depth] = g;
+            continue;
+        }
+
+        if (name_is(ns, nl, "text")) {
+            /* The content is what follows the tag, up to the next one. */
+            const char *cs = p;
+            while (p < end && *p != '<') p++;
+            do_text(b, tag, tend, cs, (size_t)(p - cs), &g);
             continue;
         }
 

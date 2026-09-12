@@ -377,8 +377,12 @@ control layer is late if it is late.
   asserts against it, and renders to a PPM you can look at. The panel is the
   one part of the system no test can reach, and a picture can be
   geometrically perfect and still look wrong.
-- Not done in the window: `<text>`, arc x-axis-rotation, opacity,
-  gradients.
+- **`<text>` — done.** The console's font, moved into a shared `font.h`.
+  `font-size` and `text-anchor` inherit, so one group styles a whole axis
+  of labels. Downscaled with 3x3 sampling, because an anti-aliased face
+  reduced by nearest neighbour looks like gravel.
+- Not done in the window: font families and weights, rotated text, arc
+  x-axis-rotation, opacity, gradients, documents over 4 KB.
 - Not done: I2C and SPI as devices, which is what most sensors want.
 - **Interrupt-driven inputs — done.** `setstat(path, RV9_PIO_SS_EDGE, ...)`
   arms a pin; `getstat(path, RV9_PIO_GS_EVENT, ...)` says which event it

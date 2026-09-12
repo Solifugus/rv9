@@ -51,5 +51,9 @@ void rv9_raster_fill(rband_t *b, const int32_t *pts, int n, bool evenodd,
 void rv9_raster_stroke(rband_t *b, const int32_t *pts, int n, bool closed,
                        int32_t width, uint16_t colour);
 
+/* One pixel, at panel coordinates, blended by coverage 0..255. For glyphs,
+   which come with their own coverage and need no scanline. */
+void rv9_raster_pixel(rband_t *b, int x, int y, uint16_t colour, int alpha);
+
 /* Byte-swap the band into what the ST7789 expects, once, on the way out. */
 void rv9_raster_to_panel(rband_t *b);

@@ -274,6 +274,20 @@ void rv9_raster_stroke(rband_t *b, const int32_t *pts, int n, bool closed,
     rv9_raster_stroke_n(b, pts, &one, 1, width, colour);
 }
 
+void rv9_raster_pixel(rband_t *b, int x, int y, uint16_t colour, int alpha)
+{
+    if (alpha <= 0) return;
+
+    int row = y - b->y0;
+    if (row < 0 || row >= b->rows) return;
+    if (x < 0 || x >= b->w) return;
+
+    if (alpha > 255) alpha = 255;
+
+    uint16_t *p = &b->px[(size_t)row * b->w + x];
+    *p = blend(colour, *p, alpha);
+}
+
 void rv9_raster_clear(rband_t *b, uint16_t colour)
 {
     size_t n = (size_t)b->w * b->rows;
