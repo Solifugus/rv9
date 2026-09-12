@@ -427,6 +427,7 @@ typedef struct {
 #define RV9_SYS_MEM      1
 #define RV9_SYS_MODULES  2
 #define RV9_SYS_PROCS    3
+#define RV9_SYS_RT       4     /* rv9_sys_rt_t, one per real-time task */
 
 typedef struct __attribute__((packed)) {
     uint32_t heap_free;
@@ -455,6 +456,30 @@ typedef struct __attribute__((packed)) {
     int8_t   reserved;
     int32_t  status;
 } rv9_sys_proc_t;
+
+/*
+ * What a real-time task is actually doing, for anything watching.
+ *
+ * rt_stats reports the caller's own timing, which is right for a loop
+ * checking itself and useless for a display. These records are every
+ * real-time task at once, so a panel can show how late the control loop
+ * is running without being the control loop.
+ *
+ * Which is the metric an autonomous machine wants on its screen: not that
+ * it is working, but by how much it is missing.
+ */
+typedef struct __attribute__((packed)) {
+    uint16_t index;            /* the task's slot, stable while it lives */
+    uint8_t  event_driven;     /* released by an interrupt, not a period */
+    uint8_t  reserved;
+    uint32_t period_us;        /* or the declared minimum gap, if event-driven */
+    uint32_t activations;
+    uint32_t overruns;
+    uint32_t max_jitter_us;
+    uint32_t max_exec_us;
+    uint32_t last_exec_us;
+    uint32_t min_interval_us;  /* shortest gap actually seen */
+} rv9_sys_rt_t;
 
 typedef int (*rv9_mod_entry_fn)(const rv9_mod_env_t *env);
 

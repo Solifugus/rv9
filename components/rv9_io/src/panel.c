@@ -264,7 +264,23 @@ void rv9_panel_blit(int x0, int y0, int x1, int y1, const uint16_t *px)
     if (esp_lcd_panel_draw_bitmap(s_panel, x0, y0, x1, y1, px) == ESP_OK) {
         uint64_t deadline = rv9_time_us() + 50000;
 
-        while (s_done_count != want && rv9_time_us() < deadline) { }
+        /*
+         * Wait, but hand the processor over while waiting.
+         *
+         * A full-width strip takes 636 us and there are twenty-two of them
+         * in a picture, so a spin gives away fourteen milliseconds of CPU
+         * per frame to no purpose. On a bench that is invisible; on a
+         * machine with a control loop it is fourteen milliseconds somebody
+         * else could have used.
+         *
+         * Yielding rather than sleeping, because the wait is far shorter
+         * than any tick and this must also work before the kernel is
+         * serving threads -- the console clears the panel at init, from a
+         * context that cannot block.
+         */
+        while (s_done_count != want && rv9_time_us() < deadline) {
+            rv9_task_yield();
+        }
 
         if (s_done_count != want) {
             static bool warned;

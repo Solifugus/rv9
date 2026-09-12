@@ -1994,6 +1994,88 @@ woken promptly rather than on its timeout. Both the semaphore and the
 queue. That test exists because this primitive had none, which is how
 nobody noticed it did nothing.
 
+## 21. Telemetry, and a chart that lied
+
+A chart drawn once is a report. The other thing a small panel on a machine
+is for is a number that moves, watched while the machine runs -- and
+almost nothing §19 optimised for is what that needs.
+
+`gauge` is that: it redraws continuously and says how fast it managed,
+because the useful question about a telemetry display is not whether it is
+pretty but whether it keeps up. **Thirteen frames a second, 76 ms a
+frame**, which is comfortably above the roughly three-per-second a human
+observer can act on. So for watching a dial, `/w0` was already finished.
+
+### The cost is duty, not smoothness
+
+At 3 Hz the display would still spend 76 ms of every 333 on itself: about
+a quarter of the machine, to move a line a few pixels. Most of it redraws a
+grid and some labels that never change.
+
+Of that, ~14 ms was pure waste -- `rv9_panel_blit` spun while the SPI
+transfer ran. It yields now, which costs nothing in wall-clock and hands
+those milliseconds to anything else that can use them. It yields rather
+than sleeps because the wait is 636 us, far shorter than a tick, and the
+console clears the panel at init from a context that cannot block at all.
+
+The remaining ~62 ms is parsing the document once per band and rasterising
+every shape into every band it touches, changed or not. **Dirty-band
+updates** are the lever -- a scrolling trace dirties a narrow slice and the
+grid dirties nothing -- and they are deliberately not built, because they
+only pay on a machine where a quarter of the CPU matters.
+
+### Watching a loop without being one
+
+`rt_stats` reports the caller's own timing, which is right for a loop
+checking itself and useless for a display: a program that draws pictures
+has no deadlines worth watching. So real-time statistics come through
+`sysinfo` as `RV9_SYS_RT`, one record per task, and a panel can watch a
+control loop from outside it.
+
+That was built on `rv9_rt_stats_by_index`, which had been declared,
+implemented, and used by nothing -- the same category as the ISR-safe
+primitives in §20, and the same lesson: an unused interface is an untested
+one.
+
+### The chart that lied
+
+The first version scaled the plot to the range of the data on screen,
+which is the obvious way to show texture in a signal that barely moves.
+
+It looked like a heartbeat monitor. It was a lie.
+
+The loop executes in **one to two microseconds**, so what filled the plot
+was a one-microsecond flicker -- the last bit of a microsecond counter --
+stretched across a hundred and ten pixels. The numbers printed beside it
+were correct throughout. What was invented was the *shape*, which is what a
+glance actually reads.
+
+This is a truncated bar chart arrived at by good intentions, and the guard
+against it was written and set far too low: the band was widened only when
+the observed range fell below four microseconds, which a signal living at
+one to two sails straight past.
+
+A duration has a meaningful zero, so **the axis starts at zero**. The top
+follows what has been seen, with headroom, and never falls below a floor
+that keeps a trivial signal looking trivial. A loop using two microseconds
+of a twenty-thousand microsecond budget now sits just off the baseline,
+and would visibly climb if it ever stopped doing so.
+
+It is the failure mode that matters most for machine telemetry. An
+operator reads the silhouette, not the digits, and a display that
+manufactures drama from noise teaches people to ignore it -- so that the
+once it means something, nobody looks.
+
+### Still honest about
+
+- **`max_jitter_us` is monotonic**, worst-ever rather than current, so as a
+  trace it is a staircase that flattens. Per-activation lateness is not
+  exposed; that would be a small addition to `rv9_rt_stats_t`.
+- **`control` is too well behaved to be interesting**, using a hundredth of
+  a percent of its budget. Demonstrating that the display shows something
+  when there is something wants a loop doing real work, or one deliberately
+  overrunning.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

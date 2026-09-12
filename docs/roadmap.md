@@ -391,6 +391,17 @@ control layer is late if it is late.
   first, handed out as geometry and a blit under a lock.
 - **`cat` — done**, finally. A file reaching a device needs no new verb
   when redirection already works.
+- **`gauge` — a live telemetry display, done**, see design §21. Redraws
+  continuously at 13 fps and traces a real-time task's execution time
+  against its budget, with worst lateness and overruns beside it. The
+  panel's blit yields instead of spinning, handing ~14 ms a frame back to
+  whatever else is running.
+- **`RV9_SYS_RT`** — real-time statistics through `sysinfo`, so a display
+  can watch a control loop without being one. `rt_stats` only ever
+  described the caller.
+- Not done: dirty-band updates. At the few-per-second a human can act on,
+  the frame rate is a non-issue; the argument is duty cycle, and it only
+  bites where a quarter of the CPU matters.
 - **`<path>` — done**, `M L H V C S Q T A Z`, absolute and relative, with
   subpaths, holes and `fill-rule`. Arcs by bisection rather than
   trigonometry. `chart > /w0` draws an area chart, a cubic series, bars and

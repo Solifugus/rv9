@@ -454,6 +454,35 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
         return (int)n;
     }
 
+    case RV9_SYS_RT: {
+        uint32_t max = len / sizeof(rv9_sys_rt_t);
+        rv9_sys_rt_t *out = (rv9_sys_rt_t *)buf;
+        uint32_t n = 0;
+
+        /* Walk until the index runs off the end, which the KAL reports
+           rather than publishing how many slots it keeps. */
+        for (int i = 0; n < max; i++) {
+            rv9_rt_stats_t st;
+            bool valid = false;
+
+            if (rv9_rt_stats_by_index(i, &st, &valid) != RV9_OK) break;
+            if (!valid) continue;
+
+            memset(&out[n], 0, sizeof(out[n]));
+            out[n].index           = (uint16_t)i;
+            out[n].event_driven    = st.event_driven ? 1 : 0;
+            out[n].period_us       = st.period_us;
+            out[n].activations     = (uint32_t)st.activations;
+            out[n].overruns        = (uint32_t)st.overruns;
+            out[n].max_jitter_us   = st.max_jitter_us;
+            out[n].max_exec_us     = st.max_exec_us;
+            out[n].last_exec_us    = st.last_exec_us;
+            out[n].min_interval_us = st.min_interval_us;
+            n++;
+        }
+        return (int)n;
+    }
+
     case RV9_SYS_PROCS:
         if (s_proc_ops && s_proc_ops->procs) {
             return s_proc_ops->procs(buf, len);
