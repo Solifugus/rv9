@@ -445,6 +445,19 @@ control layer is late if it is late.
 - The layering check from phase 0 is what makes phase 7 possible at all. If it
   is ever disabled "just this once", the project quietly becomes a rewrite.
 
+## The language this is a target for
+
+**docs/alignment.md** — notes from the compiler side, and RV-9's honest
+reading of where it stands against each. The governing constraint is that
+RV-9 should not grow language semantics; it should avoid decisions that stop
+the compiler telling it things it could use.
+
+Three items foreclose options if left alone, in order: the **fixed module
+header** (every new field breaks the ABI; a TLV extension area stops it
+recurring), **stack overflow detection** (per-program stacks already work and
+are already unsafe), and a **memory floor** (until allocation can be refused,
+admission control has nothing to protect). Everything else can wait.
+
 ## Memory
 
 Measured, not estimated: **docs/memory.md**. The short version is that WiFi
