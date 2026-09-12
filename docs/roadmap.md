@@ -341,6 +341,16 @@ control layer is late if it is late.
   ships it has no EdDSA at all, which matters because ssh-keygen defaults
   to it.
 - Not done: rekeying, more than one session at a time, job control.
+- **Open: short sessions lose their output on a poor link.** On a phone
+  hotspot -- 200 ms round trip, erratic -- connect-run-disconnect succeeds
+  about three times in ten, while a session *held open* is five for five
+  and plain `rshd` over the same link is eight for eight. So the
+  handshake, authentication and server-to-client data are all sound; it is
+  short sessions that suffer. The committed code from before six bug fixes
+  behaves identically, so this is the link rather than a regression.
+  Parked until there is a normal network to compare against; the next step
+  is a packet capture, to see whether the segments leave and what the
+  teardown looks like on the wire.
 - **No post-quantum key exchange**, which OpenSSH 10 warns about and is
   right to. `mlkem768x25519-sha256` needs an ML-KEM implementation and
   there is none in this mbedTLS — a project, not a setting.
