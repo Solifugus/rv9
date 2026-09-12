@@ -1,0 +1,39 @@
+/*
+ * chart -- a chart, for proving <path> works.
+ *
+ *   chart > /w0     draw it on the panel
+ *   chart           print the SVG instead
+ *
+ * Between them these cover what a chart is made of: gridlines and axes as
+ * straight paths, a filled area, a smooth series drawn with cubic curves,
+ * bars, a donut with a real hole in it, and a stroked zigzag in relative
+ * coordinates. Nothing here knows what a panel is.
+ */
+#include "modlib.h"
+
+static const char *PICTURE =
+    "<svg viewBox=\"0 0 320 172\"><rect x=\"0\" y=\"0\" width=\"320\" height=\"172"
+    "\" fill=\"#f4f1ea\"/><g stroke=\"#c9c2b4\" stroke-width=\"1\" fill=\"none\"><"
+    "path d=\"M30 20 H210 M30 50 H210 M30 80 H210 M30 110 H210\"/></g><path"
+    " d=\"M30 140 L30 14\" stroke=\"#5a5346\" stroke-width=\"1\" fill=\"none\"/><"
+    "path d=\"M30 140 L210 140\" stroke=\"#5a5346\" stroke-width=\"1\" fill=\"no"
+    "ne\"/><path d=\"M30 118 L60 96 L90 104 L120 62 L150 70 L180 34 L210 46"
+    " L210 140 L30 140 Z\"fill=\"#9fc7e8\"/><path d=\"M30 118 C 45 96, 50 92,"
+    " 60 96 S 110 60, 120 62 S 170 30, 210 46\"fill=\"none\" stroke=\"#1f6fb2"
+    "\" stroke-width=\"2\"/><g fill=\"#d98032\"><rect x=\"40\" y=\"124\" width=\"10"
+    "\" height=\"16\"/><rect x=\"70\" y=\"118\" width=\"10\" height=\"22\"/><rect x="
+    "\"100\" y=\"128\" width=\"10\" height=\"12\"/><rect x=\"130\" y=\"110\" width=\"1"
+    "0\" height=\"30\"/><rect x=\"160\" y=\"120\" width=\"10\" height=\"20\"/></g><p"
+    "ath d=\"M262 76 m -40 0 a 40 40 0 1 0 80 0 a 40 40 0 1 0 -80 0 ZM262 "
+    "76 m -18 0 a 18 18 0 1 1 36 0 a 18 18 0 1 1 -36 0 Z\"fill=\"#2f9e6d\" f"
+    "ill-rule=\"evenodd\"/><path d=\"M240 150 l 12 -10 l 12 10 l 12 -10 l 12"
+    " 10\"fill=\"none\" stroke=\"#b3446c\" stroke-width=\"2\"/></svg>";
+
+__attribute__((section(".text.entry")))
+int rv9_module_entry(const rv9_mod_env_t *env)
+{
+    if (env == NULL || env->abi_version < 9) return -1;
+
+    m_say(env, RV9_STDOUT, PICTURE);
+    return 0;
+}

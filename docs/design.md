@@ -1833,21 +1833,65 @@ assumed it was.
 | document | up to 4 KB |
 | heap while open | 31 KB free, dipping to 20 KB |
 
-Seven rasteriser properties are checked natively: fills, half-open edges in
-both axes, horizontal and vertical anti-aliasing, clipping beyond both
-edges, even-odd against nonzero winding, strokes leaving interiors alone,
-and the byte swap on the way to the panel.
+`tools/hosttest/run.sh` builds the renderer for this machine and asserts
+against it: the rasteriser's fills, half-open edges in both axes,
+anti-aliasing in both directions, clipping, even-odd against nonzero,
+strokes leaving interiors alone and the byte swap; and the path parser's
+commands, relative forms, implicit linetos, curve bulges, subpath holes,
+arcs closing into round circles, and that unknown commands stop a path
+rather than misreading the rest as coordinates.
+
+It also renders to a PPM you can open, which is how the lumpy circles were
+caught. That matters more than the assertions: a picture can be
+geometrically perfect and still be wrong in a way only an eye catches, and
+the panel is the one part of this system no test can reach.
+
+### `<path>`, and the arcs
+
+`M L H V C S Q T A Z`, absolute and relative, with subpaths and
+`fill-rule`. Curves are flattened to line segments before the rasteriser
+sees them, so it never learns that anything was curved -- adding paths
+needed nothing from it except letting a shape have more than one contour.
+
+**A shape is now a list of contours**, and that is what makes a hole a
+hole: the scanline has to see the outer ring and the inner ring at once, or
+the winding rule has nothing to cancel against. Filling contours one at a
+time can draw two rings and never a donut.
+
+**Arcs are done by bisection, not trigonometry.** Divide out the radii and
+the ellipse becomes a unit circle, where the midpoint of a short arc
+between two unit vectors is just their sum, normalised. Halving four times
+gives sixteen points and never needs a sine, a cosine or an arctangent --
+which on a chip with no floating point is the difference between thirty
+lines and a page of fixed-point trigonometry. The major arc takes the
+negated midpoint; an exact half-turn, where the two ends give no midpoint
+at all, takes the perpendicular on the side being travelled.
+
+Measured: a chart with gridlines, a filled area, a cubic series, bars, a
+donut and a stroked zigzag is 1,077 bytes of SVG and draws in well under a
+second, start to finish over SSH in 0.9 s.
+
+### One more stray-point bug
+
+The donut came out with a wedge cut from its edge to its centre.
+
+`M160 86 m -40 0` is how a circle gets written, and the `M` starts a
+subpath that the `m` immediately abandons. That one-point subpath was too
+short to be a contour and was dropped -- but its *point* stayed in the
+shared array. Contours are consecutive runs of that array, so a point
+belonging to no contour shifts every contour after it by one, and the ring
+was drawn partly from the stranded centre point.
+
+The fix is to take the points back out, not merely to stop counting them.
+It is the third bug in this renderer of exactly one kind: two things
+disagreeing about how big something is.
 
 ### What it does not do
 
-- **`<path>`** — the biggest gap by far, and the next thing. Bezier
-  flattening is the work; the rasteriser underneath already takes arbitrary
-  polygons.
-- **Subpaths, and therefore holes.** A shape is one point list, implicitly
-  closed. A ring needs two contours and there is nowhere to put the second.
-  This also makes `fill-rule` academic: nonzero and even-odd only differ on
-  self-intersecting outlines.
 - **`<text>`** — the font renderer exists in `lcdcon` and is not shared yet.
+- **x-axis-rotation on arcs**, which is parsed and ignored. A rotated
+  ellipse needs the full endpoint-to-centre conversion with a rotation
+  matrix, and nothing that draws a pie chart or a map outline asks for one.
 - **Rotation and skew.** `transform` handles translate and scale, which is
   what a dial or a plot needs; anything else means carrying a full matrix
   through the point pipeline.

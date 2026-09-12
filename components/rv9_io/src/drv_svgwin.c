@@ -38,7 +38,8 @@ static const char *TAG = "rv9-svgwin";
 
 #define SRC_MAX    4096
 #define BAND_ROWS  8
-#define MAX_PTS    128
+#define MAX_PTS    256
+#define MAX_CONTOURS 16
 #define MAX_DEPTH  8
 
 typedef struct {
@@ -252,6 +253,7 @@ static uint32_t attr_colour(const char *tag, const char *tend,
  * translate and scale.
  */
 typedef struct {
+    bool     evenodd;          /* fill-rule */
     uint32_t fill, stroke;
     int32_t  stroke_w;         /* 8.8 */
     int32_t  sx, sy;           /* 8.8 scale */
@@ -458,6 +460,458 @@ static void do_poly(rband_t *b, const char *t, const char *te,
     }
 }
 
+
+/* ------------------------------------------------------------------ */
+/* <path>                                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The `d` attribute, flattened into contours.
+ *
+ * Curves become line segments here and the rasteriser never learns that
+ * anything was curved -- which is why adding paths needed no change to it
+ * beyond letting a shape have more than one contour.
+ *
+ * Everything is carried in panel coordinates rather than user units. The
+ * transform is scale-and-translate, so a relative step scales and does not
+ * translate, and working in the destination space means the segment count
+ * for a curve can be chosen from how big it will actually be drawn.
+ */
+typedef struct {
+    int32_t    *pts;
+    int         max, n;
+    rcontour_t *cs;
+    int         max_c, nc;
+    int         start;          /* first point index of the open contour */
+    int32_t     cx, cy;         /* current point */
+    int32_t     ox, oy;         /* where this subpath began */
+    int32_t     kx, ky;         /* previous curve's trailing control point */
+    bool        have_k;
+} pathbuf_t;
+
+static void emit(pathbuf_t *pb, int32_t x, int32_t y)
+{
+    if (pb->n >= pb->max) return;
+    pb->pts[2 * pb->n] = x;
+    pb->pts[2 * pb->n + 1] = y;
+    pb->n++;
+    pb->cx = x;
+    pb->cy = y;
+}
+
+static void end_contour(pathbuf_t *pb, bool closed)
+{
+    int n = pb->n - pb->start;
+
+    if (n >= 2 && pb->nc < pb->max_c) {
+        pb->cs[pb->nc].n = n;
+        pb->cs[pb->nc].closed = closed;
+        pb->nc++;
+        pb->start = pb->n;
+        return;
+    }
+
+    /*
+     * Too short to be a contour, so take its points back out.
+     *
+     * Leaving them would be worse than wasteful: contours are consecutive
+     * runs of the shared array, so a point belonging to no contour shifts
+     * every contour after it by one. "M262 76 m -40 0" -- which is how a
+     * circle gets written -- left the centre point stranded, and the ring
+     * that followed was drawn with a wedge cut out of it to that centre.
+     */
+    pb->n = pb->start;
+}
+
+/* How many segments a curve of this size deserves, from the length of its
+   control polygon -- a cheap bound that is never shorter than the curve. */
+static int curve_steps(int32_t poly_len)
+{
+    int px = (int)(poly_len >> 8);
+    int n = px / 4;
+    if (n < 3) n = 3;
+    if (n > 24) n = 24;
+    return n;
+}
+
+static int32_t adist(int32_t ax, int32_t ay, int32_t bx, int32_t by)
+{
+    int32_t dx = ax > bx ? ax - bx : bx - ax;
+    int32_t dy = ay > by ? ay - by : by - ay;
+    return dx + dy;     /* a taxicab bound; only the step count uses it */
+}
+
+static void cubic_to(pathbuf_t *pb, int32_t x1, int32_t y1, int32_t x2,
+                     int32_t y2, int32_t x3, int32_t y3)
+{
+    int32_t x0 = pb->cx, y0 = pb->cy;
+    int n = curve_steps(adist(x0, y0, x1, y1) + adist(x1, y1, x2, y2) +
+                        adist(x2, y2, x3, y3));
+
+    for (int i = 1; i <= n; i++) {
+        int64_t t = (int64_t)i * 256 / n;
+        int64_t u = 256 - t;
+
+        int64_t xx = u * u * u * x0 + 3 * u * u * t * x1 +
+                     3 * u * t * t * x2 + t * t * t * x3;
+        int64_t yy = u * u * u * y0 + 3 * u * u * t * y1 +
+                     3 * u * t * t * y2 + t * t * t * y3;
+
+        emit(pb, (int32_t)(xx >> 24), (int32_t)(yy >> 24));
+    }
+    pb->kx = x2; pb->ky = y2; pb->have_k = true;
+}
+
+static void quad_to(pathbuf_t *pb, int32_t x1, int32_t y1, int32_t x2,
+                    int32_t y2)
+{
+    int32_t x0 = pb->cx, y0 = pb->cy;
+    int n = curve_steps(adist(x0, y0, x1, y1) + adist(x1, y1, x2, y2));
+
+    for (int i = 1; i <= n; i++) {
+        int64_t t = (int64_t)i * 256 / n;
+        int64_t u = 256 - t;
+
+        int64_t xx = u * u * x0 + 2 * u * t * x1 + t * t * x2;
+        int64_t yy = u * u * y0 + 2 * u * t * y1 + t * t * y2;
+
+        emit(pb, (int32_t)(xx >> 16), (int32_t)(yy >> 16));
+    }
+    pb->kx = x1; pb->ky = y1; pb->have_k = true;
+}
+
+
+/*
+ * Elliptical arcs.
+ *
+ * Done by bisection rather than trigonometry. Map the ellipse to a unit
+ * circle by dividing out the radii, and the midpoint of a short arc
+ * between two unit vectors is simply their sum, normalised -- so halving
+ * four times gives sixteen points and never needs a sine, a cosine or an
+ * arctangent. On a chip with no floating point that is the difference
+ * between a page of fixed-point trigonometry and thirty lines.
+ *
+ * x-axis-rotation is parsed and ignored. A rotated ellipse needs the full
+ * endpoint-to-centre conversion with a rotation matrix; nothing that draws
+ * a pie chart or a map outline asks for one.
+ */
+static uint32_t isqrt64(uint64_t v)
+{
+    uint64_t r = 0, bit = (uint64_t)1 << 40;
+    while (bit > v) bit >>= 2;
+    while (bit) {
+        if (v >= r + bit) { v -= r + bit; r = (r >> 1) + bit; }
+        else r >>= 1;
+        bit >>= 2;
+    }
+    return (uint32_t)r;
+}
+
+/* Scale a vector to length 1.0, in 8.8. */
+static void unitise(int32_t *x, int32_t *y)
+{
+    uint64_t l = isqrt64((int64_t)(*x) * (*x) + (int64_t)(*y) * (*y));
+    if (l == 0) { *x = 256; *y = 0; return; }
+    *x = (int32_t)(((int64_t)*x * 256) / (int64_t)l);
+    *y = (int32_t)(((int64_t)*y * 256) / (int64_t)l);
+}
+
+static void arc_seg(pathbuf_t *pb, int32_t cx, int32_t cy,
+                    int32_t rx, int32_t ry,
+                    int32_t ax, int32_t ay, int32_t bx, int32_t by,
+                    bool major, int d, int depth)
+{
+    if (depth == 0) {
+        emit(pb, cx + (int32_t)(((int64_t)bx * rx) >> 8),
+                 cy + (int32_t)(((int64_t)by * ry) >> 8));
+        return;
+    }
+
+    int32_t mx = ax + bx, my = ay + by;
+
+    if (mx == 0 && my == 0) {
+        /* Exactly half a turn: the two ends give no midpoint, so take the
+           perpendicular on the side we are travelling. */
+        mx = -ay * d;
+        my =  ax * d;
+        unitise(&mx, &my);
+    } else {
+        unitise(&mx, &my);
+        if (major) { mx = -mx; my = -my; }
+    }
+
+    arc_seg(pb, cx, cy, rx, ry, ax, ay, mx, my, false, d, depth - 1);
+    arc_seg(pb, cx, cy, rx, ry, mx, my, bx, by, false, d, depth - 1);
+}
+
+static void arc_to(pathbuf_t *pb, int32_t rx, int32_t ry, bool large,
+                   bool sweep, int32_t x1, int32_t y1)
+{
+    int32_t x0 = pb->cx, y0 = pb->cy;
+
+    if (rx < 0) rx = -rx;
+    if (ry < 0) ry = -ry;
+    if (rx == 0 || ry == 0 || (x0 == x1 && y0 == y1)) { emit(pb, x1, y1); return; }
+
+    int32_t dx2 = (x0 - x1) / 2, dy2 = (y0 - y1) / 2;
+
+    /* Work in units of the radii, where the ellipse is the unit circle. */
+    int32_t a = (int32_t)(((int64_t)dx2 * 256) / rx);
+    int32_t b = (int32_t)(((int64_t)dy2 * 256) / ry);
+
+    int32_t a2 = (int32_t)(((int64_t)a * a) >> 8);
+    int32_t b2 = (int32_t)(((int64_t)b * b) >> 8);
+
+    /* Radii too small to reach: the spec says grow them until they do. */
+    if (a2 + b2 > 256) {
+        uint32_t sq = isqrt64(((uint64_t)(a2 + b2)) << 8);
+        rx = (int32_t)(((int64_t)rx * sq) >> 8);
+        ry = (int32_t)(((int64_t)ry * sq) >> 8);
+        a = (int32_t)(((int64_t)dx2 * 256) / rx);
+        b = (int32_t)(((int64_t)dy2 * 256) / ry);
+        a2 = (int32_t)(((int64_t)a * a) >> 8);
+        b2 = (int32_t)(((int64_t)b * b) >> 8);
+    }
+
+    int32_t den = a2 + b2;
+    if (den <= 0) { emit(pb, x1, y1); return; }
+
+    int32_t num = 256 - den;
+    if (num < 0) num = 0;
+
+    uint32_t coef = isqrt64((((uint64_t)num << 8) / (uint32_t)den) << 8);
+    int sign = (large != sweep) ? 1 : -1;
+
+    int32_t cx = (int32_t)(sign * (int64_t)coef * (((int64_t)rx * b) >> 8) >> 8)
+                 + (x0 + x1) / 2;
+    int32_t cy = (int32_t)(-sign * (int64_t)coef * (((int64_t)ry * a) >> 8) >> 8)
+                 + (y0 + y1) / 2;
+
+    int32_t v0x = (int32_t)(((int64_t)(x0 - cx) * 256) / rx);
+    int32_t v0y = (int32_t)(((int64_t)(y0 - cy) * 256) / ry);
+    int32_t v1x = (int32_t)(((int64_t)(x1 - cx) * 256) / rx);
+    int32_t v1y = (int32_t)(((int64_t)(y1 - cy) * 256) / ry);
+    unitise(&v0x, &v0y);
+    unitise(&v1x, &v1y);
+
+    int d = sweep ? 1 : -1;
+
+    int32_t cross = (int32_t)((((int64_t)v0x * v1y) - ((int64_t)v0y * v1x)) >> 8);
+    int turn = (cross > 0) ? 1 : (cross < 0 ? -1 : 0);
+
+    /* Going our way round, is this the long arc or the short one? */
+    bool major = (turn != 0) ? (turn != d) : large;
+
+    int big = (int)((rx > ry ? rx : ry) >> 8);
+    int depth = (big < 16) ? 3 : (big < 64 ? 4 : 5);
+
+    arc_seg(pb, cx, cy, rx, ry, v0x, v0y, v1x, v1y, major, d, depth);
+}
+
+/* A path flag is a single character: "010" is three of them, not ten. */
+static int parse_flag(const char *p, const char *end, const char **out)
+{
+    while (p < end && (is_space(*p) || *p == ',')) p++;
+    int v = (p < end && *p == '1') ? 1 : 0;
+    if (p < end) p++;
+    if (out) *out = p;
+    return v;
+}
+
+static int parse_path(const char *d, size_t dn, const gstate_t *g,
+                      int32_t *pts, int max_pts, rcontour_t *cs, int max_c)
+{
+    pathbuf_t pb;
+    memset(&pb, 0, sizeof(pb));
+    pb.pts = pts; pb.max = max_pts; pb.cs = cs; pb.max_c = max_c;
+
+    const char *p = d, *end = d + dn;
+    char cmd = 0;
+
+    /* A step in user units becomes a step in panel units by scaling only:
+       the translation is already in the current point. */
+    #define UX(v) fmul((v), g->sx)
+    #define UY(v) fmul((v), g->sy)
+
+    while (p < end) {
+        while (p < end && (is_space(*p) || *p == ',')) p++;
+        if (p >= end) break;
+
+        if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z')) {
+            cmd = *p++;
+        } else if (cmd == 0) {
+            break;
+        } else if (cmd == 'M') {
+            cmd = 'L';        /* extra pairs after a moveto are linetos */
+        } else if (cmd == 'm') {
+            cmd = 'l';
+        }
+
+        bool rel = (cmd >= 'a' && cmd <= 'z');
+        char c = (char)(rel ? cmd - 32 : cmd);
+
+        int32_t a, b2, c1x, c1y, c2x, c2y, x, y;
+
+        switch (c) {
+        case 'M':
+            a = parse_num(p, end, &p);
+            b2 = parse_num(p, end, &p);
+            end_contour(&pb, false);
+            if (rel) { x = pb.cx + UX(a); y = pb.cy + UY(b2); }
+            else     { pt(g, a, b2, &x, &y); }
+            emit(&pb, x, y);
+            pb.ox = x; pb.oy = y;
+            pb.have_k = false;
+            break;
+
+        case 'L':
+            a = parse_num(p, end, &p);
+            b2 = parse_num(p, end, &p);
+            if (rel) { x = pb.cx + UX(a); y = pb.cy + UY(b2); }
+            else     { pt(g, a, b2, &x, &y); }
+            emit(&pb, x, y);
+            pb.have_k = false;
+            break;
+
+        case 'H':
+            a = parse_num(p, end, &p);
+            if (rel) x = pb.cx + UX(a);
+            else     { int32_t ty; pt(g, a, 0, &x, &ty); }
+            emit(&pb, x, pb.cy);
+            pb.have_k = false;
+            break;
+
+        case 'V':
+            a = parse_num(p, end, &p);
+            if (rel) y = pb.cy + UY(a);
+            else     { int32_t tx; pt(g, 0, a, &tx, &y); }
+            emit(&pb, pb.cx, y);
+            pb.have_k = false;
+            break;
+
+        case 'C':
+            c1x = parse_num(p, end, &p); c1y = parse_num(p, end, &p);
+            c2x = parse_num(p, end, &p); c2y = parse_num(p, end, &p);
+            a   = parse_num(p, end, &p); b2  = parse_num(p, end, &p);
+            if (rel) {
+                cubic_to(&pb, pb.cx + UX(c1x), pb.cy + UY(c1y),
+                              pb.cx + UX(c2x), pb.cy + UY(c2y),
+                              pb.cx + UX(a),   pb.cy + UY(b2));
+            } else {
+                int32_t q1x, q1y, q2x, q2y, q3x, q3y;
+                pt(g, c1x, c1y, &q1x, &q1y);
+                pt(g, c2x, c2y, &q2x, &q2y);
+                pt(g, a, b2, &q3x, &q3y);
+                cubic_to(&pb, q1x, q1y, q2x, q2y, q3x, q3y);
+            }
+            break;
+
+        case 'S': {
+            /* The missing control point is the previous one reflected, so
+               a run of S commands stays smooth without restating it. */
+            int32_t r1x = pb.have_k ? 2 * pb.cx - pb.kx : pb.cx;
+            int32_t r1y = pb.have_k ? 2 * pb.cy - pb.ky : pb.cy;
+            c2x = parse_num(p, end, &p); c2y = parse_num(p, end, &p);
+            a   = parse_num(p, end, &p); b2  = parse_num(p, end, &p);
+            if (rel) {
+                cubic_to(&pb, r1x, r1y, pb.cx + UX(c2x), pb.cy + UY(c2y),
+                              pb.cx + UX(a), pb.cy + UY(b2));
+            } else {
+                int32_t q2x, q2y, q3x, q3y;
+                pt(g, c2x, c2y, &q2x, &q2y);
+                pt(g, a, b2, &q3x, &q3y);
+                cubic_to(&pb, r1x, r1y, q2x, q2y, q3x, q3y);
+            }
+            break;
+        }
+
+        case 'Q':
+            c1x = parse_num(p, end, &p); c1y = parse_num(p, end, &p);
+            a   = parse_num(p, end, &p); b2  = parse_num(p, end, &p);
+            if (rel) {
+                quad_to(&pb, pb.cx + UX(c1x), pb.cy + UY(c1y),
+                             pb.cx + UX(a),   pb.cy + UY(b2));
+            } else {
+                int32_t q1x, q1y, q2x, q2y;
+                pt(g, c1x, c1y, &q1x, &q1y);
+                pt(g, a, b2, &q2x, &q2y);
+                quad_to(&pb, q1x, q1y, q2x, q2y);
+            }
+            break;
+
+        case 'T': {
+            int32_t r1x = pb.have_k ? 2 * pb.cx - pb.kx : pb.cx;
+            int32_t r1y = pb.have_k ? 2 * pb.cy - pb.ky : pb.cy;
+            a = parse_num(p, end, &p); b2 = parse_num(p, end, &p);
+            if (rel) {
+                quad_to(&pb, r1x, r1y, pb.cx + UX(a), pb.cy + UY(b2));
+            } else {
+                int32_t q2x, q2y;
+                pt(g, a, b2, &q2x, &q2y);
+                quad_to(&pb, r1x, r1y, q2x, q2y);
+            }
+            break;
+        }
+
+        case 'A': {
+            int32_t rx = parse_num(p, end, &p);
+            int32_t ry = parse_num(p, end, &p);
+            (void)parse_num(p, end, &p);          /* x-axis-rotation */
+            int fa = parse_flag(p, end, &p);
+            int fs = parse_flag(p, end, &p);
+            a  = parse_num(p, end, &p);
+            b2 = parse_num(p, end, &p);
+
+            if (rel) { x = pb.cx + UX(a); y = pb.cy + UY(b2); }
+            else     { pt(g, a, b2, &x, &y); }
+
+            arc_to(&pb, UX(rx), UY(ry), fa != 0, fs != 0, x, y);
+            pb.have_k = false;
+            break;
+        }
+
+        case 'Z':
+            end_contour(&pb, true);
+            pb.cx = pb.ox; pb.cy = pb.oy;
+            pb.have_k = false;
+            break;
+
+        default:
+            /* Unknown command: stop rather than misread the rest as
+               coordinates and draw something confidently wrong. */
+            p = end;
+            break;
+        }
+
+        if (pb.n >= pb.max) break;
+    }
+
+    #undef UX
+    #undef UY
+
+    end_contour(&pb, false);
+    return pb.nc;
+}
+
+static void do_path(rband_t *b, const char *t, const char *te,
+                    const gstate_t *g, svgwin_t *s)
+{
+    const char *v; size_t vn;
+    if (!attr(t, te, "d", &v, &vn)) return;
+
+    rcontour_t cs[MAX_CONTOURS];
+    int nc = parse_path(v, vn, g, s->pts, MAX_PTS, cs, MAX_CONTOURS);
+    if (nc <= 0) return;
+
+    if (g->fill != NO_PAINT) {
+        rv9_raster_fill_n(b, s->pts, cs, nc, g->evenodd, (uint16_t)g->fill);
+    }
+    if (g->stroke != NO_PAINT) {
+        rv9_raster_stroke_n(b, s->pts, cs, nc, fmul(g->stroke_w, g->sx),
+                            (uint16_t)g->stroke);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* One pass over the document, for one band                            */
 /* ------------------------------------------------------------------ */
@@ -509,6 +963,10 @@ static void render_band(svgwin_t *s, rband_t *b)
         g.stroke   = attr_colour(tag, tend, "stroke", g.stroke);
         g.stroke_w = attr_num(tag, tend, "stroke-width", g.stroke_w);
 
+        if (attr(tag, tend, "fill-rule", &v, &vn)) {
+            g.evenodd = name_is(v, vn, "evenodd");
+        }
+
         if (name_is(ns, nl, "svg")) {
             /* viewBox maps user units onto the panel, which is what lets
                the same drawing suit a phone and a 320x172 strip. */
@@ -542,6 +1000,7 @@ static void render_band(svgwin_t *s, rband_t *b)
         else if (name_is(ns, nl, "line"))     do_line(b, tag, tend, &g, s->pts);
         else if (name_is(ns, nl, "polygon"))  do_poly(b, tag, tend, &g, s->pts, true);
         else if (name_is(ns, nl, "polyline")) do_poly(b, tag, tend, &g, s->pts, false);
+        else if (name_is(ns, nl, "path"))     do_path(b, tag, tend, &g, s);
     }
 }
 

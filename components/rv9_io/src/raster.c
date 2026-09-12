@@ -59,15 +59,31 @@ typedef struct {
 
 #define MAX_CROSS 64
 
-/* Where the edges cross this subscanline, left to right. */
-static int crossings(const int32_t *pts, int n, int32_t sy, cross_t *out)
+/*
+ * Where the edges cross this subscanline, left to right.
+ *
+ * Every contour is walked into the same list, which is the whole point: a
+ * hole is only a hole because the scanline sees the outer ring and the
+ * inner ring at once and the winding rule cancels between them. Filling
+ * contours one at a time can draw two rings and never a hole.
+ *
+ * Contours are closed here whatever they say, because SVG fills an open
+ * subpath as though it were closed. Only stroking cares about the
+ * difference.
+ */
+static int crossings(const int32_t *pts, const rcontour_t *c, int nc,
+                     int32_t sy, cross_t *out)
 {
     int m = 0;
+    int base = 0;
 
-    for (int i = 0; i < n && m < MAX_CROSS; i++) {
-        int j = (i + 1) % n;
+    for (int k = 0; k < nc; k++) {
+      int n = c[k].n;
+      for (int i = 0; i < n && m < MAX_CROSS; i++) {
+        int a = base + i;
+        int j = base + ((i + 1) % n);
 
-        int32_t x0 = pts[2 * i], y0 = pts[2 * i + 1];
+        int32_t x0 = pts[2 * a], y0 = pts[2 * a + 1];
         int32_t x1 = pts[2 * j], y1 = pts[2 * j + 1];
 
         if (y0 == y1) continue;
@@ -87,6 +103,8 @@ static int crossings(const int32_t *pts, int n, int32_t sy, cross_t *out)
         out[m].x = x0 + (int32_t)(dx / (y1 - y0));
         out[m].dir = dir;
         m++;
+      }
+      base += n;
     }
 
     for (int i = 1; i < m; i++) {
@@ -115,15 +133,17 @@ static uint16_t blend(uint16_t fg, uint16_t bg, int a)
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
-void rv9_raster_fill(rband_t *b, const int32_t *pts, int n, bool evenodd,
-                     uint16_t colour)
+void rv9_raster_fill_n(rband_t *b, const int32_t *pts, const rcontour_t *c,
+                       int nc, bool evenodd, uint16_t colour)
 {
-    if (n < 3) return;
+    int total = 0;
+    for (int k = 0; k < nc; k++) total += c[k].n;
+    if (total < 3) return;
 
     /* Skip the whole shape if it is not in this band at all -- which is
        most shapes, most bands, and the reason banding is affordable. */
     int32_t ymin = pts[1], ymax = pts[1];
-    for (int i = 1; i < n; i++) {
+    for (int i = 1; i < total; i++) {
         if (pts[2 * i + 1] < ymin) ymin = pts[2 * i + 1];
         if (pts[2 * i + 1] > ymax) ymax = pts[2 * i + 1];
     }
@@ -143,7 +163,7 @@ void rv9_raster_fill(rband_t *b, const int32_t *pts, int n, bool evenodd,
         for (int s = 0; s < SUB; s++) {
             int32_t sy = ((int32_t)py << 8) + (256 * s + 128) / SUB;
 
-            int m = crossings(pts, n, sy, cr);
+            int m = crossings(pts, c, nc, sy, cr);
             if (m < 2) continue;
 
             if (evenodd) {
@@ -175,6 +195,13 @@ void rv9_raster_fill(rband_t *b, const int32_t *pts, int n, bool evenodd,
     }
 }
 
+void rv9_raster_fill(rband_t *b, const int32_t *pts, int n, bool evenodd,
+                     uint16_t colour)
+{
+    rcontour_t one = { .n = n, .closed = true };
+    rv9_raster_fill_n(b, pts, &one, 1, evenodd, colour);
+}
+
 /*
  * Stroke, as a filled quad per segment.
  *
@@ -184,20 +211,25 @@ void rv9_raster_fill(rband_t *b, const int32_t *pts, int n, bool evenodd,
  * blunt corner, and blending twice toward the same opaque colour lands on
  * that colour rather than darkening -- so the overlap does not show.
  */
-void rv9_raster_stroke(rband_t *b, const int32_t *pts, int n, bool closed,
-                       int32_t width, uint16_t colour)
+void rv9_raster_stroke_n(rband_t *b, const int32_t *pts, const rcontour_t *c,
+                         int nc, int32_t width, uint16_t colour)
 {
-    if (n < 2 || width <= 0) return;
+    if (width <= 0) return;
 
     int32_t half = width / 2;
     if (half < 1) half = 1;
 
-    int segs = closed ? n : n - 1;
+    int base = 0;
 
-    for (int i = 0; i < segs; i++) {
-        int j = (i + 1) % n;
+    for (int k = 0; k < nc; k++) {
+      int n = c[k].n;
+      int segs = c[k].closed ? n : n - 1;
 
-        int32_t x0 = pts[2 * i], y0 = pts[2 * i + 1];
+      for (int i = 0; i < segs; i++) {
+        int a = base + i;
+        int j = base + ((i + 1) % n);
+
+        int32_t x0 = pts[2 * a], y0 = pts[2 * a + 1];
         int32_t x1 = pts[2 * j], y1 = pts[2 * j + 1];
 
         int32_t dx = x1 - x0, dy = y1 - y0;
@@ -230,7 +262,16 @@ void rv9_raster_stroke(rband_t *b, const int32_t *pts, int n, bool closed,
             x0 - px, y0 - py,
         };
         rv9_raster_fill(b, quad, 4, false, colour);
+      }
+      base += n;
     }
+}
+
+void rv9_raster_stroke(rband_t *b, const int32_t *pts, int n, bool closed,
+                       int32_t width, uint16_t colour)
+{
+    rcontour_t one = { .n = n, .closed = closed };
+    rv9_raster_stroke_n(b, pts, &one, 1, width, colour);
 }
 
 void rv9_raster_clear(rband_t *b, uint16_t colour)

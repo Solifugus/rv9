@@ -369,8 +369,16 @@ control layer is late if it is late.
   first, handed out as geometry and a blit under a lock.
 - **`cat` — done**, finally. A file reaching a device needs no new verb
   when redirection already works.
-- Not done in the window: `<path>` (the next thing), subpaths and therefore
-  holes, `<text>`, rotation, opacity, gradients.
+- **`<path>` — done**, `M L H V C S Q T A Z`, absolute and relative, with
+  subpaths, holes and `fill-rule`. Arcs by bisection rather than
+  trigonometry. `chart > /w0` draws an area chart, a cubic series, bars and
+  a donut.
+- **Host tests — `tools/hosttest/run.sh`.** Builds the renderer natively and
+  asserts against it, and renders to a PPM you can look at. The panel is the
+  one part of the system no test can reach, and a picture can be
+  geometrically perfect and still look wrong.
+- Not done in the window: `<text>`, arc x-axis-rotation, opacity,
+  gradients.
 - Not done: I2C and SPI as devices, which is what most sensors want.
 - **Interrupt-driven inputs — done.** `setstat(path, RV9_PIO_SS_EDGE, ...)`
   arms a pin; `getstat(path, RV9_PIO_GS_EVENT, ...)` says which event it
