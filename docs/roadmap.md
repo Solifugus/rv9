@@ -97,9 +97,11 @@ Since revisited:
   colour and not once per scanline. Fixed a latent bug on the way: colours
   were stored pre-byte-swapped, which every blend would have got wrong the
   moment a second colour existed.
-- Not done: a way for a session to *tell* a path its real size, and a
-  resize signal. Both want SSH or telnet first — over a wire, 24×80 is a
-  documented guess and nothing in the stream can correct it.
+- **Size over a wire — since fixed by SSH**, phase 9. `pty-req` carries the
+  client's real dimensions, so the 80×24 guess now applies only to a
+  session with no pty, which is the honest answer there. A resize
+  *signal* is still missing: the driver learns about `window-change` and
+  has no way to tell a running program.
 
 *Rough size: the biggest phase so far. This is the heart of the system.*
 
@@ -295,24 +297,35 @@ control layer is late if it is late.
   cooperative kernel to real-time priority for the duration of the hold.
   Keep critical sections shared with real-time work short. See design §12.
 
-## Phase 9 — Working on it remotely  ◐ plaintext done
+## Phase 9 — Working on it remotely  ✅ done
 
 - **`rshd` — a shell over TCP, done.** `nc <ip> 2300`. Roughly forty lines,
   because a connection is a path and a child inherits its parent's paths.
   Local and remote shells run simultaneously as ordinary processes.
 - **Not secure, and not pretending to be.** Anyone who can reach the port
-  gets a shell.
-- **SSH — wanted, not started.** Key exchange (X25519), a host key
-  (Ed25519), an AEAD cipher (ChaCha20-Poly1305), transport framing,
-  userauth and channels. mbedTLS in ESP-IDF supplies the primitives. This
-  is a project of its own; the value of doing `rshd` first is that the
-  plumbing underneath is now proven, so SSH is purely a security problem.
-- Not done: more than one concurrent remote session, a pty/job control,
-  or anything resembling line editing over the network.
-- **Window size belongs here.** SSH negotiates it and sends a message when
-  it changes; that is the only thing in the system that will ever know how
-  big a remote screen really is. An `RV9_CON_SS_SIZE` setstat and a resize
-  signal land with this phase, not before it — see design §16.
+  gets a shell. Kept alongside SSH because it is two lines of code and
+  useful on a bench; SSH is what you would leave running.
+- **SSH — done**, see design §17. `ssh <anything>@<ip>` with the password
+  from `passwd`. curve25519-sha256, an ecdsa-sha2-nistp256 host key the
+  board generates for itself and keeps in NVS, aes256-gcm@openssh.com. All
+  through PSA (mbedTLS 4 dropped the legacy API), all hardware-accelerated,
+  about 23 KB of flash.
+- **It is a character device, not a daemon.** `/ssh0` is SCF over an `ssh`
+  driver, so the session gets line discipline, echo and cursor addressing
+  the way the serial console does — which is what a client in raw mode
+  needs. `sshd` is `rshd` with one string changed.
+- **The transport is a path** (`/n0/listen/22`), so there is no socket code
+  in the SSH implementation at all.
+- **Window size, fixed.** `pty-req` and `window-change` carry the client's
+  real dimensions, so `RV9_CON_GS_SIZE` over ssh answers with the truth
+  instead of the 80x24 guess §16 had to make.
+- Not done: public key authentication (wants somewhere to keep an
+  authorized_keys, so it wants phase 5), rekeying, more than one session at
+  a time, job control.
+- **A resize signal is still missing.** The driver knows when the window
+  changed and has no way to tell a running program. `RV9_SIG_WINCH` is the
+  shape; an `RV9_CON_SS_SIZE` setstat is worth having now too, since
+  something finally exists that could call it honestly.
 
 ## Phase 10 — Hardware  ◐ pins, PWM and ADC done
 

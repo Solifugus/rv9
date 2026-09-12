@@ -1406,6 +1406,159 @@ Two things are missing and both belong to a session layer, not a device:
 Until then: query at startup, never cache across a redraw. That costs one
 getstat per repaint and is correct in advance rather than retrofitted.
 
+## 17. SSH, as a character device
+
+`rshd` handed a shell to anyone who could reach port 2300. This replaces it
+with one that asks who you are, and the interesting part is not the
+cryptography — it is that the cryptography fits underneath machinery that
+was written for a serial port.
+
+```
+   sshd  ──open("/ssh0")──▶  SCF  ──▶  ssh driver  ──▶  path "/n0/listen/22"
+    │                         │            │
+    │                    line discipline   │  key exchange, host key,
+    │                    echo, rubout,     │  password, channel
+    │                    ^C, CR LF,        │
+    │                    cursor & colour   │
+    ▼
+  fork("shell")
+```
+
+`sshd` is `rshd` with one string changed. That was the test of where to put
+the protocol: if serving an encrypted shell had needed more than a
+different device name, the layering would have been wrong.
+
+### Why a driver and not a daemon
+
+The obvious design is a program that speaks SSH and pipes bytes to a shell.
+It was rejected for two reasons, and the second is the real one.
+
+A module cannot reach mbedTLS — modules are freestanding blobs with no
+external symbols, which is what makes them relocatable. So the protocol has
+to live in the firmware regardless.
+
+And **an SSH session is a character device**. It is a stream of bytes with a
+terminal at the far end. Making it one means SCF's line discipline applies
+to it, and that is not a nicety: a client that has been given a pty puts
+its own terminal in raw mode and echoes nothing. Every keystroke arrives
+here, and the far end displays only what is sent back. A session without a
+line discipline is a session where typing appears to do nothing. SCF was
+written in phase 3 for a UART, and it is exactly what this needs —
+including the console setstats from §16, which reach an ssh client as
+escape sequences because the driver declines them.
+
+### The transport is a path
+
+The driver opens `/n0/listen/22` and runs SSH over it. There is no socket
+in the SSH code and no lwIP — `read`, `write`, `close`. SSH would run over
+anything the I/O system can open, and the day RV-9 talks to another RV-9
+over a serial line, this works there without an edit.
+
+### One suite
+
+| | | |
+|---|---|---|
+| key exchange | `curve25519-sha256` | X25519 |
+| host key | `ecdsa-sha2-nistp256` | P-256, generated on the board |
+| cipher | `aes256-gcm@openssh.com` | AEAD, so no separate MAC |
+
+All three are in OpenSSH's defaults, so a stock client connects without
+being told anything, and all three are accelerated in hardware here.
+
+Two curves rather than one is not taste: mbedTLS 4 has no Ed25519 in this
+build, so X25519 does the agreement and P-256 does the signing. mbedTLS 4
+also removed the legacy `mbedtls_ecdh`/`mbedtls_aes` surface in favour of
+PSA, which turned out to help — PSA hands X25519 keys back as thirty-two
+raw bytes, which is precisely the SSH wire format, so the key exchange
+needs no format conversion at all.
+
+Absent on purpose: rekeying, compression, more than one channel, more than
+one session at a time, and any cipher that is not an AEAD. A rekey request
+is answered with a disconnect rather than ignored.
+
+### The host key, and the password
+
+The host key is generated on the board the first time it boots this
+firmware and kept in NVS. A key that changed every boot would make the
+client's warning about a changed key meaningless, which is the same as not
+having the warning.
+
+The password is one password for the whole board, salted and stretched
+through ten thousand rounds of SHA-256 before it is stored. There is no
+user database because there are no users: RV-9 has processes and no notion
+of who owns one. Any name logs in; the password decides. Pretending
+otherwise — accepting a name and ignoring it silently — would be worse than
+saying so.
+
+Public key authentication is the better answer and is not here yet. It
+wants somewhere to keep an `authorized_keys`, which wants the storage
+phase.
+
+### What this fixed in §16
+
+§16 said 80×24 was a stated guess for anything over a wire, because nothing
+in a byte stream carries a terminal's size, and that a session protocol was
+the right place to fix it. It is fixed: `pty-req` carries the client's real
+dimensions and `window-change` carries them again whenever somebody drags
+the corner of their window, so `getstat(RV9_CON_GS_SIZE)` on an ssh path
+answers with the truth. `screen` over ssh lays itself out to the actual
+window.
+
+The guess remains for a session with no pty, which is the honest answer
+there.
+
+What is still missing is *notification*. A program that asks once and holds
+the answer is wrong after a resize; the driver knows, and has no way to say
+so. `RV9_SIG_WINCH` is the shape, and `signals_take()` is already the
+polling point a screen program checks each loop. An `RV9_CON_SS_SIZE`
+setstat is no longer pointless either, now that something exists which
+could honestly call it.
+
+### Three things this changed underneath
+
+**A driver can be told when its device starts being used.** `init` runs at
+attach, which is right for a UART and impossible for a session: being open
+means somebody has connected, authenticated and asked for a shell, none of
+which can happen at boot with nobody there. So `rv9_driver_t` gained
+`open` and `close`, called when the device goes from nobody-using-it to
+somebody and back.
+
+That immediately produced a bug worth recording. `open_count` is raised
+before the blocking open runs, so a *second* `sshd` found a non-zero count,
+concluded the device was already up, skipped the handshake it thought had
+happened, and handed its shell a device with no session behind it. The
+shell read, failed, exited, and the daemon did it again as fast as it
+could. A device whose driver does work on first open is a session, and
+sessions are not shared by independent openers — a second open is refused.
+Sharing by `dup2` and `fork` is untouched, because that raises a reference
+count and never goes through `open`.
+
+**A driver can hold a path of its own.** Every other path is in a process's
+table, which is right for a process and wrong for a driver: only
+stdin/stdout/stderr are inherited across `fork`, so the connection `sshd`
+opened would have been a meaningless number in the shell doing the reading.
+A *detached* path is held by pointer and lives until its holder closes it.
+It is the mechanism any stacking driver needs.
+
+**SCF was swallowing driver errors.** Its read loop treated "no bytes" as
+"nothing typed yet" and slept, before testing the error — so a driver
+reporting a failure *and* zero bytes, which is the normal way to say a
+connection has gone, left the reader waiting at a prompt nobody would ever
+type at. Nothing before this could fail a read, so the bug had never had a
+chance to matter.
+
+### And one that cost an afternoon
+
+The first working handshake failed at the last step with `incorrect
+signature`. Everything either side of it was right — the client parsed the
+host key well enough to print a fingerprint from it.
+
+SSH's ECDSA signature is computed over the exchange hash **as a message,
+not as a digest**: H is hashed again with SHA-256 before ECDSA sees it.
+Signing H directly produces a signature of exactly the right shape that
+every client rejects. RFC 5656 says so plainly; it just does not read like
+it means what it says.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

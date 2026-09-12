@@ -256,6 +256,35 @@ typedef struct {
 #define RV9_SEEK_CUR 1
 #define RV9_SEEK_END 2
 
+/*
+ * What a negative return from an I/O call means.
+ *
+ * These are the I/O manager's own error numbers, negated. They have always
+ * travelled to modules this way; what was missing was any way for a module
+ * to say which one it got, so every failure had to be reported as "it did
+ * not work". A module that can tell "somebody else already has this" from
+ * "this is broken" can say something useful instead.
+ *
+ * Values are frozen. New ones are appended, and a module that does not
+ * know a number should treat it as a plain failure.
+ *
+ * IOE rather than ERR because the KAL already has an RV9_ERR_ set of its
+ * own, with different numbers behind several of the same names. Two error
+ * spaces is one more than ideal; two error spaces sharing names would be
+ * a trap.
+ */
+#define RV9_IOE_NOTFOUND     1   /* no such device or file */
+#define RV9_IOE_BADPATH      2
+#define RV9_IOE_NOPATHS      3   /* this process has no free path slots */
+#define RV9_IOE_NOMEM        4
+#define RV9_IOE_MODE         5   /* not open for that, or not in a state for it */
+#define RV9_IOE_UNSUPPORTED  6
+#define RV9_IOE_WOULDBLOCK   7
+#define RV9_IOE_IO           8
+#define RV9_IOE_INVAL        9
+#define RV9_IOE_EXISTS      10   /* already there, or already in use */
+#define RV9_IOE_TIMEOUT     11
+
 /* Generic getstat/setstat codes a module may use. */
 #define RV9_SS_ECHO        1
 #define RV9_SS_AUTOLF      2

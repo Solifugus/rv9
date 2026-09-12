@@ -76,6 +76,21 @@ typedef struct rv9_driver {
     rv9_io_err_t (*init)(struct rv9_dev *dev);
     rv9_io_err_t (*term)(struct rv9_dev *dev);
 
+    /*
+     * Called when the device goes from nobody-using-it to somebody, and
+     * back. Optional, and most drivers want nothing to do with it: a UART
+     * is ready from `init` and stays ready.
+     *
+     * It exists for a device that cannot be ready in advance. `ssh` is the
+     * first: being open means a client has connected, been through key
+     * exchange and proved who it is, none of which can happen at boot with
+     * nobody there. So the work happens on the first open, which may block
+     * for as long as it takes somebody to connect -- the same shape as
+     * opening a listening path, arrived at from the other side.
+     */
+    rv9_io_err_t (*open)(struct rv9_dev *dev, uint32_t mode);
+    rv9_io_err_t (*close)(struct rv9_dev *dev);
+
     /* Return the number of bytes actually moved in *done. A driver may move
        fewer than asked; the file manager decides what that means. */
     rv9_io_err_t (*read)(struct rv9_dev *dev, void *buf, size_t len, size_t *done);
@@ -242,6 +257,30 @@ rv9_io_err_t rv9_io_setstat(int path, uint32_t code, void *arg);
 
 /* Convenience: write a NUL-terminated string. */
 rv9_io_err_t rv9_io_dup2(int from, int to);
+
+/*
+ * A path that belongs to nobody.
+ *
+ * Every path above is in some process's table, which is right for a
+ * process: it opened the thing, it should lose it when it exits, and a
+ * child should inherit it. A *driver* that opens a path has none of those
+ * properties. `ssh` runs over a network connection it opened itself, and
+ * that connection has to outlive the process that opened `/ssh0` -- the
+ * daemon forks a shell, and only the child's standard paths are inherited,
+ * so a path number would be meaningless in the process actually doing the
+ * reading.
+ *
+ * So a detached path is held by pointer instead of by number, and lives
+ * until the holder closes it. It is the mechanism a stacking driver needs:
+ * one device implemented over another, with the layer below reached the
+ * same way everything else is reached.
+ */
+rv9_io_err_t rv9_io_open_detached(const char *name, uint32_t mode,
+                                  rv9_path_t **out);
+rv9_io_err_t rv9_io_read_path(rv9_path_t *p, void *buf, size_t len, size_t *done);
+rv9_io_err_t rv9_io_write_path(rv9_path_t *p, const void *buf, size_t len,
+                               size_t *done);
+void         rv9_io_close_path(rv9_path_t *p);
 
 /* Remove a file, e.g. "/r0/notes". */
 rv9_io_err_t rv9_io_remove(const char *name);

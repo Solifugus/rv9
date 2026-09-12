@@ -12,6 +12,7 @@
 #include "rv9/proc.h"
 #include "rv9/io.h"
 #include "rv9/io_builtin.h"
+#include "rv9/ssh_builtin.h"
 #include "kal_selftest.h"
 #include "kernel_test.h"
 #include "conformance.h"
@@ -214,6 +215,7 @@ static void io_bringup(void)
     REGISTER(rv9_drv_pwm_register());
     REGISTER(rv9_drv_adc_register());
     REGISTER(rv9_drv_tsens_register());
+    REGISTER(rv9_drv_ssh_register());
 
     #undef REGISTER
 
@@ -440,9 +442,26 @@ static void start_rshd(void)
     }
 }
 
+/*
+ * And one over SSH. It stops by itself if no password has been set, which
+ * is the state a board is in until somebody runs `passwd` -- the log line
+ * from the driver says so, and is more use than a server nobody can log
+ * in to.
+ */
+static void start_sshd(void)
+{
+    rv9_pid_t pid = 0;
+    if (rv9_proc_fork("sshd", RV9_PRIO_LOW, NULL, &pid) == RV9_PROC_OK) {
+        ESP_LOGI(TAG, "sshd listening on port 22 (ssh <user>@<ip>)");
+    } else {
+        ESP_LOGW(TAG, "could not start sshd");
+    }
+}
+
 static void init_shell_loop(void)
 {
     start_rshd();
+    start_sshd();
 
     ESP_LOGI(TAG, "starting shell on /uart0 (log quiet while it runs)");
 

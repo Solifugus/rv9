@@ -13,6 +13,24 @@
 
 #include "esp_log.h"
 
+/*
+ * Modules are told about failures as negated versions of these, and the
+ * numbers are declared separately in rv9/module.h because a module must
+ * not include this file. Two lists of the same numbers drift; these keep
+ * them from drifting quietly.
+ */
+_Static_assert((int)RV9_IO_ERR_NOTFOUND    == RV9_IOE_NOTFOUND,    "ABI drift");
+_Static_assert((int)RV9_IO_ERR_BADPATH     == RV9_IOE_BADPATH,     "ABI drift");
+_Static_assert((int)RV9_IO_ERR_NOPATHS     == RV9_IOE_NOPATHS,     "ABI drift");
+_Static_assert((int)RV9_IO_ERR_NOMEM       == RV9_IOE_NOMEM,       "ABI drift");
+_Static_assert((int)RV9_IO_ERR_MODE        == RV9_IOE_MODE,        "ABI drift");
+_Static_assert((int)RV9_IO_ERR_UNSUPPORTED == RV9_IOE_UNSUPPORTED, "ABI drift");
+_Static_assert((int)RV9_IO_ERR_WOULDBLOCK  == RV9_IOE_WOULDBLOCK,  "ABI drift");
+_Static_assert((int)RV9_IO_ERR_IO          == RV9_IOE_IO,          "ABI drift");
+_Static_assert((int)RV9_IO_ERR_INVAL       == RV9_IOE_INVAL,       "ABI drift");
+_Static_assert((int)RV9_IO_ERR_EXISTS      == RV9_IOE_EXISTS,      "ABI drift");
+_Static_assert((int)RV9_IO_ERR_TIMEOUT     == RV9_IOE_TIMEOUT,     "ABI drift");
+
 static const char *TAG = "rv9-io";
 
 /* Room to grow. These were sized to what existed at the time, and the
@@ -337,14 +355,63 @@ static rv9_io_err_t path_open(rv9_path_t *p, const char *rest)
     return p->dev->fmgr->open(p, rest);
 }
 
+/*
+ * Tell the driver when its device starts and stops being used.
+ *
+ * Both are called with the lock released, because a driver that wants to
+ * know may also want to take its time -- `ssh` spends the first open
+ * waiting for somebody to connect. Holding the I/O lock across that would
+ * stop every other process from opening anything.
+ */
+static rv9_io_err_t dev_first_open(rv9_dev_t *dev, uint32_t mode)
+{
+    if (dev->drv->open == NULL) return RV9_IO_OK;
+    return dev->drv->open(dev, mode);
+}
+
+/*
+ * May this device be opened again while somebody already has it?
+ *
+ * For an ordinary device, yes: every process opens /term and they share
+ * it. For one whose driver does work on first open, no -- that work is a
+ * session, and a session belongs to whoever established it. A second
+ * opener cannot have one of its own (there is one device) and must not
+ * silently join somebody else's.
+ *
+ * Getting this wrong was visible rather than subtle: a second sshd found
+ * the count already raised by the first, skipped the handshake it thought
+ * had happened, and handed its shell a device with no session behind it.
+ * The shell read, failed, exited, and the daemon did it again as fast as
+ * it could.
+ *
+ * Sharing still works the way it always did -- dup2 and fork raise the
+ * reference count and never come through here.
+ */
+static bool dev_open_refused(const rv9_dev_t *dev)
+{
+    return dev->drv->open != NULL && dev->open_count > 0;
+}
+
+static void dev_last_close(rv9_dev_t *dev)
+{
+    if (dev->drv->close) dev->drv->close(dev);
+}
+
 static rv9_path_t *path_alloc(rv9_dev_t *dev, const char *rest, uint32_t mode,
                               rv9_io_err_t *err)
 {
+    if (dev_open_refused(dev)) { *err = RV9_IO_ERR_EXISTS; return NULL; }
+
     rv9_path_t *p = path_new(dev, mode);
     if (p == NULL) { *err = RV9_IO_ERR_NOMEM; return NULL; }
 
-    rv9_io_err_t e = path_open(p, rest);
+    bool first = (dev->open_count == 0);
+
+    rv9_io_err_t e = first ? dev_first_open(dev, mode) : RV9_IO_OK;
+    if (e == RV9_IO_OK) e = path_open(p, rest);
+
     if (e != RV9_IO_OK) {
+        if (first) dev_last_close(dev);
         rv9_free(p);
         *err = e;
         return NULL;
@@ -355,13 +422,26 @@ static rv9_path_t *path_alloc(rv9_dev_t *dev, const char *rest, uint32_t mode,
     return p;
 }
 
-static void path_release(rv9_path_t *p)
+/*
+ * Drop a reference, and say whether that left the device idle.
+ *
+ * The driver is *not* told here, because this runs with the I/O lock held
+ * and telling it may mean closing a path of its own -- which takes the
+ * same lock. The caller releases the lock and then calls dev_last_close
+ * with what came back.
+ */
+static void path_release(rv9_path_t *p, rv9_dev_t **idle)
 {
+    if (idle) *idle = NULL;
     if (p == NULL) return;
     if (--p->refs > 0) return;
 
-    if (p->dev->fmgr->close) p->dev->fmgr->close(p);
-    if (p->dev->open_count) p->dev->open_count--;
+    rv9_dev_t *dev = p->dev;
+
+    if (dev->fmgr->close) dev->fmgr->close(p);
+    if (dev->open_count) dev->open_count--;
+    if (dev->open_count == 0 && idle) *idle = dev;
+
     rv9_free(p);
 }
 
@@ -379,6 +459,10 @@ int rv9_io_open(const char *name, uint32_t mode)
     if (dev == NULL) {
         rv9_lock_release(s_lock);
         return -RV9_IO_ERR_NOTFOUND;
+    }
+    if (dev_open_refused(dev)) {
+        rv9_lock_release(s_lock);
+        return -RV9_IO_ERR_EXISTS;
     }
 
     rv9_pid_t pid = rv9_proc_current_pid();
@@ -411,12 +495,15 @@ int rv9_io_open(const char *name, uint32_t mode)
     /* Reserve the slot so a concurrent open in this process cannot take it,
        then let go of the lock: what follows may block for a long time. */
     t->paths[num] = p;
+    bool first = (dev->open_count == 0);
     dev->open_count++;
     rv9_lock_release(s_lock);
 
-    rv9_io_err_t err = path_open(p, rest);
+    rv9_io_err_t err = first ? dev_first_open(dev, mode) : RV9_IO_OK;
+    if (err == RV9_IO_OK) err = path_open(p, rest);
 
     if (err != RV9_IO_OK) {
+        if (first) dev_last_close(dev);
         rv9_lock_acquire(s_lock);
         t->paths[num] = NULL;
         if (dev->open_count) dev->open_count--;
@@ -440,10 +527,13 @@ rv9_io_err_t rv9_io_close(int num)
         return RV9_IO_ERR_BADPATH;
     }
 
-    path_release(t->paths[num]);
+    rv9_dev_t *idle = NULL;
+    path_release(t->paths[num], &idle);
     t->paths[num] = NULL;
 
     rv9_lock_release(s_lock);
+
+    if (idle) dev_last_close(idle);
     return RV9_IO_OK;
 }
 
@@ -511,12 +601,15 @@ rv9_io_err_t rv9_io_dup2(int from, int to)
         return RV9_IO_ERR_BADPATH;
     }
 
-    if (t->paths[to] != NULL) path_release(t->paths[to]);
+    rv9_dev_t *idle = NULL;
+    if (t->paths[to] != NULL) path_release(t->paths[to], &idle);
 
     t->paths[from]->refs++;
     t->paths[to] = t->paths[from];
 
     rv9_lock_release(s_lock);
+
+    if (idle) dev_last_close(idle);
     return RV9_IO_OK;
 }
 
@@ -569,6 +662,98 @@ rv9_io_err_t rv9_io_setstat(int num, uint32_t code, void *arg)
     return p->dev->fmgr->setstat(p, code, arg);
 }
 
+/* ---- detached paths: a path held by a driver rather than a process ---- */
+
+rv9_io_err_t rv9_io_open_detached(const char *name, uint32_t mode,
+                                  rv9_path_t **out)
+{
+    if (name == NULL || out == NULL || (mode & RV9_MODE_RW) == 0) {
+        return RV9_IO_ERR_INVAL;
+    }
+
+    char devname[16];
+    const char *rest = "";
+    split_path(name, devname, sizeof(devname), &rest);
+
+    rv9_lock_acquire(s_lock);
+
+    rv9_dev_t *dev = find_dev(devname);
+    if (dev == NULL) {
+        rv9_lock_release(s_lock);
+        return RV9_IO_ERR_NOTFOUND;
+    }
+    if (dev_open_refused(dev)) {
+        rv9_lock_release(s_lock);
+        return RV9_IO_ERR_EXISTS;
+    }
+
+    rv9_path_t *p = path_new(dev, mode);
+    if (p == NULL) {
+        rv9_lock_release(s_lock);
+        return RV9_IO_ERR_NOMEM;
+    }
+
+    bool first = (dev->open_count == 0);
+    dev->open_count++;
+    rv9_lock_release(s_lock);
+
+    /* Same two-stage shape as rv9_io_open, and for the same reason: what
+       follows may sit waiting for a connection. */
+    rv9_io_err_t err = first ? dev_first_open(dev, mode) : RV9_IO_OK;
+    if (err == RV9_IO_OK) err = path_open(p, rest);
+
+    if (err != RV9_IO_OK) {
+        if (first) dev_last_close(dev);
+        rv9_lock_acquire(s_lock);
+        if (dev->open_count) dev->open_count--;
+        rv9_lock_release(s_lock);
+        rv9_free(p);
+        return err;
+    }
+
+    *out = p;
+    return RV9_IO_OK;
+}
+
+rv9_io_err_t rv9_io_read_path(rv9_path_t *p, void *buf, size_t len, size_t *done)
+{
+    if (done) *done = 0;
+    if (p == NULL || buf == NULL) return RV9_IO_ERR_INVAL;
+    if (!(p->mode & RV9_MODE_READ)) return RV9_IO_ERR_MODE;
+    if (p->dev->fmgr->read == NULL) return RV9_IO_ERR_UNSUPPORTED;
+
+    size_t moved = 0;
+    rv9_io_err_t err = p->dev->fmgr->read(p, buf, len, &moved);
+    if (done) *done = moved;
+    return err;
+}
+
+rv9_io_err_t rv9_io_write_path(rv9_path_t *p, const void *buf, size_t len,
+                               size_t *done)
+{
+    if (done) *done = 0;
+    if (p == NULL || buf == NULL) return RV9_IO_ERR_INVAL;
+    if (!(p->mode & RV9_MODE_WRITE)) return RV9_IO_ERR_MODE;
+    if (p->dev->fmgr->write == NULL) return RV9_IO_ERR_UNSUPPORTED;
+
+    size_t moved = 0;
+    rv9_io_err_t err = p->dev->fmgr->write(p, buf, len, &moved);
+    if (done) *done = moved;
+    return err;
+}
+
+void rv9_io_close_path(rv9_path_t *p)
+{
+    if (p == NULL) return;
+
+    rv9_dev_t *idle = NULL;
+    rv9_lock_acquire(s_lock);
+    path_release(p, &idle);
+    rv9_lock_release(s_lock);
+
+    if (idle) dev_last_close(idle);
+}
+
 /* ---- process lifecycle ---- */
 
 /*
@@ -617,6 +802,11 @@ static void io_on_fork(rv9_pid_t parent, rv9_pid_t child)
 
 static void io_on_exit(rv9_pid_t pid)
 {
+    /* Devices this process was the last user of. Told after the lock goes,
+       because a driver being told may close a path of its own. */
+    rv9_dev_t *idle[RV9_MAX_PATHS];
+    int nidle = 0;
+
     rv9_lock_acquire(s_lock);
 
     proc_paths_t **pp = &s_tables;
@@ -625,7 +815,9 @@ static void io_on_exit(rv9_pid_t pid)
     if (*pp) {
         proc_paths_t *t = *pp;
         for (int i = 0; i < RV9_MAX_PATHS; i++) {
-            path_release(t->paths[i]);
+            rv9_dev_t *d = NULL;
+            path_release(t->paths[i], &d);
+            if (d) idle[nidle++] = d;
             t->paths[i] = NULL;
         }
         *pp = t->next;
@@ -639,6 +831,8 @@ static void io_on_exit(rv9_pid_t pid)
     }
 
     rv9_lock_release(s_lock);
+
+    for (int i = 0; i < nidle; i++) dev_last_close(idle[i]);
 }
 
 rv9_io_err_t rv9_io_set_system_std(const char *in, const char *out)

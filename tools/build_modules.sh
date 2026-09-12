@@ -38,6 +38,7 @@ CFLAGS=(
     -I"$ROOT/components/rv9_module/include"
     -I"$ROOT/modules"
     -I"$ROOT/components/rv9_io/include"
+    -I"$ROOT/components/rv9_ssh/include"
 )
 LDFLAGS=(-nostdlib -nostartfiles -T"$ROOT/modules/module.ld" -Wl,--gc-sections)
 

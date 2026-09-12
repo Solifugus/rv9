@@ -130,9 +130,17 @@ static rv9_io_err_t scf_read(rv9_path_t *path, void *buf, size_t len,
         size_t got = 0;
         rv9_io_err_t err = dev->drv->read((rv9_dev_t *)dev, &ch, 1, &got);
 
-        if (err == RV9_IO_ERR_WOULDBLOCK || got == 0) {
-            /* Nothing typed yet. Sleeping rather than spinning is what lets
-               other processes run while a shell waits at its prompt. */
+        /*
+         * Nothing typed yet. Sleeping rather than spinning is what lets
+         * other processes run while a shell waits at its prompt.
+         *
+         * The error is tested before the byte count, which matters for a
+         * driver that can fail rather than merely have nothing to say:
+         * reporting a failure *and* zero bytes is the normal way to say a
+         * connection has gone, and treating that as "nothing typed yet"
+         * left the reader waiting at a prompt nobody would ever type at.
+         */
+        if (err == RV9_IO_ERR_WOULDBLOCK || (err == RV9_IO_OK && got == 0)) {
             rv9_task_delay_ms(POLL_MS);
             continue;
         }
