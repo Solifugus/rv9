@@ -15,13 +15,8 @@
 
 #include <string.h>
 
-#include "driver/gpio.h"
-#include "driver/ledc.h"
-#include "driver/spi_master.h"
-#include "esp_lcd_io_spi.h"
-#include "esp_lcd_panel_dev.h"
-#include "esp_lcd_panel_ops.h"
-#include "esp_lcd_panel_st7789.h"
+#include "panel.h"
+
 #include "esp_log.h"
 
 static const char *TAG = "rv9-lcdcon";
@@ -49,6 +44,11 @@ static const char *TAG = "rv9-lcdcon";
 #define OPT_MARGIN_X 6
 #define OPT_MARGIN_Y 7
 
+/* Asked of the panel at init; kept because the cell arithmetic needs them
+   before anything has been drawn. */
+#define PANEL_W       172
+#define PANEL_H       320
+
 /* Glyphs are already 10x20 and anti-aliased, so 1x is the normal case.
    Scaling above that magnifies an already-large cell. */
 #define DEFAULT_SCALE  1
@@ -60,24 +60,6 @@ static const char *TAG = "rv9-lcdcon";
 #define DEFAULT_MARGIN_Y 4
 
 /* Waveshare ESP32-C5-LCD-1.47 */
-#define LCD_HOST      SPI2_HOST
-#define PIN_SCLK      7
-#define PIN_MOSI      6
-#define PIN_CS        23
-#define PIN_DC        24
-#define PIN_RST       26
-#define PIN_BL        10
-
-#define PANEL_W       172   /* native, before rotation */
-#define PANEL_H       320
-#define PANEL_GAP     34    /* 172-wide panel centred in the controller's 240 */
-#define LCD_CLK_HZ    (40 * 1000 * 1000)
-
-/* Backlight PWM. Above the channels /pwm0 allocates, on its own timer. */
-#define BL_CHANNEL    LEDC_CHANNEL_5
-#define BL_TIMER      LEDC_TIMER_1
-#define BL_DUTY_BITS  LEDC_TIMER_10_BIT
-#define BL_FREQ_HZ    5000
 
 #define GLYPH_W       10
 #define GLYPH_H       20
@@ -160,8 +142,6 @@ static uint16_t blend565(uint16_t fg, uint16_t bg, int a)
 }
 
 typedef struct {
-    esp_lcd_panel_handle_t panel;
-
     int       w, h;          /* pixels, after rotation */
     int       scale;         /* glyph magnification */
     int       cw, ch;        /* cell size in pixels */
@@ -172,7 +152,6 @@ typedef struct {
     cattr_t  *attr;          /* cols * rows, colour and attributes per cell */
     bool     *dirty;         /* rows */
     uint16_t  fg, bg;        /* the descriptor's defaults, RGB565 */
-    uint8_t   brightness;      /* percent */
     int       cx, cy;
     bool      cursor_on;
     cattr_t   pen;           /* what the next character will be written in */
@@ -231,7 +210,6 @@ static void cell_colours(lcdcon_t *c, const cattr_t *a,
     *bg = cb;
 }
 
-static void backlight_set(lcdcon_t *c, uint32_t percent);
 
 /* ---- painting ---- */
 
@@ -313,7 +291,7 @@ static void paint_row(lcdcon_t *c, int row)
     }
 
     int y = c->my + row * c->ch;
-    esp_lcd_panel_draw_bitmap(c->panel, 0, y, c->w, y + c->ch, c->rowbuf);
+    rv9_panel_blit(0, y, c->w, y + c->ch, c->rowbuf);
 }
 
 static void flush(lcdcon_t *c)
@@ -450,83 +428,18 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
     memset(c->grid, ' ', (size_t)c->cols * c->rows);
     for (int i = 0; i < c->cols * c->rows; i++) c->attr[i] = c->pen;
 
-    /* Backlight as a PWM output, so it can be turned down. Its own timer
-       and a channel above the ones /pwm0 hands out, so the two cannot
-       fight over hardware. */
-    ledc_timer_config_t bl_timer = {
-        .speed_mode      = LEDC_LOW_SPEED_MODE,
-        .timer_num       = BL_TIMER,
-        .duty_resolution = BL_DUTY_BITS,
-        .freq_hz         = BL_FREQ_HZ,
-        .clk_cfg         = LEDC_AUTO_CLK,
-    };
-    ledc_timer_config(&bl_timer);
-
-    ledc_channel_config_t bl_ch = {
-        .gpio_num   = PIN_BL,
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .channel    = BL_CHANNEL,
-        .timer_sel  = BL_TIMER,
-        .duty       = 0,
-        .hpoint     = 0,
-    };
-    ledc_channel_config(&bl_ch);
-
-    backlight_set(c, 100);
-
-    spi_bus_config_t bus = {
-        .sclk_io_num = PIN_SCLK,
-        .mosi_io_num = PIN_MOSI,
-        .miso_io_num = -1,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = (int)((size_t)c->w * c->ch * sizeof(uint16_t)) + 64,
-    };
-    if (spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO) != ESP_OK) {
-        ESP_LOGE(TAG, "spi_bus_initialize failed");
-        return RV9_IO_ERR_IO;
+    /* The glass belongs to panel.c, because `/w0` wants it too. This
+       brings it up if nobody has yet, and otherwise just reports it. */
+    rv9_io_err_t perr = rv9_panel_open(landscape, NULL, NULL);
+    if (perr != RV9_IO_OK) {
+        rv9_free(c->grid);
+        rv9_free(c->attr);
+        rv9_free(c->dirty);
+        rv9_free(c->rowbuf);
+        rv9_free(c);
+        return perr;
     }
-
-    esp_lcd_panel_io_spi_config_t io_cfg = {
-        .cs_gpio_num = PIN_CS,
-        .dc_gpio_num = PIN_DC,
-        .spi_mode = 0,
-        .pclk_hz = LCD_CLK_HZ,
-        .trans_queue_depth = 10,
-        .lcd_cmd_bits = 8,
-        .lcd_param_bits = 8,
-    };
-    esp_lcd_panel_io_handle_t io = NULL;
-    if (esp_lcd_new_panel_io_spi(LCD_HOST, &io_cfg, &io) != ESP_OK) {
-        ESP_LOGE(TAG, "panel io failed");
-        return RV9_IO_ERR_IO;
-    }
-
-    esp_lcd_panel_dev_config_t panel_cfg = {
-        .reset_gpio_num = PIN_RST,
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
-        .data_endian = LCD_RGB_DATA_ENDIAN_BIG,
-        .bits_per_pixel = 16,
-    };
-    if (esp_lcd_new_panel_st7789(io, &panel_cfg, &c->panel) != ESP_OK) {
-        ESP_LOGE(TAG, "st7789 panel failed");
-        return RV9_IO_ERR_IO;
-    }
-
-    esp_lcd_panel_reset(c->panel);
-    esp_lcd_panel_init(c->panel);
-
-    if (landscape) {
-        /* Swapping axes swaps which edge the panel's offset applies to. */
-        esp_lcd_panel_swap_xy(c->panel, true);
-        esp_lcd_panel_mirror(c->panel, false, true);
-        esp_lcd_panel_set_gap(c->panel, 0, PANEL_GAP);
-    } else {
-        esp_lcd_panel_set_gap(c->panel, PANEL_GAP, 0);
-    }
-
-    esp_lcd_panel_invert_color(c->panel, true);   /* ST7789 panels are IPS */
-    esp_lcd_panel_disp_on_off(c->panel, true);
+    rv9_panel_backlight(100);
 
     /* Clear the whole panel, margins included, so we neither inherit what
        was on it nor leave unpainted bands around the text area. */
@@ -534,7 +447,7 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
     for (int y = 0; y < c->h; y += c->ch) {
         int y2 = y + c->ch;
         if (y2 > c->h) y2 = c->h;
-        esp_lcd_panel_draw_bitmap(c->panel, 0, y, c->w, y2, c->rowbuf);
+        rv9_panel_blit(0, y, c->w, y2, c->rowbuf);
     }
 
     for (int r = 0; r < c->rows; r++) c->dirty[r] = true;
@@ -585,15 +498,8 @@ static rv9_io_err_t lcdcon_write(rv9_dev_t *dev, const void *buf, size_t len,
  */
 static void backlight_set(lcdcon_t *c, uint32_t percent)
 {
-    if (percent > 100) percent = 100;
-    c->brightness = (uint8_t)percent;
-
-    /* Perceived brightness is far from linear, but a straight mapping is
-       honest about what it does and predictable to script against. */
-    uint32_t duty = (percent * ((1u << BL_DUTY_BITS) - 1)) / 100u;
-
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, BL_CHANNEL, duty);
-    ledc_update_duty(LEDC_LOW_SPEED_MODE, BL_CHANNEL);
+    (void)c;
+    rv9_panel_backlight(percent);
 }
 
 static void do_clear(lcdcon_t *c, uint32_t what)
@@ -695,7 +601,7 @@ static rv9_io_err_t lcdcon_getstat(rv9_dev_t *dev, uint32_t code, void *arg)
 
     switch (code) {
     case RV9_LCD_SS_BRIGHTNESS:
-        *(uint32_t *)arg = c->brightness;
+        *(uint32_t *)arg = rv9_panel_backlight_get();
         return RV9_IO_OK;
 
     case RV9_CON_GS_SIZE:

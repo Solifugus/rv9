@@ -1713,6 +1713,110 @@ Driven over SSH from a scripted pty, reading back the escape stream:
 | save | `/f0/edtest` is 23 bytes, which is exactly the text |
 | three dropped connections | `sshd` still serves the next real login |
 
+## 19. A window you draw on by writing SVG to it
+
+```
+pic > /w0
+cat /f0/picture.svg > /w0
+```
+
+`/w0` is a device. You write a picture to it and the picture appears. OS-9's
+window devices took drawing commands written to a path; this is the same
+idea with a format that already exists, so nothing above the device needs a
+graphics API, a context, or a handle — `pic` emits SVG and does not know
+what a panel is. Redirect it to a file or down a socket and the same bytes
+go there.
+
+**SVG, and deliberately not CSS.** Presentation attributes only: `fill`,
+`stroke`, `stroke-width` on the elements themselves. A style language means
+a cascade, a selector engine and a box model — an enormous amount of
+machinery to arrive back at "this shape is red".
+
+### There is no framebuffer, and that decided everything
+
+320×172 at two bytes a pixel is 110 KB. This board has about forty free. So
+the panel is painted in bands eight rows deep: fill a band, push it down the
+SPI bus, move on.
+
+A renderer with a framebuffer draws shapes in any order and composites as it
+goes. A banded one has to answer, for each band, "what is in you?" — which
+would normally mean compiling the document into a display list, and sizing,
+allocating and maintaining that list.
+
+Instead the **SVG source is the display list**. The document is held as
+text and re-read once per band. Re-reading a few kilobytes twenty-two times
+costs far less than the memory a display list would need, and there is no
+second representation that can fall out of step with the first. The parser
+had to be written anyway; this is the only thing that uses it.
+
+### The panel belongs to neither device
+
+`/term` is a text console and `/w0` is a graphics window and there is one
+piece of glass. A driver that owns hardware another driver also needs is a
+driver that has to know about the other one, so the ST7789 moved into
+`panel.c`: brought up by whoever asks first, handed out as geometry and a
+blit, serialised by a lock so two devices cannot interleave halves of an SPI
+transfer. `lcdcon` lost forty lines and gained nothing it has to think
+about.
+
+### Memory only while it is open
+
+The document buffer, the band, the coverage row and the point list come to
+about nine kilobytes — a quarter of the free heap. They are allocated in the
+driver's `open` and freed in its `close`, so a device that is used
+occasionally costs nothing the rest of the time. Measured: free heap sits at
+31 KB and dips to 20 KB while a picture is being drawn.
+
+This is what the driver open/close hooks from §17 were for. They were added
+so an SSH session could wait for a login; the second user of them turned out
+to be memory.
+
+### Anti-aliasing, and a bug that hid inside it
+
+Coverage is computed with four subsamples per pixel row and exact
+fractional span ends horizontally. On a 1.47-inch panel an unantialiased
+diagonal is unmistakably a staircase, so this is not a luxury.
+
+Circles become polygons, with the segment count following the radius. The
+first version took the nearest of sixty-four tabulated angles, which is
+wrong in a way that survives every check that looks at size: a circle of
+twenty-three segments got its vertices at *uneven* angles and came out
+visibly lumpy rather than round. The radius was right, the area was right,
+and it looked like a potato. The table is interpolated now.
+
+That bug was found by compiling the renderer on the host and looking at the
+output, which is worth more than the hour it took to arrange — `raster.c`
+has no ESP dependencies at all, and the device driver needs about forty
+lines of stubs.
+
+### Measured
+
+| | |
+|---|---|
+| a picture on the panel | ~59 ms, including forking the program |
+| document | up to 4 KB |
+| heap while open | 31 KB free, dipping to 20 KB |
+
+Seven rasteriser properties are checked natively: fills, half-open edges in
+both axes, horizontal and vertical anti-aliasing, clipping beyond both
+edges, even-odd against nonzero winding, strokes leaving interiors alone,
+and the byte swap on the way to the panel.
+
+### What it does not do
+
+- **`<path>`** — the biggest gap by far, and the next thing. Bezier
+  flattening is the work; the rasteriser underneath already takes arbitrary
+  polygons.
+- **Subpaths, and therefore holes.** A shape is one point list, implicitly
+  closed. A ring needs two contours and there is nowhere to put the second.
+  This also makes `fill-rule` academic: nonzero and even-odd only differ on
+  self-intersecting outlines.
+- **`<text>`** — the font renderer exists in `lcdcon` and is not shared yet.
+- **Rotation and skew.** `transform` handles translate and scale, which is
+  what a dial or a plot needs; anything else means carrying a full matrix
+  through the point pipeline.
+- **Opacity**, gradients, patterns, clipping paths.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

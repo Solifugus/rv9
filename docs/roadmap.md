@@ -349,7 +349,7 @@ control layer is late if it is late.
   shape; an `RV9_CON_SS_SIZE` setstat is worth having now too, since
   something finally exists that could call it honestly.
 
-## Phase 10 — Hardware  ◐ pins, PWM and ADC done
+## Phase 10 — Hardware  ◐ pins, PWM, ADC and the window done
 
 - **`/gpio`, `/pwm0`, `/adc0` — done**, under a new `pio` file manager: a
   third driver shape after character and block, carrying values rather than
@@ -361,6 +361,16 @@ control layer is late if it is late.
 - **Backlight brightness — done**, as a `setstat` on `/term` rather than a
   descriptor option: the useful time to dim a display is while running.
   Not persisted, deliberately.
+- **`/w0` — a graphics window, done**, see design §19. Write SVG to it and
+  the picture appears: `pic > /w0`, `cat /f0/picture.svg > /w0`.
+  Presentation attributes, no CSS. About 59 ms a picture.
+- **The panel now belongs to neither device.** `/term` and `/w0` both want
+  the one ST7789, so it moved into `panel.c` — brought up by whoever asks
+  first, handed out as geometry and a blit under a lock.
+- **`cat` — done**, finally. A file reaching a device needs no new verb
+  when redirection already works.
+- Not done in the window: `<path>` (the next thing), subpaths and therefore
+  holes, `<text>`, rotation, opacity, gradients.
 - Not done: I2C and SPI as devices, which is what most sensors want.
 - **Interrupt-driven inputs — done.** `setstat(path, RV9_PIO_SS_EDGE, ...)`
   arms a pin; `getstat(path, RV9_PIO_GS_EVENT, ...)` says which event it

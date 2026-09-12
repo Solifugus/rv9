@@ -26,3 +26,4 @@ rv9_io_err_t rv9_drv_gpio_register(void);
 rv9_io_err_t rv9_drv_pwm_register(void);
 rv9_io_err_t rv9_drv_adc_register(void);
 rv9_io_err_t rv9_drv_tsens_register(void);
+rv9_io_err_t rv9_drv_svgwin_register(void);

@@ -215,6 +215,7 @@ static void io_bringup(void)
     REGISTER(rv9_drv_pwm_register());
     REGISTER(rv9_drv_adc_register());
     REGISTER(rv9_drv_tsens_register());
+    REGISTER(rv9_drv_svgwin_register());
     REGISTER(rv9_drv_ssh_register());
 
     #undef REGISTER
