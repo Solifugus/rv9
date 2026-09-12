@@ -353,16 +353,17 @@ control layer is late if it is late.
   ships it has no EdDSA at all, which matters because ssh-keygen defaults
   to it.
 - Not done: rekeying, more than one session at a time, job control.
-- **Open: short sessions lose their output on a poor link.** On a phone
-  hotspot -- 200 ms round trip, erratic -- connect-run-disconnect succeeds
-  about three times in ten, while a session *held open* is five for five
-  and plain `rshd` over the same link is eight for eight. So the
-  handshake, authentication and server-to-client data are all sound; it is
-  short sessions that suffer. The committed code from before six bug fixes
-  behaves identically, so this is the link rather than a regression.
-  Parked until there is a normal network to compare against; the next step
-  is a packet capture, to see whether the segments leave and what the
-  teardown looks like on the wire.
+- **Power save must stay on.** `WIFI_PS_NONE` makes this board lose its
+  access point -- reason 200, beacon timeout -- and turning it off is what
+  caused the "short sessions fail" hunt below. With ESP-IDF's default,
+  eleven sessions in twelve succeed. Latency is the price and it is worth
+  paying.
+- **Short sessions failing — closed, and self-inflicted.** Turning power
+  save off is what broke it. With ESP-IDF's default restored, twenty
+  scripted connect-run-disconnect sessions in twenty succeed. The hours
+  spent on SSH found six real bugs and none of them was the cause; the
+  cause was a "improvement" to the radio made an hour earlier and never
+  measured against.
 - **No post-quantum key exchange**, which OpenSSH 10 warns about and is
   right to. `mlkem768x25519-sha256` needs an ML-KEM implementation and
   there is none in this mbedTLS — a project, not a setting.

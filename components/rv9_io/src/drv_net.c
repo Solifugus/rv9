@@ -26,7 +26,8 @@ static const char *TAG = "rv9-net";
 
 /* Descriptor options:
  *   opt[0]  band: 0 or 3 = both, 1 = 2.4 GHz only, 2 = 5 GHz only
- *   opt[1]  power save: 0 = none, 1 = min modem, 2 = max modem
+ *   opt[1]  power save: 0 = none, 1 = min modem (default), 2 = max modem.
+ *           None is not recommended: see the note where it is applied.
  */
 #define OPT_BAND 0
 #define OPT_PS   1
@@ -270,22 +271,28 @@ static rv9_io_err_t net_wifi_up(net_t *n)
         }
 
         /*
-         * Power save, off by default.
+         * Power save, and why the default is ESP-IDF's own.
          *
-         * ESP-IDF leaves the station dozing between beacons, which is
-         * right for something running on a cell and wrong for something
-         * being worked on: a round trip goes from about two milliseconds
-         * to two hundred and forty, because a reply waits for the next
-         * beacon. Over a phone hotspot -- whose buffering for sleeping
-         * clients is its own adventure -- it also made connections drop
-         * mid-session.
+         * Dozing between beacons costs latency: a reply waits for the next
+         * one, which on a home access point is a few tens of milliseconds
+         * and on a phone hotspot -- 102 ms beacons, DTIM 2 -- was nearer
+         * two hundred and forty. Turning it off looks like an obvious win.
          *
-         * The radio is the largest draw on this board, so this is a real
-         * trade and it belongs in the descriptor rather than here.
+         * It is not. With WIFI_PS_NONE this board loses the access point
+         * entirely: reason 200, BEACON_TIMEOUT, association dropped, and
+         * an unreachable device that reassociates and drops again. Turning
+         * it off cost a working network and several hours of debugging
+         * something else, because the symptom appears one layer up as
+         * connections that fail for no visible reason.
+         *
+         * So min modem, as shipped. The option is still here because the
+         * radio is the largest draw on this board and someone may want the
+         * other trade -- but off is not a trade on this hardware, it is a
+         * fault.
          */
-        wifi_ps_type_t ps = (n->ps_opt == 1) ? WIFI_PS_MIN_MODEM
+        wifi_ps_type_t ps = (n->ps_opt == 0) ? WIFI_PS_NONE
                           : (n->ps_opt == 2) ? WIFI_PS_MAX_MODEM
-                                             : WIFI_PS_NONE;
+                                             : WIFI_PS_MIN_MODEM;
         esp_err_t pserr = esp_wifi_set_ps(ps);
         if (pserr != ESP_OK) {
             ESP_LOGW(TAG, "power save: %s", esp_err_to_name(pserr));

@@ -1789,6 +1789,28 @@ output, which is worth more than the hour it took to arrange — `raster.c`
 has no ESP dependencies at all, and the device driver needs about forty
 lines of stubs.
 
+### The one that was not a bug at all
+
+Six of the fixes above are real and stand. None of them was the reason SSH
+had become unreliable.
+
+The reason was power save. ESP-IDF leaves the station dozing between
+beacons; that costs latency, so turning it off looked like an obvious win
+and was made an hour before anyone measured SSH. With `WIFI_PS_NONE` this
+board loses its access point outright -- reason 200, beacon timeout,
+association dropped, reassociated, dropped again -- and the symptom
+surfaces a layer up as connections that fail for no visible reason.
+
+With the default restored: twenty scripted sessions in twenty.
+
+Two lessons, both cheap to state and expensive to learn. **Measure before
+the change as well as after** -- there was no before-reading for SSH on
+that network, so there was nothing to compare against and the regression
+was invisible as a regression. And **suspect your own recent changes
+first**: the hunt ranged across the SSH transport, the channel layer, NFM,
+the process table and the allocator before returning to a one-line default
+altered the same afternoon.
+
 ### Two bugs that only the glass could show
 
 Both were invisible to every test that did not involve looking at the
