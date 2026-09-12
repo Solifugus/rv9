@@ -32,6 +32,9 @@ void rv9_panel_size(int *w, int *h);
  */
 bool rv9_panel_take(const void *owner);
 
+/* Who is being shown, without taking it. */
+bool rv9_panel_is_owner(const void *owner);
+
 /* Half-open, like everything else here: x0..x1-1 by y0..y1-1. */
 void rv9_panel_blit(int x0, int y0, int x1, int y1, const uint16_t *px);
 

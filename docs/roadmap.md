@@ -203,6 +203,14 @@ why it comes here and not earlier.
 
 ## Phase 7 — The native kernel  ◐ steps 1-2 of 5 done
 
+**Known gaps in the native backend:** `rv9_sem_give_from_isr` and
+`rv9_queue_send_from_isr` are not implemented -- the kernel's wait queues
+are not interrupt-safe -- and refuse with `RV9_ERR_UNSUPPORTED`. Both now
+carry `RV9_MUST_CHECK`, so a caller that ignores the refusal fails to
+build. Interrupt-driven real-time work goes through `kal_rt.c`, which is
+hosted by the preemptive scheduler either way and is unaffected.
+
+
 **Goal:** remove FreeRTOS. The year-of-evenings phase.
 
 - **step 1 ✅** context switch (RV32I assembly), run queues, priority with

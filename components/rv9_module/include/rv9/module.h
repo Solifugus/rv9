@@ -373,6 +373,20 @@ typedef struct {
 #define RV9_CON_SS_CURSOR_ON 37  /* 0 = hide it, 1 = show it */
 
 /*
+ * Is this device what the screen is currently showing? getstat only.
+ *
+ * Only meaningful where devices share one display. A terminal at the end
+ * of a wire always says yes, because nothing else can be using it.
+ *
+ * It exists so that an *incidental* write can decline to steal the screen.
+ * The panel shows whoever painted last, which is the only workable rule
+ * with one framebuffer-less display -- but it makes no distinction between
+ * a program that meant to draw and a shell echoing the command you just
+ * typed, and the second should not destroy the first.
+ */
+#define RV9_CON_GS_ONSCREEN  38
+
+/*
  * Sixteen colours, in the order every terminal has used since the VT100,
  * because that is the order the escape codes are in and a program that
  * wants blue should not have to know which end it is talking to.

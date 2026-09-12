@@ -329,6 +329,13 @@ rv9_err_t rv9_rt_stats_by_index(int index, rv9_rt_stats_t *out, bool *valid);
 /* Counting semaphores                                                 */
 /* ------------------------------------------------------------------ */
 
+/*
+ * For calls whose refusal a caller must not drop on the floor -- the ones
+ * a backend may legitimately not implement. Everything else in the KAL
+ * either cannot fail or fails in a way the caller will notice anyway.
+ */
+#define RV9_MUST_CHECK __attribute__((warn_unused_result))
+
 typedef struct rv9_sem *rv9_sem_t;
 
 rv9_err_t rv9_sem_create(uint32_t max_count, uint32_t initial_count,
@@ -336,6 +343,21 @@ rv9_err_t rv9_sem_create(uint32_t max_count, uint32_t initial_count,
 void      rv9_sem_destroy(rv9_sem_t sem);
 rv9_err_t rv9_sem_take(rv9_sem_t sem, uint32_t timeout_ms);
 rv9_err_t rv9_sem_give(rv9_sem_t sem);
+/*
+ * Give from an interrupt.
+ *
+ * NOT IMPLEMENTED under the native kernel, which refuses with
+ * RV9_ERR_UNSUPPORTED rather than pretend -- making its wait queues
+ * interrupt-safe is real work and has not been done. The FreeRTOS backend
+ * supports it.
+ *
+ * Hence RV9_MUST_CHECK. A caller that drops the result gets a primitive
+ * that silently does nothing, and the consequence lands somewhere else
+ * entirely: the panel driver waited on a semaphore nothing could ever
+ * give, timed out on every transfer, and turned a 1.2 second boot into
+ * fourteen. The stub was honest; the caller was not listening.
+ */
+RV9_MUST_CHECK
 rv9_err_t rv9_sem_give_from_isr(rv9_sem_t sem, bool *higher_prio_woken);
 
 /* ------------------------------------------------------------------ */
@@ -362,6 +384,8 @@ void      rv9_queue_destroy(rv9_queue_t queue);
 rv9_err_t rv9_queue_send(rv9_queue_t queue, const void *item,
                          uint32_t timeout_ms);
 rv9_err_t rv9_queue_recv(rv9_queue_t queue, void *item, uint32_t timeout_ms);
+/* Also unimplemented under the native kernel. See rv9_sem_give_from_isr. */
+RV9_MUST_CHECK
 rv9_err_t rv9_queue_send_from_isr(rv9_queue_t queue, const void *item,
                                   bool *higher_prio_woken);
 uint32_t  rv9_queue_count(rv9_queue_t queue);

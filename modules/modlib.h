@@ -124,6 +124,15 @@ static inline void m_cursor_on(const rv9_mod_env_t *env, int path, uint32_t on)
     env->setstat(path, RV9_CON_SS_CURSOR_ON, &on);
 }
 
+/* Is this path what the screen is showing? Anything that cannot say is
+   assumed to be, which is right for a terminal on a wire. */
+static inline int m_onscreen(const rv9_mod_env_t *env, int path)
+{
+    uint32_t v = 1;
+    if (env->getstat(path, RV9_CON_GS_ONSCREEN, &v) < 0) return 1;
+    return v != 0;
+}
+
 /* Rows and columns of whatever is at the far end. Falls back to the
    conventional 80x24 if the call is refused, so a caller always has
    something to lay out against. */

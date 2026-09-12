@@ -63,6 +63,7 @@ static bool                   s_up;
 static const void            *s_owner;
 static volatile uint32_t      s_done_count;
 
+
 /* Runs in the SPI interrupt, once per completed colour transfer. */
 static bool trans_done(esp_lcd_panel_io_handle_t io,
                        esp_lcd_panel_io_event_data_t *ev, void *ctx)
@@ -213,6 +214,11 @@ bool rv9_panel_take(const void *owner)
     return true;
 }
 
+bool rv9_panel_is_owner(const void *owner)
+{
+    return s_owner == owner;
+}
+
 /*
  * Put pixels on the glass, and wait until they are actually there.
  *
@@ -224,12 +230,21 @@ bool rv9_panel_take(const void *owner)
  * content, as a text console's usually do.
  *
  * The wait is a spin on a counter the completion interrupt bumps, rather
- * than a semaphore. A semaphore is the obvious choice and it did not work:
- * the give from the interrupt never woke the waiter, and every blit sat out
- * its full timeout -- 200 ms, or 1000 ms when the timeout was raised, which
- * is how we know it was the wakeup and not the transfer. The interrupt was
- * firing promptly the whole time; only the wakeup went missing. That is
- * worth returning to, because the same primitive is used elsewhere.
+ * than a semaphore.
+ *
+ * A semaphore was the obvious choice and it did nothing: every blit sat
+ * out its full timeout, and boot went from 1.2 seconds to fourteen.
+ * rv9_sem_give_from_isr is not implemented under the native kernel --
+ * making its wait queues interrupt-safe is real work and has not been
+ * done -- so it refuses, with RV9_ERR_UNSUPPORTED, in as many words. The
+ * stub was honest. This code dropped the return value on the floor.
+ *
+ * Both ISR-safe KAL primitives now carry RV9_MUST_CHECK so the compiler
+ * objects, which is where an unimplemented call should be caught.
+ *
+ * The counter is the better fit here anyway: there is exactly one waiter,
+ * it knows what it is waiting for, and the wait is shorter than a context
+ * switch would cost.
  *
  * What is here instead is exact: a full-width five-row strip takes 636 us
  * at 40 MHz, and that is what the spin measures. Burning those microseconds

@@ -637,6 +637,11 @@ static rv9_io_err_t lcdcon_getstat(rv9_dev_t *dev, uint32_t code, void *arg)
         *(uint32_t *)arg = rv9_panel_backlight_get();
         return RV9_IO_OK;
 
+    case RV9_CON_GS_ONSCREEN:
+        if (arg == NULL) return RV9_IO_ERR_INVAL;
+        *(uint32_t *)arg = rv9_panel_is_owner(c) ? 1 : 0;
+        return RV9_IO_OK;
+
     case RV9_CON_GS_SIZE:
         /* This console knows exactly how big it is, which is the one thing
            a serial line can never say. */

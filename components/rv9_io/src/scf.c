@@ -244,6 +244,19 @@ static rv9_io_err_t scf_getstat(rv9_path_t *path, uint32_t code, void *arg)
         return RV9_IO_OK;
     }
 
+    case RV9_CON_GS_ONSCREEN: {
+        if (arg == NULL) return RV9_IO_ERR_INVAL;
+
+        /* A device that shares a screen knows; everything else is the only
+           thing on its own wire and may as well say yes. */
+        if (dev->drv->getstat) {
+            rv9_io_err_t err = dev->drv->getstat(dev, code, arg);
+            if (err != RV9_IO_ERR_UNSUPPORTED) return err;
+        }
+        *(uint32_t *)arg = 1;
+        return RV9_IO_OK;
+    }
+
     case RV9_CON_GS_SIZE: {
         if (arg == NULL) return RV9_IO_ERR_INVAL;
 

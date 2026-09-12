@@ -218,7 +218,17 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         }
         const char *arg = rest_of_line(st->raw, target);
 
-        if (st->term_open) {
+        /*
+         * Mirror to the panel, but never take it back.
+         *
+         * Showing what is being typed is a convenience for somebody
+         * glancing at the board. Once a program has drawn on the panel --
+         * a chart, a picture -- that convenience would wipe it at the next
+         * command, which is a poor trade for a line of text nobody asked
+         * to see. Writing to /term deliberately still brings the console
+         * back.
+         */
+        if (st->term_open && m_onscreen(env, st->term)) {
             m_say(env, st->term, "> ");
             m_say(env, st->term, argv[0]);
             m_say(env, st->term, "\n");
