@@ -286,7 +286,63 @@ typedef struct {
                                       3 = both */
 #define RV9_PIO_GS_EVENT      21   /* event id, or 0 if not armed */
 
+/* ------------------------------------------------------------------ */
+/* Console settings                                                    */
+/*                                                                     */
+/* Addressing the cursor, colour and attributes -- for every character */
+/* device that has a screen at the far end, whatever kind of screen it */
+/* is.                                                                 */
+/*                                                                     */
+/* These are setstat codes and NOT escape sequences in the byte stream, */
+/* which is the whole point. /term is not a terminal: it is a panel     */
+/* with a font renderer, and teaching it to parse ANSI would be absurd  */
+/* when it has no need of one. So a program says "cursor to 10,20" once */
+/* and the device decides what that means -- ESC[11;21H down a wire, a  */
+/* change of render position on the glass. Programs that address the    */
+/* screen work on both without knowing which they have.                 */
+/*                                                                     */
+/* SCF supplies the escape sequences for any driver with no opinion of  */
+/* its own, so a new character driver gets all of this for free.        */
+/* ------------------------------------------------------------------ */
+
+#define RV9_CON_GS_SIZE     32   /* rows << 16 | cols. getstat only */
+#define RV9_CON_SS_CURSOR   33   /* row << 16 | col, both 0-based */
+#define RV9_CON_SS_COLOUR   34   /* fg | bg << 8, see RV9_COL_* */
+#define RV9_CON_SS_ATTR     35   /* RV9_CON_ATTR_*, the whole set each time */
+#define RV9_CON_SS_CLEAR    36   /* RV9_CON_CLEAR_* */
+#define RV9_CON_SS_CURSOR_ON 37  /* 0 = hide it, 1 = show it */
+
+/*
+ * Sixteen colours, in the order every terminal has used since the VT100,
+ * because that is the order the escape codes are in and a program that
+ * wants blue should not have to know which end it is talking to.
+ *
+ * Deliberately not RGB: a text console app thinks in named colours, and a
+ * palette is something a device can honour. Truecolour, if it is ever
+ * wanted, belongs in a driver-specific code where the honesty is local.
+ */
+#define RV9_COL_BLACK    0
+#define RV9_COL_RED      1
+#define RV9_COL_GREEN    2
+#define RV9_COL_YELLOW   3
+#define RV9_COL_BLUE     4
+#define RV9_COL_MAGENTA  5
+#define RV9_COL_CYAN     6
+#define RV9_COL_WHITE    7
+#define RV9_COL_BRIGHT   8    /* or it into any of the above */
+#define RV9_COL_DEFAULT  0xFF /* whatever this device came up as */
+
+#define RV9_CON_ATTR_BOLD      (1u << 0)
+#define RV9_CON_ATTR_UNDERLINE (1u << 1)
+#define RV9_CON_ATTR_REVERSE   (1u << 2)
+
+#define RV9_CON_CLEAR_SCREEN   0   /* all of it, and home the cursor */
+#define RV9_CON_CLEAR_EOL      1   /* cursor to end of line */
+#define RV9_CON_CLEAR_EOS      2   /* cursor to end of screen */
+
 /* The LCD console's own settings. */
+/* RV9_LCD_SS_CLEAR is superseded by RV9_CON_SS_CLEAR, which every console
+   answers. Kept because clearing the screen is not worth breaking. */
 #define RV9_LCD_SS_CLEAR      (RV9_SS_DRIVER_BASE + 0)
 #define RV9_LCD_SS_BRIGHTNESS (RV9_SS_DRIVER_BASE + 1)   /* 0..100 percent */
 

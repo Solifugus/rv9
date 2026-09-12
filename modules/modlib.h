@@ -86,6 +86,56 @@ static inline void m_devpath(char *out, const char *dev, uint32_t unit)
     out[i] = '\0';
 }
 
+/* ------------------------------------------------------------------ */
+/* The screen                                                          */
+/*                                                                     */
+/* Thin wrappers over setstat, so that code addressing a screen reads   */
+/* like code addressing a screen. They work on any console -- the panel */
+/* moves its own cursor, a terminal gets the escape sequence -- and the */
+/* module never learns which it has.                                    */
+/* ------------------------------------------------------------------ */
+
+static inline void m_cursor(const rv9_mod_env_t *env, int path,
+                            uint32_t row, uint32_t col)
+{
+    uint32_t v = (row << 16) | (col & 0xFFFF);
+    env->setstat(path, RV9_CON_SS_CURSOR, &v);
+}
+
+static inline void m_colour(const rv9_mod_env_t *env, int path,
+                            uint32_t fg, uint32_t bg)
+{
+    uint32_t v = (fg & 0xFF) | ((bg & 0xFF) << 8);
+    env->setstat(path, RV9_CON_SS_COLOUR, &v);
+}
+
+static inline void m_attr(const rv9_mod_env_t *env, int path, uint32_t flags)
+{
+    env->setstat(path, RV9_CON_SS_ATTR, &flags);
+}
+
+static inline void m_clear(const rv9_mod_env_t *env, int path, uint32_t what)
+{
+    env->setstat(path, RV9_CON_SS_CLEAR, &what);
+}
+
+static inline void m_cursor_on(const rv9_mod_env_t *env, int path, uint32_t on)
+{
+    env->setstat(path, RV9_CON_SS_CURSOR_ON, &on);
+}
+
+/* Rows and columns of whatever is at the far end. Falls back to the
+   conventional 80x24 if the call is refused, so a caller always has
+   something to lay out against. */
+static inline void m_screen(const rv9_mod_env_t *env, int path,
+                            uint32_t *rows, uint32_t *cols)
+{
+    uint32_t v = 0;
+    if (env->getstat(path, RV9_CON_GS_SIZE, &v) < 0) v = (24u << 16) | 80u;
+    *rows = (v >> 16) & 0xFFFF;
+    *cols = v & 0xFFFF;
+}
+
 /* Left-aligned in a field of `width`, for table output. */
 static inline void m_pad(const rv9_mod_env_t *env, int path, const char *s,
                          uint32_t width)

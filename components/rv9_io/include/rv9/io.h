@@ -187,6 +187,35 @@ typedef struct rv9_path {
 } rv9_path_t;
 
 /* ------------------------------------------------------------------ */
+/* Console settings as escape sequences                                */
+/*                                                                     */
+/* For devices with a terminal at the far end rather than a screen of   */
+/* their own. Writes the sequence for one RV9_CON_* setstat into buf    */
+/* and returns its length, or 0 if the code is not a console code or    */
+/* would not fit. 32 bytes is plenty for any of them.                   */
+/*                                                                     */
+/* Shared by SCF and the network file manager: a shell over TCP is      */
+/* driving somebody's terminal too.                                     */
+/* ------------------------------------------------------------------ */
+
+#define RV9_CON_ANSI_MAX 32
+
+size_t rv9_con_ansi(char *buf, size_t cap, uint32_t code, uint32_t value);
+
+/*
+ * How big is a screen we cannot ask?
+ *
+ * A serial line does not carry its terminal's dimensions, and asking over
+ * the wire means writing a query and reading a reply back through a line
+ * discipline that is busy being a shell. So a device whose driver cannot
+ * say gets told 80x24 -- the size everything has defaulted to since the
+ * VT100, and a guess that is stated rather than hidden. A session that
+ * knows better (ssh, one day) is the right place to fix it.
+ */
+#define RV9_CON_DEFAULT_COLS 80
+#define RV9_CON_DEFAULT_ROWS 24
+
+/* ------------------------------------------------------------------ */
 /* I/O manager                                                         */
 /* ------------------------------------------------------------------ */
 

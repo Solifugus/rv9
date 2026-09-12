@@ -82,6 +82,25 @@ priorities, and the low-priority one still makes progress.
 **Done when:** a process opens `/term`, writes to it, and text appears on the
 panel — through the full manager/driver/descriptor stack, with no shortcuts.
 
+Since revisited:
+
+- **Console control — done**, see design §16. Cursor addressing, sixteen
+  colours, bold/underline/reverse, clear, cursor visibility and "how big are
+  you", all as generic setstat codes rather than escape sequences in the
+  stream.
+- **The driver decides; SCF covers for it.** `/term` implements the codes
+  natively — it is a framebuffer with a font renderer, not a terminal, and
+  has no parser. A driver that declines gets the ECMA-48 sequence written
+  for it instead. `screen` and `screen /term` are the same binary.
+- **Per-cell colour on the panel**, with the attribute plane walked
+  columns-outer so the anti-aliasing ramp is rebuilt once per run of equal
+  colour and not once per scanline. Fixed a latent bug on the way: colours
+  were stored pre-byte-swapped, which every blend would have got wrong the
+  moment a second colour existed.
+- Not done: a way for a session to *tell* a path its real size, and a
+  resize signal. Both want SSH or telnet first — over a wire, 24×80 is a
+  documented guess and nothing in the stream can correct it.
+
 *Rough size: the biggest phase so far. This is the heart of the system.*
 
 ---
@@ -290,6 +309,10 @@ control layer is late if it is late.
   plumbing underneath is now proven, so SSH is purely a security problem.
 - Not done: more than one concurrent remote session, a pty/job control,
   or anything resembling line editing over the network.
+- **Window size belongs here.** SSH negotiates it and sends a message when
+  it changes; that is the only thing in the system that will ever know how
+  big a remote screen really is. An `RV9_CON_SS_SIZE` setstat and a resize
+  signal land with this phase, not before it — see design §16.
 
 ## Phase 10 — Hardware  ◐ pins, PWM and ADC done
 

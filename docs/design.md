@@ -1283,6 +1283,129 @@ and it belongs in a test rather than in a habit.
   the rule for `rv9_mod_env_t`, where the module only reads what it knows
   about and appending is free.
 
+## 16. The console: addressing a screen you have never seen
+
+A program that wants to draw rather than scroll needs three things —
+put the cursor here, use these colours, clear that much — and the usual way
+to get them is to write escape sequences down the pipe and hope. That works
+until the far end is not a terminal. `/term` is a 320×172 panel with a font
+renderer and a framebuffer; there is no parser in it, and writing one so it
+can decode instructions we ourselves just encoded would be a strange way to
+spend a kilobyte.
+
+So cursor, colour and attributes are **setstat codes**, not bytes in the
+stream:
+
+```c
+m_cursor(env, p, 3, 10);                       /* row 3, column 10 */
+m_colour(env, p, RV9_COL_WHITE | RV9_COL_BRIGHT, RV9_COL_BLUE);
+m_attr(env, p, RV9_CON_ATTR_BOLD);
+m_say(env, p, "drawn by address");
+```
+
+which is `RV9_CON_SS_CURSOR`, `RV9_CON_SS_COLOUR` and `RV9_CON_SS_ATTR`
+underneath, plus `SS_CLEAR` and `SS_CURSOR_ON`, and `GS_SIZE` to ask how
+much screen there is.
+
+### Who answers, and who is handed a sequence
+
+The driver is asked first, always. If it declines — `UNSUPPORTED` — SCF
+assumes a terminal is out there and writes the ECMA-48 sequence that means
+the same thing.
+
+```
+   module ──setstat──▶ SCF ──▶ driver has it?  ──yes──▶  driver does it
+                               (lcdcon: moves a render position,
+                                paints cells)
+                                    │ no
+                                    ▼
+                               rv9_con_ansi() ──▶ driver->write()
+                               (usbserial, and anything else
+                                that is really a wire)
+```
+
+The panel never sees an escape sequence, and the UART never needs to know
+what a cursor is. Both ends of that fork are cheap, and the module that
+called `m_cursor` cannot tell which one it got. `screen` and `screen /term`
+are the same binary drawing the same picture on a 30×8 panel and an 80×24
+terminal.
+
+NFM is the third case and it takes the short path: a network connection is
+a wire by definition, so it translates without offering the driver a say. A
+network card has no cursor.
+
+### Sixteen colours, not sixteen million
+
+`RV9_COL_BLACK`…`RV9_COL_WHITE`, or `RV9_COL_BRIGHT` in for the other
+eight, or `RV9_COL_DEFAULT` for whatever the device came up as. The panel
+is RGB565 and could take a triple; a terminal cannot, and a palette that
+only half the devices can honour is not an abstraction. Sixteen is what
+both ends actually have, and it maps to SGR 30–37/90–97 in one line.
+
+`RV9_COL_DEFAULT` is the piece that makes this usable: a program that sets
+a foreground and wants the background left alone says so, and the panel
+substitutes the colour from its descriptor while a terminal sends SGR 39.
+Neither has to be told what the user's background was.
+
+### Attributes are a set, not a stream
+
+`SS_ATTR` takes the whole set each time, and turning things off is done by
+sending a set without them. This is deliberate and the translator is where
+it shows: the obvious encoding of "no attributes" is `ESC[0m`, and `ESC[0m`
+also throws away the colour. So `rv9_con_ansi` emits the explicit
+cancels — 22, 24, 27 — and never a bare reset. A program that switches bold
+off and finds its colour gone is a bug that would have been reported as
+"the panel and the terminal disagree", which is the exact failure this
+whole section exists to prevent.
+
+The translator refuses to truncate, too: if the sequence will not fit in
+the buffer it returns 0 and nothing is written, because a half-written
+escape sequence eats the bytes that follow it. Better nothing than a
+fragment.
+
+### The panel side
+
+`drv_lcdcon` gained a parallel attribute plane — one `{fg, bg, flags}` per
+cell — and the renderer walks it columns-outer so the 16-step
+foreground-over-background ramp is rebuilt once per run of equal colour
+rather than once per scanline. A cell under the cursor is drawn with its
+reverse bit flipped, which costs nothing and needs no separate cursor
+logic. Underline is full coverage on the glyph's last row.
+
+Fixing this turned up a latent bug worth recording: `fg` and `bg` had been
+stored already byte-swapped for the panel, which was invisible while there
+was one colour for the whole screen and would have made every blend in the
+anti-aliasing ramp operate on reversed channels the moment per-cell colour
+arrived. Colours are now stored in native order and swapped at paint time.
+
+### Size, and the part that is a guess
+
+`GS_SIZE` returns `rows << 16 | cols`. `/term` computes it at init from the
+panel geometry and its descriptor — scale, rotation, margins — so a
+different descriptor or a different panel reports a different size and
+nobody has to be told. On this board it is 30×8.
+
+Over a wire it is `RV9_CON_DEFAULT_ROWS` × `RV9_CON_DEFAULT_COLS`, 24×80,
+and that is a **convention rather than a measurement**. A serial line
+carries no dimensions; an xterm can be resized without a byte reaching the
+board. The honest thing is to document it as a guess rather than to dress
+it up.
+
+Two things are missing and both belong to a session layer, not a device:
+
+- **No way to be told.** SSH has a window-change message and telnet has
+  NAWS. Whichever arrives first is the right place for an
+  `RV9_CON_SS_SIZE` setstat, letting the session push down what it
+  negotiated. It was left out on purpose — a setter nobody can call
+  honestly is worse than none.
+- **No resize notification.** A program that asks once and caches the
+  answer is wrong the moment the window changes. `RV9_SIG_WINCH` is the
+  obvious shape, and `signals_take()` is already the polling point a screen
+  program checks each loop.
+
+Until then: query at startup, never cache across a redraw. That costs one
+getstat per repaint and is correct in advance rather than retrofitted.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

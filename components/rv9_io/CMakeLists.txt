@@ -2,7 +2,7 @@ idf_component_register(SRCS "src/io.c" "src/scf.c" "src/drv_uart.c"
                             "src/drv_lcdcon.c" "src/font.c"
                             "src/rbf.c" "src/drv_ramdisk.c"
                             "src/nfm.c" "src/drv_net.c" "src/drv_flashdisk.c"
-                            "src/pio.c" "src/drv_gpio.c" "src/drv_pwm.c"
+                            "src/pio.c" "src/drv_gpio.c" "src/console.c" "src/drv_pwm.c"
                             "src/drv_adc.c" "src/drv_tsens.c"
                        INCLUDE_DIRS "include"
                        REQUIRES rv9_kal rv9_module rv9_proc esp_lcd driver esp_driver_usb_serial_jtag lwip esp_netif esp_wifi esp_event nvs_flash

@@ -327,6 +327,16 @@ static rv9_io_err_t nfm_getstat(rv9_path_t *path, uint32_t code, void *arg)
         return RV9_IO_OK;
     }
 
+    /*
+     * A connection has no way to know how big the terminal at the far end
+     * is -- nothing in a TCP stream says so. The guess is stated in io.h
+     * and is the same one every serial line makes.
+     */
+    if (code == RV9_CON_GS_SIZE && arg) {
+        *(uint32_t *)arg = (RV9_CON_DEFAULT_ROWS << 16) | RV9_CON_DEFAULT_COLS;
+        return RV9_IO_OK;
+    }
+
     /* Anything else belongs to the driver -- link status, address. */
     if (path->dev->drv->getstat) {
         return path->dev->drv->getstat(path->dev, code, arg);
@@ -336,6 +346,21 @@ static rv9_io_err_t nfm_getstat(rv9_path_t *path, uint32_t code, void *arg)
 
 static rv9_io_err_t nfm_setstat(rv9_path_t *path, uint32_t code, void *arg)
 {
+    /*
+     * The far end of a socket is somebody's terminal, so it gets the same
+     * escape sequences a serial line does. The driver is never offered
+     * these: a network card has no cursor, and asking it would only be
+     * ceremony.
+     */
+    if (arg != NULL) {
+        char seq[RV9_CON_ANSI_MAX];
+        size_t n = rv9_con_ansi(seq, sizeof(seq), code, *(uint32_t *)arg);
+        if (n > 0) {
+            size_t moved = 0;
+            return nfm_write(path, seq, n, &moved);
+        }
+    }
+
     if (path->dev->drv->setstat) {
         return path->dev->drv->setstat(path->dev, code, arg);
     }

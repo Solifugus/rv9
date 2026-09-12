@@ -109,9 +109,43 @@ static inline uint16_t panel_color(uint16_t rgb565)
 }
 
 /*
+ * The sixteen console colours, in RGB565.
+ *
+ * The VT100 palette, which is what RV9_COL_* names and what a program means
+ * when it asks for blue. The panel's own default fg/bg come from the
+ * descriptor and are *not* in here: RV9_COL_DEFAULT resolves to those, so
+ * "default" keeps meaning whatever this console was configured to look
+ * like rather than quietly becoming white on black.
+ */
+static const uint16_t s_palette[16] = {
+    0x0000,  /* black          #000000 */
+    0xA800,  /* red            #aa0000 */
+    0x0540,  /* green          #00aa00 */
+    0xAAA0,  /* yellow         #aa5500 */
+    0x0015,  /* blue           #0000aa */
+    0xA815,  /* magenta        #aa00aa */
+    0x0555,  /* cyan           #00aaaa */
+    0xAD55,  /* white          #aaaaaa */
+    0x52AA,  /* bright black   #555555 */
+    0xFAAA,  /* bright red     #ff5555 */
+    0x57EA,  /* bright green   #55ff55 */
+    0xFFEA,  /* bright yellow  #ffff55 */
+    0x52BF,  /* bright blue    #5555ff */
+    0xFABF,  /* bright magenta #ff55ff */
+    0x57FF,  /* bright cyan    #55ffff */
+    0xFFFF,  /* bright white   #ffffff */
+};
+
+/* Colour and attributes, per cell. Three bytes rather than a packed word:
+   at 40x21 that is 2.5 KB, and legible code is worth more than the byte. */
+typedef struct {
+    uint8_t fg, bg, flags;
+} cattr_t;
+
+/*
  * Blend foreground toward background at coverage a/15, per RGB565 channel.
- * Done once into a 16-entry palette at init, so painting a glyph is a table
- * lookup rather than arithmetic per pixel.
+ * Done once per colour pair, so painting a glyph is a table lookup rather
+ * than arithmetic per pixel.
  */
 static uint16_t blend565(uint16_t fg, uint16_t bg, int a)
 {
@@ -135,12 +169,21 @@ typedef struct {
     int       mx, my;        /* margins, pixels */
 
     char     *grid;          /* cols * rows */
+    cattr_t  *attr;          /* cols * rows, colour and attributes per cell */
     bool     *dirty;         /* rows */
-    uint16_t  fg, bg;
+    uint16_t  fg, bg;        /* the descriptor's defaults, RGB565 */
     uint8_t   brightness;      /* percent */
-    uint16_t  shade[SHADES];   /* fg blended to bg, ready for the panel */
     int       cx, cy;
+    bool      cursor_on;
+    cattr_t   pen;           /* what the next character will be written in */
     uint16_t *rowbuf;        /* one text row of pixels, w x ch */
+
+    /* The shade table is rebuilt whenever the colour pair changes while
+       painting a row. Console output comes in runs of one colour, so in
+       practice this is rebuilt a handful of times per row, not per cell. */
+    uint16_t  shade[SHADES];
+    uint16_t  shade_fg, shade_bg;
+    bool      shade_valid;
 
     rv9_lock_t lock;
 } lcdcon_t;
@@ -150,37 +193,119 @@ static inline char *cell(lcdcon_t *c, int row, int col)
     return &c->grid[row * c->cols + col];
 }
 
+static inline cattr_t *cattr(lcdcon_t *c, int row, int col)
+{
+    return &c->attr[row * c->cols + col];
+}
+
+/* RV9_COL_DEFAULT means "whatever this console was configured to look
+   like", which is why the defaults are kept as colours and not as palette
+   indices -- the descriptor's navy is not one of the sixteen. */
+static inline uint16_t resolve_fg(lcdcon_t *c, uint8_t v)
+{
+    return (v == RV9_COL_DEFAULT) ? c->fg : s_palette[v & 15];
+}
+
+static inline uint16_t resolve_bg(lcdcon_t *c, uint8_t v)
+{
+    return (v == RV9_COL_DEFAULT) ? c->bg : s_palette[v & 15];
+}
+
+/* The pair a cell is actually painted in, after bold and reverse have had
+   their say. Bold is the bright half of the palette, which is what it has
+   meant on a colour terminal since it stopped meaning a heavier font. */
+static void cell_colours(lcdcon_t *c, const cattr_t *a,
+                         uint16_t *fg, uint16_t *bg)
+{
+    uint8_t f = a->fg;
+    if ((a->flags & RV9_CON_ATTR_BOLD) && f != RV9_COL_DEFAULT) {
+        f |= RV9_COL_BRIGHT;
+    }
+
+    uint16_t cf = resolve_fg(c, f);
+    uint16_t cb = resolve_bg(c, a->bg);
+
+    if (a->flags & RV9_CON_ATTR_REVERSE) { uint16_t t = cf; cf = cb; cb = t; }
+
+    *fg = cf;
+    *bg = cb;
+}
+
 static void backlight_set(lcdcon_t *c, uint32_t percent);
 
 /* ---- painting ---- */
 
-/* Expand one text row into pixels, magnifying each glyph by c->scale. */
+/* Rebuild the 16-shade ramp, but only when the colours actually changed. */
+static void use_colours(lcdcon_t *c, uint16_t fg, uint16_t bg)
+{
+    if (c->shade_valid && c->shade_fg == fg && c->shade_bg == bg) return;
+
+    for (int a = 0; a < SHADES; a++) c->shade[a] = panel_color(blend565(fg, bg, a));
+    c->shade_fg = fg;
+    c->shade_bg = bg;
+    c->shade_valid = true;
+}
+
+/*
+ * Expand one text row into pixels, magnifying each glyph by c->scale.
+ *
+ * Columns are the outer loop, which is the opposite of the obvious order
+ * and the reason is colour: every cell may have its own pair, and the
+ * 16-shade ramp that makes an anti-aliased glyph cheap has to be built per
+ * pair. Walking a column at a time means building it once per run of equal
+ * colour instead of once per scanline.
+ */
 static void paint_row(lcdcon_t *c, int row)
 {
     uint16_t *px = c->rowbuf;
 
+    /* Margins and the gaps between cells belong to nobody, so they take the
+       console's own background. */
     for (int gy = 0; gy < GLYPH_H; gy++) {
         uint16_t *line = &px[(gy * c->scale) * c->w];
+        uint16_t bg = panel_color(c->bg);
+        for (int x = 0; x < c->w; x++) line[x] = bg;
+    }
 
-        /* Margins are part of the row, painted in background. */
-        for (int x = 0; x < c->w; x++) line[x] = c->bg;
+    c->shade_valid = false;
 
-        for (int col = 0; col < c->cols; col++) {
-            char ch = *cell(c, row, col);
-            if (ch < FONT_FIRST || ch > FONT_LAST) ch = ' ';
+    for (int col = 0; col < c->cols; col++) {
+        char ch = *cell(c, row, col);
+        if (ch < FONT_FIRST || ch > FONT_LAST) ch = ' ';
 
+        cattr_t a = *cattr(c, row, col);
+
+        /* The cursor is a reversed cell rather than a shape of its own: it
+           costs nothing to paint, survives scrolling, and is legible
+           whatever colours the program chose. */
+        if (c->cursor_on && row == c->cy && col == c->cx) {
+            a.flags ^= RV9_CON_ATTR_REVERSE;
+        }
+
+        uint16_t fg, bg;
+        cell_colours(c, &a, &fg, &bg);
+        use_colours(c, fg, bg);
+
+        for (int gy = 0; gy < GLYPH_H; gy++) {
             const unsigned char *g = rv9_font[ch - FONT_FIRST][gy];
-            uint16_t *out = &line[c->mx + col * c->cw];
+            uint16_t *out = &px[(gy * c->scale) * c->w + c->mx + col * c->cw];
+
+            /* The last glyph row is the underline, when there is one: full
+               coverage across the cell rather than the glyph's own shape. */
+            bool rule = (a.flags & RV9_CON_ATTR_UNDERLINE) && gy == GLYPH_H - 1;
 
             for (int gx = 0; gx < GLYPH_W; gx++) {
                 unsigned char byte = g[gx >> 1];
-                int a = (gx & 1) ? (byte & 0x0F) : (byte >> 4);
-                uint16_t v = c->shade[a];
+                int cov = (gx & 1) ? (byte & 0x0F) : (byte >> 4);
+                uint16_t v = c->shade[rule ? SHADES - 1 : cov];
                 for (int sx = 0; sx < c->scale; sx++) *out++ = v;
             }
         }
+    }
 
-        /* Replicate the expanded line downward rather than recomputing it. */
+    /* Replicate each expanded line downward rather than recomputing it. */
+    for (int gy = 0; gy < GLYPH_H && c->scale > 1; gy++) {
+        uint16_t *line = &px[(gy * c->scale) * c->w];
         for (int sy = 1; sy < c->scale; sy++) {
             memcpy(&px[(gy * c->scale + sy) * c->w], line,
                    (size_t)c->w * sizeof(uint16_t));
@@ -200,10 +325,24 @@ static void flush(lcdcon_t *c)
     }
 }
 
+/* Fill a run of cells with blanks in the current pen. Clearing takes the
+   pen's background, which is what a terminal does and what a program
+   painting a coloured panel expects. */
+static void blank(lcdcon_t *c, int row, int from, int to)
+{
+    for (int col = from; col < to; col++) {
+        *cell(c, row, col)  = ' ';
+        *cattr(c, row, col) = c->pen;
+    }
+    c->dirty[row] = true;
+}
+
 static void scroll(lcdcon_t *c)
 {
     memmove(c->grid, cell(c, 1, 0), (size_t)(c->rows - 1) * c->cols);
-    memset(cell(c, c->rows - 1, 0), ' ', (size_t)c->cols);
+    memmove(c->attr, cattr(c, 1, 0),
+            (size_t)(c->rows - 1) * c->cols * sizeof(cattr_t));
+    blank(c, c->rows - 1, 0, c->cols);
     for (int r = 0; r < c->rows; r++) c->dirty[r] = true;
     c->cy = c->rows - 1;
 }
@@ -229,7 +368,8 @@ static void putch(lcdcon_t *c, char ch)
     case '\b':
         if (c->cx > 0) {
             c->cx--;
-            *cell(c, c->cy, c->cx) = ' ';
+            *cell(c, c->cy, c->cx)  = ' ';
+            *cattr(c, c->cy, c->cx) = c->pen;
             c->dirty[c->cy] = true;
         }
         return;
@@ -241,7 +381,9 @@ static void putch(lcdcon_t *c, char ch)
 
     if (c->cx >= c->cols) newline(c);
 
-    *cell(c, c->cy, c->cx++) = ch;
+    *cell(c, c->cy, c->cx)  = ch;
+    *cattr(c, c->cy, c->cx) = c->pen;
+    c->cx++;
     c->dirty[c->cy] = true;
 }
 
@@ -264,11 +406,15 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
         fg = DEFAULT_FG;
         bg = DEFAULT_BG;
     }
-    c->fg = panel_color(fg);
-    c->bg = panel_color(bg);
-    for (int a = 0; a < SHADES; a++) {
-        c->shade[a] = panel_color(blend565(fg, bg, a));
-    }
+    /* Kept unswapped: these are colours, and panel_color() is applied where
+       they are written to the glass. Storing them pre-swapped meant the
+       blend arithmetic ran on byte-reversed channels. */
+    c->fg = fg;
+    c->bg = bg;
+
+    c->pen.fg    = RV9_COL_DEFAULT;
+    c->pen.bg    = RV9_COL_DEFAULT;
+    c->pen.flags = 0;
 
     c->mx = dev->opt[OPT_MARGIN_X] ? (int)dev->opt[OPT_MARGIN_X] : DEFAULT_MARGIN_X;
     c->my = dev->opt[OPT_MARGIN_Y] ? (int)dev->opt[OPT_MARGIN_Y] : DEFAULT_MARGIN_Y;
@@ -287,12 +433,14 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
     }
 
     c->grid  = rv9_alloc((size_t)c->cols * c->rows);
+    c->attr  = rv9_alloc((size_t)c->cols * c->rows * sizeof(cattr_t));
     c->dirty = rv9_calloc((size_t)c->rows, sizeof(bool));
     c->rowbuf = rv9_alloc_dma((size_t)c->w * c->ch * sizeof(uint16_t));
 
-    if (c->grid == NULL || c->dirty == NULL || c->rowbuf == NULL ||
-        rv9_lock_create(&c->lock) != RV9_OK) {
+    if (c->grid == NULL || c->attr == NULL || c->dirty == NULL ||
+        c->rowbuf == NULL || rv9_lock_create(&c->lock) != RV9_OK) {
         rv9_free(c->grid);
+        rv9_free(c->attr);
         rv9_free(c->dirty);
         rv9_free(c->rowbuf);
         rv9_free(c);
@@ -300,6 +448,7 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
     }
 
     memset(c->grid, ' ', (size_t)c->cols * c->rows);
+    for (int i = 0; i < c->cols * c->rows; i++) c->attr[i] = c->pen;
 
     /* Backlight as a PWM output, so it can be turned down. Its own timer
        and a channel above the ones /pwm0 hands out, so the two cannot
@@ -381,7 +530,7 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
 
     /* Clear the whole panel, margins included, so we neither inherit what
        was on it nor leave unpainted bands around the text area. */
-    for (int x = 0; x < c->w * c->ch; x++) c->rowbuf[x] = c->bg;
+    for (int x = 0; x < c->w * c->ch; x++) c->rowbuf[x] = panel_color(c->bg);
     for (int y = 0; y < c->h; y += c->ch) {
         int y2 = y + c->ch;
         if (y2 > c->h) y2 = c->h;
@@ -408,7 +557,13 @@ static rv9_io_err_t lcdcon_write(rv9_dev_t *dev, const void *buf, size_t len,
     const char *s = (const char *)buf;
 
     rv9_lock_acquire(c->lock);
+
+    /* The row the cursor is leaving has to be repainted without it. */
+    int was = c->cy;
     for (size_t i = 0; i < len; i++) putch(c, s[i]);
+    if (c->cursor_on && c->cy != was) c->dirty[was] = true;
+    if (c->cursor_on) c->dirty[c->cy] = true;
+
     flush(c);
     rv9_lock_release(c->lock);
 
@@ -441,27 +596,96 @@ static void backlight_set(lcdcon_t *c, uint32_t percent)
     ledc_update_duty(LEDC_LOW_SPEED_MODE, BL_CHANNEL);
 }
 
+static void do_clear(lcdcon_t *c, uint32_t what)
+{
+    switch (what) {
+    case RV9_CON_CLEAR_EOL:
+        blank(c, c->cy, c->cx, c->cols);
+        break;
+
+    case RV9_CON_CLEAR_EOS:
+        blank(c, c->cy, c->cx, c->cols);
+        for (int r = c->cy + 1; r < c->rows; r++) blank(c, r, 0, c->cols);
+        break;
+
+    default:
+        for (int r = 0; r < c->rows; r++) blank(c, r, 0, c->cols);
+        c->cx = c->cy = 0;
+        break;
+    }
+}
+
+/*
+ * The console settings, answered natively.
+ *
+ * This is the half of the arrangement that makes it worth having: /term has
+ * a character grid, so it moves a render position and paints a cell in a
+ * colour. SCF never gets as far as its escape sequences here, and the
+ * program that called setstat cannot tell the difference -- which is the
+ * entire claim.
+ */
 static rv9_io_err_t lcdcon_setstat(rv9_dev_t *dev, uint32_t code, void *arg)
 {
     lcdcon_t *c = (lcdcon_t *)dev->drv_state;
     if (c == NULL) return RV9_IO_ERR_IO;
+    if (arg == NULL) return RV9_IO_ERR_INVAL;
+
+    uint32_t v = *(uint32_t *)arg;
 
     if (code == RV9_LCD_SS_BRIGHTNESS) {
-        if (arg == NULL) return RV9_IO_ERR_INVAL;
-        backlight_set(c, *(uint32_t *)arg);
+        backlight_set(c, v);
         return RV9_IO_OK;
     }
 
-    if (code != RV9_LCD_SS_CLEAR) return RV9_IO_ERR_UNSUPPORTED;
-
     rv9_lock_acquire(c->lock);
-    memset(c->grid, ' ', (size_t)c->cols * c->rows);
-    c->cx = c->cy = 0;
-    for (int r = 0; r < c->rows; r++) c->dirty[r] = true;
-    flush(c);
-    rv9_lock_release(c->lock);
+    int was = c->cy;
+    rv9_io_err_t err = RV9_IO_OK;
 
-    return RV9_IO_OK;
+    switch (code) {
+    case RV9_CON_SS_CURSOR: {
+        int row = (int)((v >> 16) & 0xFFFF);
+        int col = (int)(v & 0xFFFF);
+        if (row >= c->rows) row = c->rows - 1;
+        if (col >= c->cols) col = c->cols - 1;
+        c->cy = row;
+        c->cx = col;
+        break;
+    }
+
+    case RV9_CON_SS_COLOUR:
+        c->pen.fg = (uint8_t)(v & 0xFF);
+        c->pen.bg = (uint8_t)((v >> 8) & 0xFF);
+        break;
+
+    case RV9_CON_SS_ATTR:
+        c->pen.flags = (uint8_t)(v & 7);
+        break;
+
+    case RV9_CON_SS_CURSOR_ON:
+        c->cursor_on = (v != 0);
+        break;
+
+    case RV9_CON_SS_CLEAR:
+        do_clear(c, v);
+        break;
+
+    case RV9_LCD_SS_CLEAR:
+        do_clear(c, RV9_CON_CLEAR_SCREEN);
+        break;
+
+    default:
+        err = RV9_IO_ERR_UNSUPPORTED;
+        break;
+    }
+
+    if (err == RV9_IO_OK && c->cursor_on) {
+        c->dirty[was]   = true;
+        c->dirty[c->cy] = true;
+    }
+    if (err == RV9_IO_OK) flush(c);
+
+    rv9_lock_release(c->lock);
+    return err;
 }
 
 static rv9_io_err_t lcdcon_getstat(rv9_dev_t *dev, uint32_t code, void *arg)
@@ -469,11 +693,24 @@ static rv9_io_err_t lcdcon_getstat(rv9_dev_t *dev, uint32_t code, void *arg)
     lcdcon_t *c = (lcdcon_t *)dev->drv_state;
     if (c == NULL || arg == NULL) return RV9_IO_ERR_IO;
 
-    if (code == RV9_LCD_SS_BRIGHTNESS) {
+    switch (code) {
+    case RV9_LCD_SS_BRIGHTNESS:
         *(uint32_t *)arg = c->brightness;
         return RV9_IO_OK;
+
+    case RV9_CON_GS_SIZE:
+        /* This console knows exactly how big it is, which is the one thing
+           a serial line can never say. */
+        *(uint32_t *)arg = ((uint32_t)c->rows << 16) | (uint32_t)c->cols;
+        return RV9_IO_OK;
+
+    case RV9_CON_SS_CURSOR:
+        *(uint32_t *)arg = ((uint32_t)c->cy << 16) | (uint32_t)c->cx;
+        return RV9_IO_OK;
+
+    default:
+        return RV9_IO_ERR_UNSUPPORTED;
     }
-    return RV9_IO_ERR_UNSUPPORTED;
 }
 
 static const rv9_driver_t lcdcon = {

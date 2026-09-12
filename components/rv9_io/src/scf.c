@@ -205,11 +205,55 @@ static rv9_io_err_t scf_getstat(rv9_path_t *path, uint32_t code, void *arg)
         if (arg == NULL) return RV9_IO_ERR_INVAL;
         *(uint32_t *)arg = dev->opt[OPT_AUTOLF];
         return RV9_IO_OK;
+
+    case RV9_CON_GS_SIZE: {
+        if (arg == NULL) return RV9_IO_ERR_INVAL;
+
+        /* A device that owns a screen knows its own size. Ask it first;
+           only guess for the ones that cannot possibly know. */
+        if (dev->drv->getstat) {
+            rv9_io_err_t err = dev->drv->getstat(dev, code, arg);
+            if (err != RV9_IO_ERR_UNSUPPORTED) return err;
+        }
+        *(uint32_t *)arg = (RV9_CON_DEFAULT_ROWS << 16) | RV9_CON_DEFAULT_COLS;
+        return RV9_IO_OK;
+    }
+
     default:
         /* Anything SCF does not understand belongs to the driver. */
         if (dev->drv->getstat) return dev->drv->getstat(dev, code, arg);
         return RV9_IO_ERR_UNSUPPORTED;
     }
+}
+
+/*
+ * Console settings, for a driver that has no opinion about them.
+ *
+ * The driver gets asked first, always: a device with a character grid and a
+ * font renderer knows what a cursor is far better than a stream of escape
+ * codes does, and it is the one that should decide. Only when it declines
+ * do we assume there is a terminal at the other end of the wire and write
+ * the sequence that means the same thing.
+ *
+ * This is why adding a character driver gets cursor addressing for free --
+ * the same claim SCF already makes about line discipline, extended to the
+ * screen.
+ */
+static rv9_io_err_t scf_console_setstat(rv9_dev_t *dev, uint32_t code,
+                                        uint32_t value)
+{
+    if (dev->drv->setstat) {
+        uint32_t v = value;
+        rv9_io_err_t err = dev->drv->setstat(dev, code, &v);
+        if (err != RV9_IO_ERR_UNSUPPORTED) return err;
+    }
+
+    char seq[RV9_CON_ANSI_MAX];
+    size_t n = rv9_con_ansi(seq, sizeof(seq), code, value);
+    if (n == 0 || dev->drv->write == NULL) return RV9_IO_ERR_UNSUPPORTED;
+
+    size_t moved = 0;
+    return dev->drv->write(dev, seq, n, &moved);
 }
 
 static rv9_io_err_t scf_setstat(rv9_path_t *path, uint32_t code, void *arg)
@@ -225,6 +269,15 @@ static rv9_io_err_t scf_setstat(rv9_path_t *path, uint32_t code, void *arg)
         if (arg == NULL) return RV9_IO_ERR_INVAL;
         dev->opt[OPT_AUTOLF] = *(uint32_t *)arg;
         return RV9_IO_OK;
+
+    case RV9_CON_SS_CURSOR:
+    case RV9_CON_SS_COLOUR:
+    case RV9_CON_SS_ATTR:
+    case RV9_CON_SS_CLEAR:
+    case RV9_CON_SS_CURSOR_ON:
+        if (arg == NULL) return RV9_IO_ERR_INVAL;
+        return scf_console_setstat(dev, code, *(uint32_t *)arg);
+
     default:
         if (dev->drv->setstat) return dev->drv->setstat(dev, code, arg);
         return RV9_IO_ERR_UNSUPPORTED;
