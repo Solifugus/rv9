@@ -175,6 +175,17 @@ rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
     uint32_t *stack = (uint32_t *)s_alloc(words * 4);
     if (stack == NULL) return NULL;
 
+    /*
+     * Paint it, so that how much was used can be asked afterwards.
+     *
+     * Without this the only stack measurement available is "it did not
+     * crash", which is not a measurement -- there is no overflow detection
+     * here, so a thread that overran quietly corrupted the heap and carried
+     * on. A pattern and a scan turn a guess into a number, which is what
+     * anyone sizing a stack actually needs.
+     */
+    for (size_t i = 0; i < words; i++) stack[i] = RV9K_STACK_PAINT;
+
     t->stack       = stack;
     t->stack_words = words;
 
@@ -513,6 +524,29 @@ void rv9k_serve(void)
         rv9_ctx_switch(&s_host_sp, next->sp);
         s_current = NULL;
     }
+}
+
+/*
+ * Bytes of this thread's stack never written.
+ *
+ * Counted from the low end, where a stack grows down to: the first word
+ * still holding the pattern marks the deepest the thread has ever been.
+ * Zero means it has touched every byte it was given, which means it has
+ * very likely gone past them.
+ */
+size_t rv9k_stack_unused(const rv9k_thread_t *t)
+{
+    if (t == NULL || t->stack == NULL) return 0;
+
+    size_t i = 0;
+    while (i < t->stack_words && t->stack[i] == RV9K_STACK_PAINT) i++;
+    return i * sizeof(uint32_t);
+}
+
+size_t rv9k_stack_size(const rv9k_thread_t *t)
+{
+    if (t == NULL) return 0;
+    return t->stack_words * sizeof(uint32_t);
 }
 
 void rv9k_yield(void)

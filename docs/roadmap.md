@@ -445,6 +445,20 @@ control layer is late if it is late.
 - The layering check from phase 0 is what makes phase 7 possible at all. If it
   is ever disabled "just this once", the project quietly becomes a rewrite.
 
+## Memory
+
+Measured, not estimated: **docs/memory.md**. The short version is that WiFi
+is 52 KB, the RAM disk 17 KB, and stacks are eight times larger than
+anything uses — 26.6 KB given across four processes, 3.9 KB touched. A
+module can now declare `stack_size`, and `stacks` reports what each process
+was given against what it has ever used.
+
+The gap that matters: **there is no memory reserve of any kind.** Running
+the window, an SSH session and a control loop together exhausts the heap
+and ESP-IDF aborts inside the WiFi PHY — a reboot, from a layer RV-9 does
+not own. A floor below which ordinary allocation is refused is the first
+thing to build before anything depends on this machine staying up.
+
 ## Immediate next step
 
 **Phase 5. Storage: the `sdspi` driver and `/sd0`**, when the card arrives.

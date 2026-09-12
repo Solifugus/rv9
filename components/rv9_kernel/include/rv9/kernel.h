@@ -179,6 +179,13 @@ void rv9k_run(void);
  * an idle kernel would spin at whatever priority its host task has.
  */
 void rv9k_set_idle_hook(void (*fn)(void));
+
+/* Stacks are painted at creation so their use can be measured rather than
+   guessed. Unused counts from the low end; zero means it has run out. */
+#define RV9K_STACK_PAINT 0xA5C3A5C3u
+
+size_t rv9k_stack_unused(const rv9k_thread_t *t);
+size_t rv9k_stack_size(const rv9k_thread_t *t);
 void rv9k_serve(void);
 
 /* Stop scheduling other threads. Nesting counts. */

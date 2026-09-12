@@ -8,6 +8,15 @@
 
 #include <string.h>
 
+/* Modules learn about fork failures as these, negated; the values are ABI
+   and declared separately in rv9/module.h, which a module may include and
+   this header may not be. */
+_Static_assert((int)RV9_PROC_ERR_NOTFOUND == RV9_PE_NOTFOUND, "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_NOMEM    == RV9_PE_NOMEM,    "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_MODULE   == RV9_PE_MODULE,   "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_TIMEOUT  == RV9_PE_TIMEOUT,  "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_INVAL    == RV9_PE_INVAL,    "ABI drift");
+
 #include "esp_log.h"
 
 static const char *TAG = "rv9-proc";
@@ -390,10 +399,46 @@ static int proc_chain_op(const char *module)
     return rv9_proc_chain(module) == RV9_PROC_OK ? 0 : -1;
 }
 
+/*
+ * Stacks, per live process.
+ *
+ * Only the living: a dead process has released its stack, and reporting a
+ * measurement of memory that no longer exists would be worse than
+ * reporting nothing.
+ */
+static int proc_stacks_op(void *buf, uint32_t len)
+{
+    rv9_lock_acquire(s_lock);
+
+    uint32_t max = buf ? len / sizeof(rv9_sys_stack_t) : 0;
+    rv9_sys_stack_t *out = (rv9_sys_stack_t *)buf;
+    uint32_t n = 0;
+
+    for (rv9_proc_t *p = s_procs; p; p = p->next) {
+        if (p->state == RV9_PROC_EXITED || p->task == NULL) continue;
+        if (buf == NULL) { n++; continue; }
+        if (n >= max) break;
+
+        size_t size = 0, unused = 0;
+        rv9_task_stack(p->task, &size, &unused);
+
+        memset(&out[n], 0, sizeof(out[n]));
+        out[n].pid          = (uint16_t)p->pid;
+        strncpy(out[n].name, p->name, sizeof(out[n].name) - 1);
+        out[n].stack_size   = (uint32_t)size;
+        out[n].stack_unused = (uint32_t)unused;
+        n++;
+    }
+
+    rv9_lock_release(s_lock);
+    return (int)n;
+}
+
 static const rv9_mod_proc_ops_t s_mod_proc_ops = {
     .fork  = proc_fork_op,
     .wait  = proc_wait_op,
     .procs = proc_list_op,
+    .stacks = proc_stacks_op,
     .chain = proc_chain_op,
     .fork_arg = proc_fork_arg_op,
     .fork_rt  = proc_fork_rt_op,
@@ -475,7 +520,12 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
     rv9_mod_err_t merr = rv9_mod_link(module_name, &mod);
     if (merr != RV9_MOD_OK) {
         ESP_LOGE(TAG, "fork '%s': %s", module_name, rv9_mod_strerror(merr));
-        return RV9_PROC_ERR_MODULE;
+
+        /* Out of room is not the same as unloadable, and the caller can
+           only act sensibly on the difference: one says free something,
+           the other says the module is wrong. */
+        return (merr == RV9_MOD_ERR_NOMEM) ? RV9_PROC_ERR_NOMEM
+                                           : RV9_PROC_ERR_MODULE;
     }
 
     const rv9_mod_header_t *h = (const rv9_mod_header_t *)mod->image;

@@ -201,6 +201,16 @@ rv9_err_t rv9_task_create(rv9_task_fn fn, const char *name, size_t stack_bytes,
     return RV9_OK;
 }
 
+rv9_err_t rv9_task_stack(rv9_task_t task, size_t *size, size_t *unused)
+{
+    if (task == NULL) return RV9_ERR_INVAL;
+
+    const rv9k_thread_t *t = (const rv9k_thread_t *)task;
+    if (size)   *size   = rv9k_stack_size(t);
+    if (unused) *unused = rv9k_stack_unused(t);
+    return RV9_OK;
+}
+
 void rv9_task_delete(rv9_task_t task)
 {
     if (task != NULL) {

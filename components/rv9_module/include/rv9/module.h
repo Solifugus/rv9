@@ -295,6 +295,18 @@ typedef struct {
 #define RV9_IOE_EXISTS      10   /* already there, or already in use */
 #define RV9_IOE_TIMEOUT     11
 
+/*
+ * And the same for fork, negated. Distinguishing these matters more than
+ * it looks: a shell that reports every failure as "no such module" sends
+ * you looking for a missing file when the machine has simply run out of
+ * memory, which is a different problem with a different fix.
+ */
+#define RV9_PE_NOTFOUND      1   /* no module of that name */
+#define RV9_PE_NOMEM         2   /* no room for its stack or statics */
+#define RV9_PE_MODULE        3   /* found, but not loadable */
+#define RV9_PE_TIMEOUT       4
+#define RV9_PE_INVAL         5
+
 /* Generic getstat/setstat codes a module may use. */
 #define RV9_SS_ECHO        1
 #define RV9_SS_AUTOLF      2
@@ -428,6 +440,7 @@ typedef struct {
 #define RV9_SYS_MODULES  2
 #define RV9_SYS_PROCS    3
 #define RV9_SYS_RT       4     /* rv9_sys_rt_t, one per real-time task */
+#define RV9_SYS_STACK    5     /* rv9_sys_stack_t, one per live process */
 
 typedef struct __attribute__((packed)) {
     uint32_t heap_free;
@@ -480,6 +493,26 @@ typedef struct __attribute__((packed)) {
     uint32_t last_exec_us;
     uint32_t min_interval_us;  /* shortest gap actually seen */
 } rv9_sys_rt_t;
+
+/*
+ * What a process's stack cost and what it actually used.
+ *
+ * A separate record rather than fields on rv9_sys_proc_t, which the kernel
+ * fills into a buffer the module supplies and therefore cannot grow --
+ * the same rule that froze rv9_rt_report_t.
+ *
+ * `unused` is measured, not estimated: thread stacks are painted at
+ * creation and scanned from the low end. Zero unused does not mean it fits
+ * exactly; it means the thread has touched every byte it was given and has
+ * very likely gone past them.
+ */
+typedef struct __attribute__((packed)) {
+    uint16_t pid;
+    uint16_t reserved;
+    char     name[32];
+    uint32_t stack_size;
+    uint32_t stack_unused;
+} rv9_sys_stack_t;
 
 typedef int (*rv9_mod_entry_fn)(const rv9_mod_env_t *env);
 
@@ -598,6 +631,7 @@ typedef struct {
     int (*fork)(const char *module, int priority);
     int (*wait)(int pid, int *status, uint32_t timeout_ms);
     int (*procs)(void *buf, uint32_t len);   /* fills rv9_sys_proc_t records */
+    int (*stacks)(void *buf, uint32_t len);  /* fills rv9_sys_stack_t records */
     int (*chain)(const char *module);
     int (*fork_arg)(const char *module, int priority, const char *arg);
     int (*fork_rt)(const char *module, uint32_t period_us, const char *arg);

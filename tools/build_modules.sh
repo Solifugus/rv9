@@ -79,6 +79,7 @@ for dir in "$ROOT"/modules/*/; do
 
     # Per-module build knobs live in the module's own build.conf.
     static_size=0
+    stack_size=0        # 0 lets the loader decide (PROC_DEFAULT_STACK)
     revision=0
     mtype=program
     [[ -f "$dir/build.conf" ]] && source "$dir/build.conf"
@@ -111,6 +112,7 @@ for dir in "$ROOT"/modules/*/; do
         --name "$name" \
         --type "$mtype" \
         --static-size "$static_size" \
+        --stack-size "$stack_size" \
         --revision "$revision" \
         "$OUT/$name.bin" "$OUT/$name.mod"
 

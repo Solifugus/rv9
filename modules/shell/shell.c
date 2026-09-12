@@ -130,8 +130,16 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
     }
 
     if (pid < 0) {
+        /* Which failure it was. "No such module" for an exhausted heap is
+           a message that sends you hunting for the wrong thing. */
         m_say(env, RV9_STDOUT, name);
-        m_say(env, RV9_STDOUT, ": no such module\n");
+        if (pid == -RV9_PE_NOMEM) {
+            m_say(env, RV9_STDOUT, ": no memory to start it\n");
+        } else if (pid == -RV9_PE_MODULE) {
+            m_say(env, RV9_STDOUT, ": not loadable\n");
+        } else {
+            m_say(env, RV9_STDOUT, ": no such module\n");
+        }
     } else if (status != 0) {
         m_say(env, RV9_STDOUT, name);
         m_say(env, RV9_STDOUT, " returned ");

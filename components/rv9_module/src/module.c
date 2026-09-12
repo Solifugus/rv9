@@ -483,6 +483,12 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
         return (int)n;
     }
 
+    case RV9_SYS_STACK:
+        if (s_proc_ops && s_proc_ops->stacks) {
+            return s_proc_ops->stacks(buf, len);
+        }
+        return -1;
+
     case RV9_SYS_PROCS:
         if (s_proc_ops && s_proc_ops->procs) {
             return s_proc_ops->procs(buf, len);

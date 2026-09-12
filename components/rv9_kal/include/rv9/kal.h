@@ -118,6 +118,17 @@ rv9_err_t rv9_task_create(rv9_task_fn fn, const char *name, size_t stack_bytes,
 
 /* Passing NULL deletes the calling task, which does not return. */
 void      rv9_task_delete(rv9_task_t task);
+
+/*
+ * How big this task's stack is and how much of it has never been touched.
+ *
+ * Stacks are the dominant per-process cost -- everything else about a
+ * process is about a kilobyte -- so sizing them by guesswork wastes most
+ * of a small machine's memory or corrupts it. There is no overflow
+ * detection here, which makes "it did not crash" worthless as evidence;
+ * this is the measurement that replaces it.
+ */
+rv9_err_t rv9_task_stack(rv9_task_t task, size_t *size, size_t *unused);
 rv9_task_t rv9_task_self(void);
 void      rv9_task_yield(void);
 void      rv9_task_delay_ms(uint32_t ms);

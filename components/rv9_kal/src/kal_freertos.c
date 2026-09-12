@@ -91,6 +91,20 @@ rv9_err_t rv9_kal_start(rv9_task_fn fn, const char *name, size_t stack_bytes,
     return rv9_task_create(fn, name, stack_bytes, arg, priority, NULL);
 }
 
+rv9_err_t rv9_task_stack(rv9_task_t task, size_t *size, size_t *unused)
+{
+    if (task == NULL) return RV9_ERR_INVAL;
+
+    /* FreeRTOS keeps only the low-water mark, not the size, so the size is
+       reported as unknown rather than invented. */
+    if (size)   *size   = 0;
+    if (unused) {
+        *unused = uxTaskGetStackHighWaterMark((TaskHandle_t)task)
+                  * sizeof(StackType_t);
+    }
+    return RV9_OK;
+}
+
 void rv9_task_delete(rv9_task_t task)
 {
     vTaskDelete((TaskHandle_t)task);   /* NULL means "this task" */
