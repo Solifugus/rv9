@@ -61,17 +61,16 @@ static bool                   s_landscape;
 static uint8_t                s_brightness = 100;
 static bool                   s_up;
 static const void            *s_owner;
-static rv9_sem_t              s_done;
+static volatile uint32_t      s_done_count;
 
-/* Runs in the SPI interrupt. */
+/* Runs in the SPI interrupt, once per completed colour transfer. */
 static bool trans_done(esp_lcd_panel_io_handle_t io,
                        esp_lcd_panel_io_event_data_t *ev, void *ctx)
 {
     (void)io; (void)ev; (void)ctx;
 
-    bool woken = false;
-    rv9_sem_give_from_isr(s_done, &woken);
-    return woken;
+    s_done_count++;
+    return false;
 }
 
 void rv9_panel_backlight(uint32_t percent)
@@ -150,10 +149,6 @@ rv9_io_err_t rv9_panel_open(bool landscape, int *w, int *h)
         return RV9_IO_ERR_IO;
     }
 
-    /* Told when a transfer has actually finished, so a caller can reuse
-       the buffer it just handed over. See rv9_panel_blit. */
-    if (rv9_sem_create(1, 0, &s_done) != RV9_OK) return RV9_IO_ERR_NOMEM;
-
     esp_lcd_panel_io_spi_config_t io_cfg = {
         .cs_gpio_num = PIN_CS,
         .dc_gpio_num = PIN_DC,
@@ -224,19 +219,23 @@ bool rv9_panel_take(const void *owner)
  * esp_lcd *queues* a transfer and returns; the DMA engine reads the
  * caller's buffer afterwards. Every caller here paints into one buffer and
  * reuses it immediately, so returning early means the next band is written
- * over the top of the one still being sent -- which appears as horizontal
- * bands of wrong pixels across the picture, and is invisible when
- * consecutive blits happen to hold similar content, as a text console's
- * usually do.
+ * over the one still being sent -- horizontal bands of wrong pixels across
+ * the picture, and invisible when consecutive blits happen to hold similar
+ * content, as a text console's usually do.
  *
- * So the blit blocks until the transfer completes. That costs the SPI time
- * it was always going to cost -- about 2.6 ms for a full-width strip at
- * 40 MHz -- and makes the buffer safe to touch again on return, which is
- * what every caller already assumed.
+ * The wait is a spin on a counter the completion interrupt bumps, rather
+ * than a semaphore. A semaphore is the obvious choice and it did not work:
+ * the give from the interrupt never woke the waiter, and every blit sat out
+ * its full timeout -- 200 ms, or 1000 ms when the timeout was raised, which
+ * is how we know it was the wakeup and not the transfer. The interrupt was
+ * firing promptly the whole time; only the wakeup went missing. That is
+ * worth returning to, because the same primitive is used elsewhere.
  *
- * Under the lock, too: the console and the window draw from different
- * processes, and two interleaved transfers produce a panel showing
- * neither.
+ * What is here instead is exact: a full-width five-row strip takes 636 us
+ * at 40 MHz, and that is what the spin measures. Burning those microseconds
+ * is the cost of the transfer either way -- the SPI has to happen before
+ * the buffer is safe to touch. The deadline is only there so a wedged
+ * peripheral cannot hang the system.
  */
 void rv9_panel_blit(int x0, int y0, int x1, int y1, const uint16_t *px)
 {
@@ -245,8 +244,20 @@ void rv9_panel_blit(int x0, int y0, int x1, int y1, const uint16_t *px)
 
     rv9_lock_acquire(s_lock);
 
+    uint32_t want = s_done_count + 1;
+
     if (esp_lcd_panel_draw_bitmap(s_panel, x0, y0, x1, y1, px) == ESP_OK) {
-        rv9_sem_take(s_done, 200);
+        uint64_t deadline = rv9_time_us() + 50000;
+
+        while (s_done_count != want && rv9_time_us() < deadline) { }
+
+        if (s_done_count != want) {
+            static bool warned;
+            if (!warned) {
+                warned = true;
+                ESP_LOGW(TAG, "a panel transfer never completed");
+            }
+        }
     }
 
     rv9_lock_release(s_lock);

@@ -51,6 +51,10 @@ static const char *TAG = "rv9-lcdcon";
 
 /* Glyphs are already 10x20 and anti-aliased, so 1x is the normal case.
    Scaling above that magnifies an already-large cell. */
+/* Glyph rows expanded per blit. GLYPH_H is 20; four slices of five keep
+   the buffer at a quarter of what a whole row would need. */
+#define GLYPH_CHUNK    5
+
 #define DEFAULT_SCALE  1
 #define MAX_SCALE      3
 
@@ -225,21 +229,29 @@ static void use_colours(lcdcon_t *c, uint16_t fg, uint16_t bg)
 }
 
 /*
- * Expand one text row into pixels, magnifying each glyph by c->scale.
+ * Expand part of a text row into pixels, magnifying each glyph by c->scale.
  *
  * Columns are the outer loop, which is the opposite of the obvious order
  * and the reason is colour: every cell may have its own pair, and the
  * 16-shade ramp that makes an anti-aliased glyph cheap has to be built per
  * pair. Walking a column at a time means building it once per run of equal
  * colour instead of once per scanline.
+ *
+ * Only GLYPH_CHUNK glyph rows are expanded at a time. A whole 20-pixel row
+ * of a 320-wide panel is 12.8 KB of buffer held from boot to shutdown --
+ * comfortably the largest single allocation in the system, on a board with
+ * about forty free. Painting it in four slices costs three extra blits and
+ * three extra shade-ramp rebuilds per text row, and gives nine and a half
+ * kilobytes back to everything else, permanently.
  */
-static void paint_row(lcdcon_t *c, int row)
+static void paint_slice(lcdcon_t *c, int row, int g0, int g1)
 {
     uint16_t *px = c->rowbuf;
+    int       gh = g1 - g0;
 
     /* Margins and the gaps between cells belong to nobody, so they take the
        console's own background. */
-    for (int gy = 0; gy < GLYPH_H; gy++) {
+    for (int gy = 0; gy < gh; gy++) {
         uint16_t *line = &px[(gy * c->scale) * c->w];
         uint16_t bg = panel_color(c->bg);
         for (int x = 0; x < c->w; x++) line[x] = bg;
@@ -264,9 +276,9 @@ static void paint_row(lcdcon_t *c, int row)
         cell_colours(c, &a, &fg, &bg);
         use_colours(c, fg, bg);
 
-        for (int gy = 0; gy < GLYPH_H; gy++) {
+        for (int gy = g0; gy < g1; gy++) {
             const unsigned char *g = rv9_font[ch - FONT_FIRST][gy];
-            uint16_t *out = &px[(gy * c->scale) * c->w + c->mx + col * c->cw];
+            uint16_t *out = &px[((gy - g0) * c->scale) * c->w + c->mx + col * c->cw];
 
             /* The last glyph row is the underline, when there is one: full
                coverage across the cell rather than the glyph's own shape. */
@@ -282,7 +294,7 @@ static void paint_row(lcdcon_t *c, int row)
     }
 
     /* Replicate each expanded line downward rather than recomputing it. */
-    for (int gy = 0; gy < GLYPH_H && c->scale > 1; gy++) {
+    for (int gy = 0; gy < gh && c->scale > 1; gy++) {
         uint16_t *line = &px[(gy * c->scale) * c->w];
         for (int sy = 1; sy < c->scale; sy++) {
             memcpy(&px[(gy * c->scale + sy) * c->w], line,
@@ -290,8 +302,17 @@ static void paint_row(lcdcon_t *c, int row)
         }
     }
 
-    int y = c->my + row * c->ch;
-    rv9_panel_blit(0, y, c->w, y + c->ch, c->rowbuf);
+    int y = c->my + row * c->ch + g0 * c->scale;
+    rv9_panel_blit(0, y, c->w, y + gh * c->scale, c->rowbuf);
+}
+
+static void paint_row(lcdcon_t *c, int row)
+{
+    for (int g0 = 0; g0 < GLYPH_H; g0 += GLYPH_CHUNK) {
+        int g1 = g0 + GLYPH_CHUNK;
+        if (g1 > GLYPH_H) g1 = GLYPH_H;
+        paint_slice(c, row, g0, g1);
+    }
 }
 
 static void flush(lcdcon_t *c)
@@ -420,7 +441,8 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
     c->grid  = rv9_alloc((size_t)c->cols * c->rows);
     c->attr  = rv9_alloc((size_t)c->cols * c->rows * sizeof(cattr_t));
     c->dirty = rv9_calloc((size_t)c->rows, sizeof(bool));
-    c->rowbuf = rv9_alloc_dma((size_t)c->w * c->ch * sizeof(uint16_t));
+    c->rowbuf = rv9_alloc_dma((size_t)c->w * GLYPH_CHUNK * c->scale *
+                              sizeof(uint16_t));
 
     if (c->grid == NULL || c->attr == NULL || c->dirty == NULL ||
         c->rowbuf == NULL || rv9_lock_create(&c->lock) != RV9_OK) {
@@ -449,10 +471,15 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
     rv9_panel_backlight(100);
 
     /* Clear the whole panel, margins included, so we neither inherit what
-       was on it nor leave unpainted bands around the text area. */
-    for (int x = 0; x < c->w * c->ch; x++) c->rowbuf[x] = panel_color(c->bg);
-    for (int y = 0; y < c->h; y += c->ch) {
-        int y2 = y + c->ch;
+       was on it nor leave unpainted bands around the text area.
+       A strip at a time, because that is how big the buffer is -- the
+       clear and the buffer have to agree, and when they stopped agreeing
+       this wrote four times past the end of it. */
+    int strip = GLYPH_CHUNK * c->scale;
+
+    for (int x = 0; x < c->w * strip; x++) c->rowbuf[x] = panel_color(c->bg);
+    for (int y = 0; y < c->h; y += strip) {
+        int y2 = y + strip;
         if (y2 > c->h) y2 = c->h;
         rv9_panel_blit(0, y, c->w, y2, c->rowbuf);
     }
