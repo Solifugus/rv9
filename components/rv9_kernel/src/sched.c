@@ -19,6 +19,7 @@ extern void rv9_thread_trampoline(void);
 void rv9_thread_exited(void);
 
 static void reschedule(void);
+static rv9k_thread_t *waitq_pop_best(rv9k_waitq_t *wq);
 
 static rv9k_thread_t  s_threads[RV9K_MAX_THREADS];
 static rv9k_thread_t *s_current;
@@ -30,6 +31,93 @@ static uint64_t       s_blocks;
 static bool           s_running;
 static uint32_t       s_sched_lock;
 static void         (*s_idle_hook)(void);
+
+/* ------------------------------------------------------------------ */
+/* Interrupts                                                          */
+/*                                                                     */
+/* A kernel masks interrupts itself rather than borrowing somebody      */
+/* else's critical section -- this one is below the seam and has no     */
+/* host to ask. Single core, so clearing MIE is mutual exclusion        */
+/* against every interrupt handler, and the sections here are a         */
+/* handful of instructions long.                                       */
+/* ------------------------------------------------------------------ */
+
+static inline uint32_t irq_save(void)
+{
+    uint32_t prev;
+    __asm__ volatile ("csrrci %0, mstatus, 8" : "=r"(prev) :: "memory");
+    return prev;
+}
+
+static inline void irq_restore(uint32_t prev)
+{
+    /* Set MIE only if it was set: restoring the whole register would
+       clobber whatever else has changed since. */
+    if (prev & 8u) __asm__ volatile ("csrsi mstatus, 8" ::: "memory");
+}
+
+/* ------------------------------------------------------------------ */
+/* Gives that arrive from an interrupt                                 */
+/*                                                                     */
+/* An interrupt cannot wake a thread directly. Waking means unlinking   */
+/* it from a wait queue and putting it on the ready list, and an        */
+/* interrupt landing in the middle of the scheduler doing the same      */
+/* thing to the same list leaves it in pieces. Making every queue       */
+/* operation interrupt-safe was the obvious reading of the problem and  */
+/* is the expensive one.                                               */
+/*                                                                     */
+/* It is also unnecessary. The *count* is what a waiter is waiting on,  */
+/* and an interrupt can raise that safely in four instructions. The     */
+/* wake is only how a sleeping thread finds out, so it can be left as   */
+/* a note for the kernel to act on in thread context, where the lists   */
+/* are nobody else's business.                                         */
+/*                                                                     */
+/* So a thread about to block never blocks -- it sees the count and     */
+/* carries on -- and one already blocked is woken at the next turn of   */
+/* the scheduler. Which makes the latency of this a scheduling round,   */
+/* not an interrupt: right for a semaphore, and the reason real-time    */
+/* work does not come through here at all.                             */
+/* ------------------------------------------------------------------ */
+
+#define PENDING_MAX 16
+
+static rv9k_waitq_t  *s_pending[PENDING_MAX];
+static volatile uint32_t s_pend_head, s_pend_tail;
+static volatile uint32_t s_pend_lost;      /* notes the ring had no room for */
+
+/* Caller must hold the interrupt mask. */
+static void pend_wake(rv9k_waitq_t *wq)
+{
+    if (wq->head == NULL) return;          /* nobody to wake */
+
+    uint32_t next = (s_pend_head + 1u) % PENDING_MAX;
+    if (next != s_pend_tail) {
+        s_pending[s_pend_head] = wq;
+        s_pend_head = next;
+    } else {
+        /* The count or the item still landed, so nothing is lost and
+           nobody blocking from here on misses it; only a thread already
+           asleep waits for the next one. Counted rather than hidden. */
+        s_pend_lost++;
+    }
+}
+
+static void drain_pending(void)
+{
+    for (;;) {
+        uint32_t st = irq_save();
+
+        if (s_pend_tail == s_pend_head) { irq_restore(st); return; }
+
+        rv9k_waitq_t *wq = s_pending[s_pend_tail];
+        s_pend_tail = (s_pend_tail + 1u) % PENDING_MAX;
+
+        irq_restore(st);
+
+        /* Thread context now, so the wait queue is safe to touch. */
+        if (wq != NULL) waitq_pop_best(wq);
+    }
+}
 static void        *(*s_alloc)(size_t);
 static void         (*s_release)(void *);
 
@@ -321,6 +409,8 @@ static bool any_alive(void)
 /* Give up the CPU. Called from a thread; returns when it runs again. */
 static void reschedule(void)
 {
+    drain_pending();
+
     /* Held off. The caller keeps the CPU; whatever it wanted to happen
        happens when the lock is released. */
     if (s_sched_lock > 0) return;
@@ -403,6 +493,7 @@ void rv9k_serve(void)
     s_running = true;
 
     for (;;) {
+        drain_pending();
         reap_dead();
         wake_sleepers();
         age_threads();
@@ -555,10 +646,12 @@ bool rv9k_sem_take(rv9k_sem_t *sem, uint32_t timeout_ms)
     if (sem == NULL) return false;
 
     for (;;) {
-        if (sem->count > 0) {
-            sem->count--;
-            return true;
-        }
+        uint32_t st = irq_save();
+        bool got = (sem->count > 0);
+        if (got) sem->count--;
+        irq_restore(st);
+
+        if (got) return true;
         if (timeout_ms == 0 || s_current == NULL) return false;
 
         /* Sleep on the queue. Woken either by a give or by the deadline;
@@ -571,10 +664,41 @@ bool rv9k_sem_take(rv9k_sem_t *sem, uint32_t timeout_ms)
 void rv9k_sem_give(rv9k_sem_t *sem)
 {
     if (sem == NULL) return;
+
+    uint32_t st = irq_save();
     if (sem->max <= 0 || sem->count < sem->max) sem->count++;
+    irq_restore(st);
 
     waitq_pop_best(&sem->waiters);
 }
+
+/*
+ * Give from an interrupt. Raises the count now and leaves the waking to
+ * the kernel; see the note above the pending ring.
+ *
+ * `woken` reports whether anything was actually waiting, which is what a
+ * handler uses to decide whether to ask for a reschedule on its way out.
+ */
+bool rv9k_sem_give_from_isr(rv9k_sem_t *sem, bool *woken)
+{
+    if (woken) *woken = false;
+    if (sem == NULL) return false;
+
+    uint32_t st = irq_save();
+
+    bool room = (sem->max <= 0 || sem->count < sem->max);
+    if (room) sem->count++;
+
+    bool waiting = (sem->waiters.head != NULL);
+    pend_wake(&sem->waiters);
+
+    irq_restore(st);
+
+    if (woken) *woken = waiting;
+    return room;
+}
+
+uint32_t rv9k_pending_lost(void) { return s_pend_lost; }
 
 /* ------------------------------------------------------------------ */
 /* Mutexes                                                             */
@@ -646,11 +770,17 @@ bool rv9k_queue_send(rv9k_queue_t *q, const void *item, uint32_t timeout_ms)
     if (q == NULL || item == NULL) return false;
 
     for (;;) {
-        if (q->count < q->capacity) {
+        uint32_t st = irq_save();
+        bool room = (q->count < q->capacity);
+        if (room) {
             copy_bytes(q->storage + (size_t)q->tail * q->item_size,
                        (const uint8_t *)item, q->item_size);
             q->tail = (q->tail + 1) % q->capacity;
             q->count++;
+        }
+        irq_restore(st);
+
+        if (room) {
             waitq_pop_best(&q->not_empty);
             return true;
         }
@@ -659,17 +789,57 @@ bool rv9k_queue_send(rv9k_queue_t *q, const void *item, uint32_t timeout_ms)
     }
 }
 
+/*
+ * Send from an interrupt. Same bargain as the semaphore: the item lands
+ * now, the waking waits for thread context.
+ *
+ * Returns false when the queue is full, which for a handler means the item
+ * is gone -- there is nowhere to put it and nothing useful to do about it
+ * inside an interrupt.
+ */
+bool rv9k_queue_send_from_isr(rv9k_queue_t *q, const void *item, bool *woken)
+{
+    if (woken) *woken = false;
+    if (q == NULL || item == NULL) return false;
+
+    uint32_t st = irq_save();
+
+    bool room = (q->count < q->capacity);
+    if (room) {
+        copy_bytes(q->storage + (size_t)q->tail * q->item_size,
+                   (const uint8_t *)item, q->item_size);
+        q->tail = (q->tail + 1) % q->capacity;
+        q->count++;
+    }
+
+    bool waiting = (q->not_empty.head != NULL);
+    if (room) pend_wake(&q->not_empty);
+
+    irq_restore(st);
+
+    if (woken) *woken = waiting && room;
+    return room;
+}
+
 bool rv9k_queue_recv(rv9k_queue_t *q, void *item, uint32_t timeout_ms)
 {
     if (q == NULL || item == NULL) return false;
 
     for (;;) {
-        if (q->count > 0) {
+        /* Masked, because an interrupt may be filling this queue at the
+           same time and count, head and tail are shared with it. */
+        uint32_t st = irq_save();
+        bool have = (q->count > 0);
+        if (have) {
             copy_bytes((uint8_t *)item,
                        q->storage + (size_t)q->head * q->item_size,
                        q->item_size);
             q->head = (q->head + 1) % q->capacity;
             q->count--;
+        }
+        irq_restore(st);
+
+        if (have) {
             waitq_pop_best(&q->not_full);
             return true;
         }

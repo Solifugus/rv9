@@ -203,12 +203,16 @@ why it comes here and not earlier.
 
 ## Phase 7 — The native kernel  ◐ steps 1-2 of 5 done
 
-**Known gaps in the native backend:** `rv9_sem_give_from_isr` and
-`rv9_queue_send_from_isr` are not implemented -- the kernel's wait queues
-are not interrupt-safe -- and refuse with `RV9_ERR_UNSUPPORTED`. Both now
-carry `RV9_MUST_CHECK`, so a caller that ignores the refusal fails to
-build. Interrupt-driven real-time work goes through `kal_rt.c`, which is
-hosted by the preemptive scheduler either way and is unaffected.
+**Interrupt-safe primitives — done**, see design §20.
+`rv9_sem_give_from_isr` and `rv9_queue_send_from_isr` work under the native
+kernel now. An interrupt raises the count and leaves a note; the kernel
+does the waking in thread context, so the wait queues never have to be
+interrupt-safe. Latency is a scheduling round rather than an interrupt,
+which is right for a semaphore and nowhere near enough for real-time work
+— that still goes through `kal_rt.c` and measures in microseconds.
+
+Both also carry `RV9_MUST_CHECK`: a caller that ignores a refusal fails to
+build. That was the actual bug behind a fourteen-second boot.
 
 
 **Goal:** remove FreeRTOS. The year-of-evenings phase.

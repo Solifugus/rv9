@@ -217,6 +217,25 @@ bool rv9k_sem_take(rv9k_sem_t *sem, uint32_t timeout_ms);
 void rv9k_sem_give(rv9k_sem_t *sem);
 
 /*
+ * Give from an interrupt handler.
+ *
+ * The count rises immediately; the wake happens at the next turn of the
+ * scheduler, because unlinking a thread from a wait queue is not
+ * something an interrupt may do to a cooperative kernel. A thread about
+ * to block therefore never blocks, and one already asleep wakes within a
+ * scheduling round rather than within microseconds -- which is what a
+ * semaphore is for. Real-time work does not come through here.
+ *
+ * Returns false only if the count was already at its maximum.
+ */
+bool rv9k_sem_give_from_isr(rv9k_sem_t *sem, bool *woken);
+
+/* Gives from an interrupt that found the pending ring full. Should be
+   zero; a non-zero value means a sleeping thread waited longer than it
+   had to. */
+uint32_t rv9k_pending_lost(void);
+
+/*
  * A mutex is a binary semaphore that remembers its owner, so that a
  * recursive lock does not deadlock against itself.
  */
@@ -250,6 +269,12 @@ void     rv9k_queue_init(rv9k_queue_t *q, void *storage, uint32_t capacity,
                          uint32_t item_size);
 bool     rv9k_queue_send(rv9k_queue_t *q, const void *item, uint32_t timeout_ms);
 bool     rv9k_queue_recv(rv9k_queue_t *q, void *item, uint32_t timeout_ms);
+
+/* Send from an interrupt handler. The item lands now; a waiting receiver
+   is woken at the next turn of the scheduler. False means the queue was
+   full and the item was dropped. See rv9k_sem_give_from_isr. */
+bool     rv9k_queue_send_from_isr(rv9k_queue_t *q, const void *item,
+                                  bool *woken);
 uint32_t rv9k_queue_count(const rv9k_queue_t *q);
 
 /* ------------------------------------------------------------------ */

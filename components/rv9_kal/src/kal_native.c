@@ -338,12 +338,13 @@ rv9_err_t rv9_sem_give(rv9_sem_t sem)
 
 rv9_err_t rv9_sem_give_from_isr(rv9_sem_t sem, bool *higher_prio_woken)
 {
-    /* Nothing in RV-9 uses this yet, and making the kernel's wait queues
-       interrupt-safe is real work rather than a wrapper. Refusing is
-       better than a version that mostly works. */
-    (void)sem;
-    if (higher_prio_woken) *higher_prio_woken = false;
-    return RV9_ERR_UNSUPPORTED;
+    if (sem == NULL) return RV9_ERR_INVAL;
+
+    bool woken = false;
+    bool ok = rv9k_sem_give_from_isr((rv9k_sem_t *)sem, &woken);
+
+    if (higher_prio_woken) *higher_prio_woken = woken;
+    return ok ? RV9_OK : RV9_ERR_INVAL;
 }
 
 /* ---------------- mutexes ---------------- */
@@ -423,9 +424,13 @@ rv9_err_t rv9_queue_recv(rv9_queue_t queue, void *item, uint32_t timeout_ms)
 rv9_err_t rv9_queue_send_from_isr(rv9_queue_t queue, const void *item,
                                   bool *higher_prio_woken)
 {
-    (void)queue; (void)item;
-    if (higher_prio_woken) *higher_prio_woken = false;
-    return RV9_ERR_UNSUPPORTED;
+    if (queue == NULL || item == NULL) return RV9_ERR_INVAL;
+
+    bool woken = false;
+    bool ok = rv9k_queue_send_from_isr(&((native_queue_t *)queue)->q, item, &woken);
+
+    if (higher_prio_woken) *higher_prio_woken = woken;
+    return ok ? RV9_OK : RV9_ERR_NOMEM;
 }
 
 uint32_t rv9_queue_count(rv9_queue_t queue)

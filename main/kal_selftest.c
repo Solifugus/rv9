@@ -10,6 +10,7 @@
 
 #include "rv9/kal.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "kal-test";
 
@@ -25,6 +26,110 @@ static void check(bool ok, const char *what)
         s_failed++;
         ESP_LOGE(TAG, "  FAIL  %s", what);
     }
+}
+
+/* ---- a semaphore given from a real interrupt ---- */
+
+/*
+ * The one primitive nothing used, so nothing had ever noticed that the
+ * native kernel did not implement it -- until a driver called it, ignored
+ * the refusal, and spent two hundred milliseconds a transfer waiting for a
+ * signal that could never arrive. It has a test now.
+ *
+ * The trigger is a timer on ISR dispatch because it has to be a real
+ * interrupt: the point is not that the code runs, but that it runs while
+ * the kernel may be in the middle of its own wait queues.
+ */
+static rv9_sem_t s_isr_sem;
+static volatile uint32_t s_isr_refused;
+
+static void RV9_RT_CODE isr_giver(void *arg)
+{
+    (void)arg;
+
+    bool woken = false;
+    /* Counted rather than cast away: a (void) does not silence
+       warn_unused_result in GCC, which is the point of using it. */
+    if (rv9_sem_give_from_isr(s_isr_sem, &woken) != RV9_OK) s_isr_refused++;
+}
+
+static void test_sem_from_isr(void)
+{
+    check(rv9_sem_create(4, 0, &s_isr_sem) == RV9_OK, "sem for the isr test");
+
+    bool woken = false;
+    check(rv9_sem_give_from_isr(s_isr_sem, &woken) == RV9_OK,
+          "give_from_isr is implemented");
+    check(rv9_sem_take(s_isr_sem, 0) == RV9_OK, "what it gave can be taken");
+
+    const esp_timer_create_args_t args = {
+        .callback        = isr_giver,
+        .dispatch_method = ESP_TIMER_ISR,
+        .name            = "semisr",
+    };
+    esp_timer_handle_t t = NULL;
+
+    if (esp_timer_create(&args, &t) == ESP_OK) {
+        esp_timer_start_once(t, 20000);          /* 20 ms */
+
+        uint64_t t0 = rv9_time_us();
+        rv9_err_t got = rv9_sem_take(s_isr_sem, 1000);
+        uint32_t waited = (uint32_t)((rv9_time_us() - t0) / 1000);
+
+        check(got == RV9_OK, "a sleeping thread is woken from an interrupt");
+        check(waited < 200, "woken promptly rather than on the timeout");
+        ESP_LOGI(TAG, "  woken %u ms after the interrupt was armed", waited);
+
+        check(s_isr_refused == 0, "the interrupt's give was not refused");
+        esp_timer_delete(t);
+    } else {
+        ESP_LOGW(TAG, "  no ISR-dispatch timer; wake path untested");
+    }
+
+    rv9_sem_destroy(s_isr_sem);
+}
+
+/* ---- and a queue filled from an interrupt ---- */
+
+static rv9_queue_t s_isr_q;
+static volatile uint32_t s_isr_q_refused;
+
+static void RV9_RT_CODE isr_sender(void *arg)
+{
+    (void)arg;
+
+    uint32_t v = 0xC0FFEE;
+    bool woken = false;
+    if (rv9_queue_send_from_isr(s_isr_q, &v, &woken) != RV9_OK) {
+        s_isr_q_refused++;
+    }
+}
+
+static void test_queue_from_isr(void)
+{
+    check(rv9_queue_create(4, sizeof(uint32_t), &s_isr_q) == RV9_OK,
+          "queue for the isr test");
+
+    const esp_timer_create_args_t args = {
+        .callback        = isr_sender,
+        .dispatch_method = ESP_TIMER_ISR,
+        .name            = "qisr",
+    };
+    esp_timer_handle_t t = NULL;
+
+    if (esp_timer_create(&args, &t) == ESP_OK) {
+        esp_timer_start_once(t, 20000);
+
+        uint32_t got = 0;
+        check(rv9_queue_recv(s_isr_q, &got, 1000) == RV9_OK,
+              "a receiver is woken by an interrupt");
+        check(got == 0xC0FFEE, "and the item survived the trip");
+        check(s_isr_q_refused == 0, "the interrupt's send was not refused");
+
+        esp_timer_delete(t);
+    }
+
+    rv9_queue_destroy(s_isr_q);
 }
 
 /* ---- task + semaphore handshake ---- */
@@ -160,6 +265,8 @@ bool rv9_kal_selftest(void)
 
     test_time();
     test_tasks_and_sems();
+    test_sem_from_isr();
+    test_queue_from_isr();
     test_mutexes();
     test_queues();
     test_memory();

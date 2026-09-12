@@ -1935,6 +1935,65 @@ parser.
   through the point pipeline.
 - **Opacity**, gradients, patterns, clipping paths.
 
+## 20. Waking a cooperative kernel from an interrupt
+
+The native kernel is cooperative: `waitq_push`, `waitq_pop_best` and
+`block_on` re-link thread lists, and an interrupt landing in the middle of
+one leaves it in pieces. That is why the ISR-safe primitives were stubs,
+and the comment on them said making the wait queues interrupt-safe was
+real work.
+
+It was the wrong problem. **An interrupt does not need to touch the wait
+queues at all.**
+
+What a waiter waits on is the *count*. An interrupt can raise that safely
+in four instructions with interrupts masked. Waking is merely how a
+sleeping thread finds out, and that can be left as a note for the kernel
+to act on in thread context, where the lists are nobody else's business:
+
+```
+   interrupt            count++          note the wait queue
+                           |                     |
+   thread context          |            drain at the next
+                           |            turn of the scheduler
+                           v                     v
+   a thread about      sees the count      a thread already
+   to block            and never blocks    asleep is woken
+```
+
+So `rv9k_sem_give_from_isr` raises the count, checks whether anything is
+waiting, and if so pushes the wait queue onto a small ring. `drain_pending`
+empties that ring at the top of `reschedule()` and of the kernel's serve
+loop, calling `waitq_pop_best` in thread context as usual. The queue's
+send does the same with its item and its `not_empty` queue.
+
+**The latency is a scheduling round, not an interrupt**, and that is the
+honest description: measured at effectively zero when the kernel is
+running, and up to one host tick when it is idling in `vTaskDelay(1)`.
+That is right for a semaphore. It is nowhere near enough for real-time
+work, which is exactly why real-time processes do not come through here --
+they are hosted by the preemptive scheduler in `kal_rt.c` and measure
+pin-to-process in microseconds (§15).
+
+The other half is that the *thread* side had to become interrupt-safe too.
+`count` is now read-modified-written under a mask in `rv9k_sem_take` and
+`rv9k_sem_give`, and the queue's `count`, `head` and `tail` likewise in
+send and recv -- a task decrementing while an interrupt increments loses
+an update otherwise. The kernel masks interrupts itself, with `csrrci` on
+`mstatus`: it is below the seam, has no host to borrow a critical section
+from, and a kernel that owns the machine should not be asking permission.
+
+A ring that fills counts the loss rather than hiding it (`rv9k_pending_lost`).
+Nothing is actually lost when it does -- the count or the item has already
+landed, so nobody blocking afterwards misses it; only a thread already
+asleep waits for the next one.
+
+Tested against a real interrupt rather than a call from a task: a timer on
+ISR dispatch fires while a thread is blocked, and the test asserts it is
+woken promptly rather than on its timeout. Both the semaphore and the
+queue. That test exists because this primitive had none, which is how
+nobody noticed it did nothing.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has
