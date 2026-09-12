@@ -61,6 +61,18 @@ static bool                   s_landscape;
 static uint8_t                s_brightness = 100;
 static bool                   s_up;
 static const void            *s_owner;
+static rv9_sem_t              s_done;
+
+/* Runs in the SPI interrupt. */
+static bool trans_done(esp_lcd_panel_io_handle_t io,
+                       esp_lcd_panel_io_event_data_t *ev, void *ctx)
+{
+    (void)io; (void)ev; (void)ctx;
+
+    bool woken = false;
+    rv9_sem_give_from_isr(s_done, &woken);
+    return woken;
+}
 
 void rv9_panel_backlight(uint32_t percent)
 {
@@ -138,6 +150,10 @@ rv9_io_err_t rv9_panel_open(bool landscape, int *w, int *h)
         return RV9_IO_ERR_IO;
     }
 
+    /* Told when a transfer has actually finished, so a caller can reuse
+       the buffer it just handed over. See rv9_panel_blit. */
+    if (rv9_sem_create(1, 0, &s_done) != RV9_OK) return RV9_IO_ERR_NOMEM;
+
     esp_lcd_panel_io_spi_config_t io_cfg = {
         .cs_gpio_num = PIN_CS,
         .dc_gpio_num = PIN_DC,
@@ -146,6 +162,7 @@ rv9_io_err_t rv9_panel_open(bool landscape, int *w, int *h)
         .trans_queue_depth = 10,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
+        .on_color_trans_done = trans_done,
     };
     esp_lcd_panel_io_handle_t io = NULL;
     if (esp_lcd_new_panel_io_spi(LCD_HOST, &io_cfg, &io) != ESP_OK) {
@@ -202,11 +219,24 @@ bool rv9_panel_take(const void *owner)
 }
 
 /*
- * Put pixels on the glass.
+ * Put pixels on the glass, and wait until they are actually there.
  *
- * Under the lock, because the console and the window device draw from
- * different processes and an SPI transfer interleaved with another one
- * produces a panel showing neither.
+ * esp_lcd *queues* a transfer and returns; the DMA engine reads the
+ * caller's buffer afterwards. Every caller here paints into one buffer and
+ * reuses it immediately, so returning early means the next band is written
+ * over the top of the one still being sent -- which appears as horizontal
+ * bands of wrong pixels across the picture, and is invisible when
+ * consecutive blits happen to hold similar content, as a text console's
+ * usually do.
+ *
+ * So the blit blocks until the transfer completes. That costs the SPI time
+ * it was always going to cost -- about 2.6 ms for a full-width strip at
+ * 40 MHz -- and makes the buffer safe to touch again on return, which is
+ * what every caller already assumed.
+ *
+ * Under the lock, too: the console and the window draw from different
+ * processes, and two interleaved transfers produce a panel showing
+ * neither.
  */
 void rv9_panel_blit(int x0, int y0, int x1, int y1, const uint16_t *px)
 {
@@ -214,6 +244,10 @@ void rv9_panel_blit(int x0, int y0, int x1, int y1, const uint16_t *px)
     if (x1 <= x0 || y1 <= y0) return;
 
     rv9_lock_acquire(s_lock);
-    esp_lcd_panel_draw_bitmap(s_panel, x0, y0, x1, y1, px);
+
+    if (esp_lcd_panel_draw_bitmap(s_panel, x0, y0, x1, y1, px) == ESP_OK) {
+        rv9_sem_take(s_done, 200);
+    }
+
     rv9_lock_release(s_lock);
 }

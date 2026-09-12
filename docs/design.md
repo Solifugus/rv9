@@ -1789,6 +1789,42 @@ output, which is worth more than the hour it took to arrange — `raster.c`
 has no ESP dependencies at all, and the device driver needs about forty
 lines of stubs.
 
+### Two bugs that only the glass could show
+
+Both were invisible to every test that did not involve looking at the
+panel, and both were found by asking someone to look at it.
+
+**The picture was drawn and then eaten.** `/term` repaints only the rows it
+believes have changed. The first thing written to the console after a
+picture scrolled it, marked every row dirty and painted text over the
+whole thing — which is indistinguishable from the window device never
+having worked.
+
+One panel and no framebuffer leaves exactly one coherent model: whoever
+painted last is what you see. `rv9_panel_take()` reports when ownership
+actually changed, and a device that repaints incrementally takes that as
+its cue to repaint all of itself, because what is on the glass is somebody
+else's picture and every row of its own idea of the screen is stale. One
+pointer compare per flush.
+
+**The blit was not finished when it returned.** `esp_lcd_panel_draw_bitmap`
+*queues* a transfer; the DMA engine reads the caller's buffer afterwards.
+Every caller here paints into one buffer and reuses it immediately, so band
+N+1 was written over band N while N was still going out the wire. It
+appeared as horizontal bands of wrong pixels across the picture.
+
+This was a latent bug in the **console**, not something the window
+introduced: `lcdcon` has always reused one row buffer across queued blits.
+It got away with it because consecutive text rows tend to hold similar
+content, so the corruption had nothing to show. A renderer painting
+twenty-two wildly different bands in a row does.
+
+`rv9_panel_blit` now waits for the SPI completion callback on a semaphore
+before returning. It costs the transfer time it was always going to
+cost — about 2.6 ms for a full-width strip at 40 MHz — and makes the
+buffer safe to touch on return, which is what every caller already
+assumed it was.
+
 ### Measured
 
 | | |
