@@ -296,6 +296,13 @@ static void paint_row(lcdcon_t *c, int row)
 
 static void flush(lcdcon_t *c)
 {
+    /* If the window device has had the panel since we last painted, what
+       is on the glass is its picture, not our idea of the screen. Every
+       row is stale, whatever the dirty flags say. */
+    if (rv9_panel_take(c)) {
+        for (int r = 0; r < c->rows; r++) c->dirty[r] = true;
+    }
+
     for (int r = 0; r < c->rows; r++) {
         if (!c->dirty[r]) continue;
         paint_row(c, r);

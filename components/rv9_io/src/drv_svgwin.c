@@ -551,6 +551,11 @@ static void render(svgwin_t *s)
 
     uint64_t t0 = rv9_time_us();
 
+    /* Ours now. The console will repaint itself in full whenever it next
+       has something to say, which is what makes the picture stay up in
+       the meantime rather than being eaten a row at a time. */
+    rv9_panel_take(s);
+
     for (int y = 0; y < s->h; y += BAND_ROWS) {
         b.y0 = y;
         b.rows = (y + BAND_ROWS <= s->h) ? BAND_ROWS : s->h - y;

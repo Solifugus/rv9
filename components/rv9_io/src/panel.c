@@ -60,6 +60,7 @@ static int                    s_w, s_h;
 static bool                   s_landscape;
 static uint8_t                s_brightness = 100;
 static bool                   s_up;
+static const void            *s_owner;
 
 void rv9_panel_backlight(uint32_t percent)
 {
@@ -191,6 +192,13 @@ void rv9_panel_size(int *w, int *h)
 {
     if (w) *w = s_w;
     if (h) *h = s_h;
+}
+
+bool rv9_panel_take(const void *owner)
+{
+    if (s_owner == owner) return false;
+    s_owner = owner;
+    return true;
 }
 
 /*

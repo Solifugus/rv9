@@ -18,6 +18,20 @@ rv9_io_err_t rv9_panel_open(bool landscape, int *w, int *h);
 
 void rv9_panel_size(int *w, int *h);
 
+/*
+ * Take the glass, and find out whether somebody else had it.
+ *
+ * There is one panel and no framebuffer, so the only possible model is
+ * that whoever painted last is what you see. A device that repaints only
+ * what it believes has changed -- the console does -- would otherwise
+ * leave the previous owner's picture showing everywhere it thought was
+ * still good.
+ *
+ * Returns true when ownership actually changed, which is that device's cue
+ * to repaint all of itself rather than just the parts it knows are dirty.
+ */
+bool rv9_panel_take(const void *owner);
+
 /* Half-open, like everything else here: x0..x1-1 by y0..y1-1. */
 void rv9_panel_blit(int x0, int y0, int x1, int y1, const uint16_t *px);
 
