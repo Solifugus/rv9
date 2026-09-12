@@ -72,7 +72,13 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         int pid = env->fork_arg("shell", 8, 0);
         if (pid >= 0) {
             int status = 0;
-            env->wait(pid, &status, 3600000);
+            env->wait(pid, &status, RV9_WAIT_FOREVER);
+        } else {
+            /* Silence here made a failed fork look exactly like a session
+               that ended: the client connected, got nothing, and went. */
+            m_say(env, RV9_STDERR, "sshd: cannot start a shell, code ");
+            m_num(env, RV9_STDERR, pid);
+            m_say(env, RV9_STDERR, "\n");
         }
 
         env->dup2(SAVE_IN, RV9_STDIN);

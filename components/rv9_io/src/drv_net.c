@@ -26,8 +26,10 @@ static const char *TAG = "rv9-net";
 
 /* Descriptor options:
  *   opt[0]  band: 0 or 3 = both, 1 = 2.4 GHz only, 2 = 5 GHz only
+ *   opt[1]  power save: 0 = none, 1 = min modem, 2 = max modem
  */
 #define OPT_BAND 0
+#define OPT_PS   1
 
 typedef struct {
     rv9_net_state_t state;
@@ -37,6 +39,7 @@ typedef struct {
     int             retries;
     uint8_t         last_reason;
     uint8_t         band_opt;
+    uint8_t  ps_opt;
 } net_t;
 
 static net_t *s_net;      /* the event handlers need it; one device only */
@@ -196,6 +199,7 @@ static rv9_io_err_t net_init(rv9_dev_t *dev)
 
     n->state = RV9_NET_DOWN;
     n->band_opt = (uint8_t)dev->opt[OPT_BAND];
+    n->ps_opt   = (uint8_t)dev->opt[OPT_PS];
     s_net = n;
     dev->drv_state = n;
 
@@ -263,6 +267,28 @@ static rv9_io_err_t net_wifi_up(net_t *n)
         esp_err_t country = esp_wifi_set_country_code("US", true);
         if (country != ESP_OK) {
             ESP_LOGW(TAG, "country code: %s", esp_err_to_name(country));
+        }
+
+        /*
+         * Power save, off by default.
+         *
+         * ESP-IDF leaves the station dozing between beacons, which is
+         * right for something running on a cell and wrong for something
+         * being worked on: a round trip goes from about two milliseconds
+         * to two hundred and forty, because a reply waits for the next
+         * beacon. Over a phone hotspot -- whose buffering for sleeping
+         * clients is its own adventure -- it also made connections drop
+         * mid-session.
+         *
+         * The radio is the largest draw on this board, so this is a real
+         * trade and it belongs in the descriptor rather than here.
+         */
+        wifi_ps_type_t ps = (n->ps_opt == 1) ? WIFI_PS_MIN_MODEM
+                          : (n->ps_opt == 2) ? WIFI_PS_MAX_MODEM
+                                             : WIFI_PS_NONE;
+        esp_err_t pserr = esp_wifi_set_ps(ps);
+        if (pserr != ESP_OK) {
+            ESP_LOGW(TAG, "power save: %s", esp_err_to_name(pserr));
         }
 
         TRY(esp_wifi_start());

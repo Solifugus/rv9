@@ -742,6 +742,13 @@ rv9_io_err_t rv9_io_write_path(rv9_path_t *p, const void *buf, size_t len,
     return err;
 }
 
+rv9_io_err_t rv9_io_setstat_path(rv9_path_t *p, uint32_t code, void *arg)
+{
+    if (p == NULL) return RV9_IO_ERR_INVAL;
+    if (p->dev->fmgr->setstat == NULL) return RV9_IO_ERR_UNSUPPORTED;
+    return p->dev->fmgr->setstat(p, code, arg);
+}
+
 void rv9_io_close_path(rv9_path_t *p)
 {
     if (p == NULL) return;

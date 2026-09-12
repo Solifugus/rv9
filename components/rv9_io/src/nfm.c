@@ -25,6 +25,7 @@
  */
 #include "rv9/io.h"
 #include "rv9/kal.h"
+#include "rv9/net.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -84,6 +85,7 @@ static bool would_block(void)
 typedef struct {
     int  fd;
     bool is_device;     /* "/n0" itself, with no endpoint behind it */
+    bool nowait;        /* RV9_NET_SS_NOWAIT: do not wait for data */
 } nfm_path_t;
 
 /* Split "listen/8080" or "127.0.0.1/8080" at the last slash. */
@@ -280,6 +282,7 @@ static rv9_io_err_t nfm_read(rv9_path_t *path, void *buf, size_t len,
             return RV9_IO_OK;   /* n == 0 means the peer closed */
         }
         if (!would_block()) break;
+        if (st->nowait) return RV9_IO_ERR_WOULDBLOCK;
         rv9_task_delay_ms(POLL_MS);
     }
 
@@ -346,6 +349,13 @@ static rv9_io_err_t nfm_getstat(rv9_path_t *path, uint32_t code, void *arg)
 
 static rv9_io_err_t nfm_setstat(rv9_path_t *path, uint32_t code, void *arg)
 {
+    if (code == RV9_NET_SS_NOWAIT) {
+        nfm_path_t *st = (nfm_path_t *)path->fm_state;
+        if (st == NULL || arg == NULL) return RV9_IO_ERR_INVAL;
+        st->nowait = (*(uint32_t *)arg != 0);
+        return RV9_IO_OK;
+    }
+
     /*
      * The far end of a socket is somebody's terminal, so it gets the same
      * escape sequences a serial line does. The driver is never offered

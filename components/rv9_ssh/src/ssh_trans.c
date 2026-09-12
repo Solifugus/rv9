@@ -31,6 +31,16 @@ static const char *TAG = "rv9-ssh";
 /* Moving bytes over the path underneath                               */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Fill a buffer, or say the connection has gone.
+ *
+ * The network file manager reports an orderly close as success with zero
+ * bytes -- which is what read(2) does, and is right. This used to retry on
+ * it, on the reasoning that zero bytes meant nothing had arrived yet. It
+ * does not: nothing will ever arrive again. The session sat in a loop
+ * reading a closed socket, never returned to listen, and every connection
+ * after it was refused by a port with nobody on it.
+ */
 static rv9_io_err_t read_exact(ssh_t *s, uint8_t *buf, size_t n)
 {
     size_t got = 0;
@@ -38,11 +48,13 @@ static rv9_io_err_t read_exact(ssh_t *s, uint8_t *buf, size_t n)
         size_t moved = 0;
         rv9_io_err_t err = rv9_io_read_path(s->net, buf + got, n - got, &moved);
 
-        if (err == RV9_IO_ERR_WOULDBLOCK || (err == RV9_IO_OK && moved == 0)) {
+        if (err == RV9_IO_ERR_WOULDBLOCK) {
             rv9_task_delay_ms(5);
             continue;
         }
         if (err != RV9_IO_OK) return err;
+        if (moved == 0) return RV9_IO_ERR_IO;      /* the peer hung up */
+
         got += moved;
     }
     return RV9_IO_OK;
@@ -60,7 +72,8 @@ static rv9_io_err_t write_all(ssh_t *s, const uint8_t *buf, size_t n)
             continue;
         }
         if (err != RV9_IO_OK) return err;
-        if (moved == 0) { rv9_task_delay_ms(5); continue; }
+        if (moved == 0) return RV9_IO_ERR_IO;      /* the peer hung up */
+
         sent += moved;
     }
     return RV9_IO_OK;

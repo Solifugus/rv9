@@ -22,6 +22,7 @@
 #include "rv9/kal.h"
 #include "rv9/sshd.h"
 #include "rv9/ssh_builtin.h"
+#include "rv9/net.h"
 
 #include "esp_log.h"
 
@@ -35,6 +36,9 @@ static const char *TAG = "rv9-ssh";
 #define OPT_CONFIG 3
 
 #define AUTH_TRIES 6
+
+static rv9_io_err_t ssh_send_data(ssh_t *s, const void *buf, size_t len);
+static rv9_io_err_t ssh_flush(ssh_t *s);
 
 /* ------------------------------------------------------------------ */
 /* Sending the small messages                                          */
@@ -58,11 +62,13 @@ static rv9_io_err_t send_chan_reply(ssh_t *s, uint8_t msg)
 }
 
 /*
- * Give the client back the credit it spent sending us data.
+ * Give the client back the credit it spent, once the data is consumed.
  *
- * Topped up in one go when half the window is gone, rather than after
- * every packet: an adjustment per keystroke would double the traffic of an
- * interactive session to no purpose.
+ * Consumed, not merely arrived: the window says how much room there is,
+ * and handing the credit back the moment a packet lands advertises room
+ * that is still occupied. Topped up in one go when half is gone, because
+ * an adjustment per keystroke would double an interactive session's
+ * traffic to no purpose.
  */
 static void window_top_up(ssh_t *s, uint32_t used)
 {
@@ -129,8 +135,9 @@ static rv9_io_err_t auth_publickey(ssh_t *s, ssh_buf_t *p, const char *user,
     if (p->bad || blob == NULL) return RV9_IO_ERR_IO;
 
     if (!ssh_authkey_allowed(blob, blob_len)) {
-        ESP_LOGW(TAG, "key offered by %s is not in " "/f0/authkeys", user);
-        return RV9_IO_OK;      /* not an error, just not authorized */
+        /* Ordinary: an agent offers every key it holds, and all but one of
+           them are expected to be strangers. Not worth a warning. */
+        return RV9_IO_OK;
     }
 
     if (!has_sig) {
@@ -443,11 +450,21 @@ static rv9_io_err_t handle_packet(ssh_t *s)
         const uint8_t *d = ssh_get_string(&p, &n);
         if (p.bad || d == NULL) return RV9_IO_ERR_IO;
 
-        /* The data is already in the packet buffer; remember where rather
-           than copying it somewhere else to be read a byte at a time. */
-        s->data_pos = (size_t)(d - s->in);
-        s->data_end = s->data_pos + n;
-        window_top_up(s, (uint32_t)n);
+        /* Copied out, because the next packet lands on top of this one --
+           and the next packet may well arrive before anybody reads. */
+        if (s->pend_pos > 0 && s->pend_pos == s->pend_len) {
+            s->pend_pos = s->pend_len = 0;
+        }
+        if (s->pend_len + n > SSH_PEND_MAX) {
+            /* The window is meant to make this impossible; if it happens,
+               the client has overrun its credit. */
+            ESP_LOGW(TAG, "client sent past its window; dropping %u bytes",
+                     (unsigned)n);
+            return RV9_IO_OK;
+        }
+
+        memcpy(s->pend + s->pend_len, d, n);
+        s->pend_len += n;
         return RV9_IO_OK;
     }
 
@@ -455,6 +472,10 @@ static rv9_io_err_t handle_packet(ssh_t *s)
         return RV9_IO_OK;    /* a client has no business sending us stderr */
 
     case SSH_MSG_CHANNEL_EOF:
+        /* Half close: nothing more will arrive, but we may still speak. */
+        s->in_eof = true;
+        return RV9_IO_OK;
+
     case SSH_MSG_CHANNEL_CLOSE:
         s->eof = true;
         return RV9_IO_OK;
@@ -492,7 +513,13 @@ static rv9_io_err_t ssh_open(rv9_dev_t *dev, uint32_t mode)
     }
 
     ssh_t *s = rv9_calloc(1, sizeof(*s));
-    if (s == NULL) return RV9_IO_ERR_NOMEM;
+    if (s == NULL) {
+        /* Said out loud. This failing quietly is what made a refused
+           connection indistinguishable from a network fault. */
+        ESP_LOGE(TAG, "no room for a session: %u bytes wanted, %u free",
+                 (unsigned)sizeof(*s), (unsigned)rv9_heap_free());
+        return RV9_IO_ERR_NOMEM;
+    }
 
     uint32_t port = dev->opt[OPT_PORT] ? dev->opt[OPT_PORT] : 22;
 
@@ -538,6 +565,8 @@ static rv9_io_err_t ssh_close(rv9_dev_t *dev)
     if (s == NULL) return RV9_IO_OK;
 
     if (!s->eof && s->chan_open) {
+        ssh_flush(s);
+
         /* Tell the client the shell finished, so it reports an exit status
            rather than "connection closed by remote host". */
         ssh_buf_t p;
@@ -552,6 +581,42 @@ static rv9_io_err_t ssh_close(rv9_dev_t *dev)
         send_chan_reply(s, SSH_MSG_CHANNEL_EOF);
         send_chan_reply(s, SSH_MSG_CHANNEL_CLOSE);
         ssh_disconnect(s, SSH_DISCONNECT_BY_APPLICATION, "session ended");
+    }
+
+    /*
+     * Wait for the client to hang up before we do.
+     *
+     * This is the difference between a session that works and one that
+     * appears never to have run. Closing immediately after the last write
+     * loses that write: the bytes are still in flight, the client has not
+     * read them, and tearing the connection down throws them away. Over a
+     * link with a couple of hundred milliseconds of round trip, that is
+     * every session short enough to finish in one -- which is every
+     * scripted one.
+     *
+     * The client closes once it has read our disconnect, so its hang-up is
+     * proof that everything before it arrived. Waiting for that is both
+     * the simplest correct rule and the only one that does not involve
+     * guessing at a delay.
+     *
+     * Draining as we wait matters too: a socket closed with data still
+     * unread is reset rather than finished, and a reset discards the same
+     * bytes for a different reason.
+     */
+    if (s->net != NULL) {
+        uint32_t on = 1;
+        if (rv9_io_setstat_path(s->net, RV9_NET_SS_NOWAIT, &on) == RV9_IO_OK) {
+            uint64_t deadline = rv9_time_us() + 3000000;
+            uint8_t  sink[64];
+
+            while (rv9_time_us() < deadline) {
+                size_t got = 0;
+                rv9_io_err_t err = rv9_io_read_path(s->net, sink, sizeof(sink),
+                                                    &got);
+                if (err == RV9_IO_ERR_WOULDBLOCK) { rv9_task_delay_ms(10); continue; }
+                if (err != RV9_IO_OK || got == 0) break;   /* it has gone */
+            }
+        }
     }
 
     if (s->key_c2s) psa_destroy_key(s->key_c2s);
@@ -575,10 +640,15 @@ static rv9_io_err_t ssh_read(rv9_dev_t *dev, void *buf, size_t len,
     if (s == NULL) return RV9_IO_ERR_IO;
     if (len == 0) return RV9_IO_OK;
 
+    /* Whatever the program has written, say it now: it is about to wait
+       for an answer, so there will be no better moment. */
+    rv9_io_err_t ferr = ssh_flush(s);
+    if (ferr != RV9_IO_OK) { s->eof = true; return ferr; }
+
     /* Keep pumping until there is channel data. Everything else the client
        sends -- a resize, a window adjustment -- is handled on the way. */
-    while (s->data_pos == s->data_end) {
-        if (s->eof) return RV9_IO_ERR_IO;
+    while (s->pend_pos == s->pend_len) {
+        if (s->eof || s->in_eof) return RV9_IO_ERR_IO;
 
         rv9_io_err_t err = ssh_packet_read(s);
         if (err != RV9_IO_OK) { s->eof = true; return err; }
@@ -587,24 +657,34 @@ static rv9_io_err_t ssh_read(rv9_dev_t *dev, void *buf, size_t len,
         if (err != RV9_IO_OK) { s->eof = true; return err; }
     }
 
-    size_t n = s->data_end - s->data_pos;
+    size_t n = s->pend_len - s->pend_pos;
     if (n > len) n = len;
 
-    memcpy(buf, s->in + s->data_pos, n);
-    s->data_pos += n;
+    memcpy(buf, s->pend + s->pend_pos, n);
+    s->pend_pos += n;
+
+    if (s->pend_pos == s->pend_len) s->pend_pos = s->pend_len = 0;
+
+    /* Now it is consumed, so the room really is free again. */
+    window_top_up(s, (uint32_t)n);
 
     if (done) *done = n;
     return RV9_IO_OK;
 }
 
-static rv9_io_err_t ssh_write(rv9_dev_t *dev, const void *buf, size_t len,
-                              size_t *done)
+/* Put what has been gathered on the wire, as few packets as it fits in. */
+static rv9_io_err_t ssh_flush(ssh_t *s)
 {
-    ssh_t *s = (ssh_t *)dev->drv_state;
-    if (done) *done = 0;
-    if (s == NULL || !s->chan_open) return RV9_IO_ERR_IO;
-    if (s->eof) return RV9_IO_ERR_IO;
+    if (s == NULL || s->obuf_len == 0) return RV9_IO_OK;
 
+    size_t len = s->obuf_len;
+    s->obuf_len = 0;
+
+    return ssh_send_data(s, s->obuf, len);
+}
+
+static rv9_io_err_t ssh_send_data(ssh_t *s, const void *buf, size_t len)
+{
     const uint8_t *src = (const uint8_t *)buf;
     size_t sent = 0;
 
@@ -639,7 +719,37 @@ static rv9_io_err_t ssh_write(rv9_dev_t *dev, const void *buf, size_t len,
         sent += n;
     }
 
-    if (done) *done = sent;
+    return RV9_IO_OK;
+}
+
+static rv9_io_err_t ssh_write(rv9_dev_t *dev, const void *buf, size_t len,
+                              size_t *done)
+{
+    ssh_t *s = (ssh_t *)dev->drv_state;
+    if (done) *done = 0;
+    if (s == NULL || !s->chan_open) return RV9_IO_ERR_IO;
+    if (s->eof) return RV9_IO_ERR_IO;
+
+    const uint8_t *src = (const uint8_t *)buf;
+    size_t taken = 0;
+
+    while (taken < len) {
+        size_t room = sizeof(s->obuf) - s->obuf_len;
+        if (room == 0) {
+            rv9_io_err_t err = ssh_flush(s);
+            if (err != RV9_IO_OK) return err;
+            room = sizeof(s->obuf);
+        }
+
+        size_t n = len - taken;
+        if (n > room) n = room;
+
+        memcpy(s->obuf + s->obuf_len, src + taken, n);
+        s->obuf_len += n;
+        taken += n;
+    }
+
+    if (done) *done = len;
     return RV9_IO_OK;
 }
 

@@ -280,6 +280,7 @@ rv9_io_err_t rv9_io_open_detached(const char *name, uint32_t mode,
 rv9_io_err_t rv9_io_read_path(rv9_path_t *p, void *buf, size_t len, size_t *done);
 rv9_io_err_t rv9_io_write_path(rv9_path_t *p, const void *buf, size_t len,
                                size_t *done);
+rv9_io_err_t rv9_io_setstat_path(rv9_path_t *p, uint32_t code, void *arg);
 void         rv9_io_close_path(rv9_path_t *p);
 
 /* Remove a file, e.g. "/r0/notes". */

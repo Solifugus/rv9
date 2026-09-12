@@ -38,13 +38,20 @@
 /* ------------------------------------------------------------------ */
 
 /*
- * The largest packet we will handle. The protocol allows 32 KB and a
- * client's KEXINIT is the only thing that comes close -- OpenSSH's runs to
- * about 1.5 KB of algorithm names. Channel data is bounded separately, by
- * the maximum packet size we advertise when the channel opens, so this
- * limit is only ever reached by something that has gone wrong.
+ * The largest packet we will handle.
+ *
+ * The protocol allows 32 KB; a client's KEXINIT is the only thing that
+ * comes close, and OpenSSH's runs to about 1.5 KB of algorithm names.
+ * Channel data is bounded separately by the maximum packet we advertise.
+ *
+ * The number matters more than it looks. The session holds four buffers of
+ * roughly this size in one allocation, and at 4 KB each that came to
+ * sixteen kilobytes of *contiguous* heap -- on a board with fifty free and
+ * a WiFi stack scattered through it. The allocation failed often enough
+ * that roughly two connections in three were refused, silently, because
+ * the daemon simply went back to waiting.
  */
-#define SSH_BUF_MAX       4096
+#define SSH_BUF_MAX       2560
 
 #define SSH_HASH_LEN      32     /* SHA-256 */
 #define SSH_KEY_LEN       32     /* AES-256 */
@@ -58,9 +65,20 @@
 
 #define SSH_MIN_PAD       4
 
-/* What we advertise when the session channel opens. */
-#define SSH_WINDOW_INIT   (64u * 1024u)
+/*
+ * What we advertise when the session channel opens.
+ *
+ * The window is credit, and credit is what stops the client sending more
+ * than there is anywhere to put. It is returned as data is *consumed*, not
+ * as it arrives -- returning it on arrival advertises room that does not
+ * exist yet, which is the same as having no flow control at all.
+ *
+ * So the window is the size of the buffer behind it, and the buffer has
+ * one whole packet of slack on top.
+ */
+#define SSH_WINDOW_INIT   1024u
 #define SSH_MAX_PAYLOAD   1024u
+#define SSH_PEND_MAX      (SSH_WINDOW_INIT + SSH_MAX_PAYLOAD)
 
 /* ------------------------------------------------------------------ */
 /* Message numbers                                                     */
@@ -265,6 +283,19 @@ typedef struct {
     /* The one channel. */
     bool     chan_open;
     bool     shell;
+
+    /*
+     * Two different endings, and conflating them cost an afternoon.
+     *
+     * in_eof is the client saying it has no more *input* -- which a client
+     * whose stdin is a pipe says immediately, long before the session is
+     * over. Reads should report the end of input; writes must keep
+     * working, or everything the far side prints after that moment is
+     * thrown away.
+     *
+     * eof is the channel or the connection actually being finished.
+     */
+    bool     in_eof;
     bool     eof;
     uint32_t peer_chan;
     uint32_t peer_window;
@@ -287,14 +318,39 @@ typedef struct {
      * front -- which is where it sits in both the encrypted and the plain
      * framing, so the payload is always at `in + 1` and nothing has to be
      * moved after decrypting.
-     *
-     * data_pos..data_end is the part of it that is channel data a reader
-     * has not taken yet. SCF reads a byte at a time, and a packet per byte
-     * would be an unfortunate way to run a terminal.
      */
     uint8_t  in[SSH_BUF_MAX];
     size_t   pay_len;
-    size_t   data_pos, data_end;
+
+    /*
+     * Channel data waiting to be read, copied out of the packet.
+     *
+     * It used to be a pair of offsets into `in`, which costs no memory and
+     * is wrong: reading the next packet overwrites `in`. A client whose
+     * stdin is a pipe sends its whole input and an EOF *during* channel
+     * setup, before the shell exists to read any of it, and every byte of
+     * it was destroyed by the packet that followed. Interactive sessions
+     * never noticed, because a terminal sends nothing until there is
+     * something to type at.
+     */
+    uint8_t  pend[SSH_PEND_MAX];
+    size_t   pend_pos, pend_len;
+
+    /*
+     * Outgoing channel data, gathered up.
+     *
+     * SCF echoes as it reads, so an interactive session writes one or two
+     * bytes at a time -- and a byte at a time straight down the wire is a
+     * whole SSH packet, a whole TCP segment, and forty-odd bytes of header
+     * for every character typed. Twenty-five segments for one command.
+     *
+     * They are collected here and sent when the program stops talking:
+     * before it blocks for input, and when the session ends. That is the
+     * moment its output is complete, and it is the same rule a terminal
+     * driver has always used.
+     */
+    uint8_t  obuf[SSH_MAX_PAYLOAD];
+    size_t   obuf_len;
 
     /*
      * The outgoing packet, with the same one byte reserved at the front,

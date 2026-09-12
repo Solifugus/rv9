@@ -13,6 +13,20 @@
 #define RV9_NET_GS_SCAN      (RV9_SS_DRIVER_BASE + 3)   /* rv9_net_scan_t */
 #define RV9_NET_SS_FORGET    (RV9_SS_DRIVER_BASE + 4)   /* clear saved creds */
 
+/*
+ * Read without waiting: 0 blocks (the default), 1 returns WOULDBLOCK when
+ * nothing has arrived.
+ *
+ * A blocking read is the right default -- reading means waiting, and that
+ * is what every reader here wants. But there is one thing that cannot use
+ * it: closing a connection *tidily*. TCP sends a reset instead of a clean
+ * finish when a socket is closed with data still unread, and a reset
+ * throws away whatever was in flight -- including the last thing the
+ * program printed. Draining before closing needs a read that can come back
+ * empty.
+ */
+#define RV9_NET_SS_NOWAIT    (RV9_SS_DRIVER_BASE + 5)
+
 #define RV9_NET_MAX_APS 12
 
 typedef struct __attribute__((packed)) {
