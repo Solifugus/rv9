@@ -72,6 +72,7 @@
 #define SSH_MSG_DEBUG                       4
 #define SSH_MSG_SERVICE_REQUEST             5
 #define SSH_MSG_SERVICE_ACCEPT              6
+#define SSH_MSG_EXT_INFO                    7
 #define SSH_MSG_KEXINIT                    20
 #define SSH_MSG_NEWKEYS                    21
 #define SSH_MSG_KEX_ECDH_INIT              30
@@ -80,6 +81,7 @@
 #define SSH_MSG_USERAUTH_FAILURE           51
 #define SSH_MSG_USERAUTH_SUCCESS           52
 #define SSH_MSG_USERAUTH_BANNER            53
+#define SSH_MSG_USERAUTH_PK_OK             60   /* method-specific */
 #define SSH_MSG_GLOBAL_REQUEST             80
 #define SSH_MSG_REQUEST_SUCCESS            81
 #define SSH_MSG_REQUEST_FAILURE            82
@@ -245,6 +247,9 @@ typedef struct {
                                  starts encrypting */
     bool     strict_kex;      /* client asked for it, so sequence numbers
                                  restart at NEWKEYS */
+    bool     want_ext_info;   /* client sent ext-info-c, so it will read
+                                 the list of signatures we can verify */
+    bool     pk_ok;           /* last key offer was answered with PK_OK */
 
     psa_key_id_t key_c2s, key_s2c;
     uint8_t      iv_c2s[SSH_IV_LEN], iv_s2c[SSH_IV_LEN];
@@ -326,6 +331,23 @@ void         ssh_hostkey_fingerprint(char *out, size_t cap);
 bool         ssh_password_set(void);
 rv9_io_err_t ssh_password_store(const char *password);
 bool         ssh_password_check(const char *password);
+
+/* ---- ssh_auth.c ---- */
+
+/* Is this exact key blob listed in /f0/authkeys? */
+bool ssh_authkey_allowed(const uint8_t *blob, size_t blob_len);
+
+/* Verify a signature over `data` using the public key in `blob`. The key's
+   type comes from inside the blob, not from anything the client claimed
+   beside it. */
+rv9_io_err_t ssh_pubkey_verify(const uint8_t *blob, size_t blob_len,
+                               const char *sig_alg,
+                               const uint8_t *sig, size_t sig_len,
+                               const uint8_t *data, size_t data_len);
+
+/* What we will verify, offered to the client as server-sig-algs so that a
+   modern client is willing to try an RSA key at all. */
+#define SSH_SIG_ALGS "ecdsa-sha2-nistp256,rsa-sha2-256,rsa-sha2-512"
 
 /* ---- ssh_trans.c ---- */
 

@@ -1476,6 +1476,66 @@ Absent on purpose: rekeying, compression, more than one channel, more than
 one session at a time, and any cipher that is not an AEAD. A rekey request
 is answered with a disconnect rather than ignored.
 
+Absent for a duller reason: **post-quantum key exchange**. OpenSSH 10 warns
+that `curve25519-sha256` leaves a session open to being recorded now and
+decrypted once a quantum computer exists. It is right, and the fix is
+`mlkem768x25519-sha256`, which needs an ML-KEM implementation — and there
+is none in this mbedTLS, nor a Keccak to build one on. That is a project
+rather than a configuration change, and worth doing before anything here
+carries traffic that matters in twenty years.
+
+### Keys
+
+`ssh -i ~/.ssh/rv9 anything@<ip>` and no password. The trusted keys live in
+`/f0/authkeys`, in the format of an ordinary `authorized_keys` file, so the
+line from your own `~/.ssh` is the line that goes here. `authkey` appends
+one, `authkey list` shows them, `authkey clear` revokes the lot.
+
+Two things must both hold, and they are independent:
+
+- the key is **authorized** — its blob appears in the file, compared as
+  bytes, with no parser in the path to disagree about what a key means;
+- the client **holds the private half** — it signs, and the signature
+  verifies against the key it offered.
+
+Either check alone lets anybody in. A public key is public, so trusting one
+that arrives unsigned trusts whoever copied it; and a signature that
+verifies against a key nobody authorized is a stranger with good
+cryptography. This is the single most common way to write an SSH server
+that appears to work and does not.
+
+What gets signed includes the session id — the first exchange hash — so a
+signature captured from one session cannot be replayed into another.
+
+The file is read per attempt rather than cached, so revoking is deleting a
+line, effective at the next login with nothing to restart.
+
+**Ed25519 does not work**, and that is worth saying plainly because
+`ssh-keygen` has defaulted to it for years. mbedTLS as ESP-IDF ships it has
+no EdDSA at all — not disabled, absent. What verifies here is
+`ecdsa-sha2-nistp256` (in hardware, `MBEDTLS_HARDWARE_ECDSA_VERIFY`) and
+`rsa-sha2-256`/`512`.
+
+RSA needed one extra thing. PSA imports an RSA public key as a DER
+`RSAPublicKey`, and SSH supplies two mpints — but an SSH mpint and a DER
+INTEGER have identical rules, so the bytes carry across untouched and only
+the SEQUENCE wrapping has to be built.
+
+It also needed `EXT_INFO`. Without a server advertising `server-sig-algs`,
+an OpenSSH client assumes a server that has not said otherwise can only do
+`ssh-rsa` — SHA-1, disabled in 8.8 — and will not offer an RSA key at all.
+The key would be in the file, the client would hold its private half, and
+authentication would fail with neither end saying anything useful.
+
+An offer without a signature is a **question, not an attempt**: the client
+asks whether a key is worth using and is answered with `PK_OK`, which
+grants nothing. Those do not count against the retry limit, because a
+client with several keys asks about each in turn and counting them would
+lock out anyone whose agent holds a handful.
+
+Password login stays enabled alongside. Locking yourself out of a board
+whose only console is thirty columns by eight is a bad evening.
+
 ### The host key, and the password
 
 The host key is generated on the board the first time it boots this

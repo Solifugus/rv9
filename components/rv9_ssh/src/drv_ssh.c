@@ -89,9 +89,95 @@ static rv9_io_err_t auth_failure(ssh_t *s)
     ssh_buf_t p;
     ssh_packet_begin(s, &p);
     ssh_put_u8(&p, SSH_MSG_USERAUTH_FAILURE);
-    ssh_put_cstr(&p, "password");
+    ssh_put_cstr(&p, "publickey,password");
     ssh_put_u8(&p, 0);          /* no partial success */
     return ssh_packet_send(s, &p);
+}
+
+/*
+ * Public key authentication.
+ *
+ * Two independent things must hold: the key has to be one we trust, and
+ * the client has to prove it holds the private half. Checking either
+ * alone is how an SSH server comes to let anybody in -- the first without
+ * the second accepts a key anyone can copy from a public repository, and
+ * the second without the first accepts a valid signature from a stranger.
+ *
+ * The client asks twice. First without a signature, to find out whether
+ * the key is worth the trouble of using -- answered with PK_OK, which is
+ * not an authentication and grants nothing. Then with one.
+ */
+static rv9_io_err_t auth_publickey(ssh_t *s, ssh_buf_t *p, const char *user,
+                                   const char *service, bool *ok, bool *probe)
+{
+    *ok = false;
+
+    /*
+     * An offer without a signature is a question, not an attempt, and must
+     * not count against the try limit: a client with several keys asks
+     * about each one in turn, and counting them would lock out anyone whose
+     * agent holds a handful.
+     */
+    bool has_sig = ssh_get_u8(p) != 0;
+    *probe = !has_sig;
+
+    char alg[32];
+    ssh_get_cstr(p, alg, sizeof(alg));
+
+    size_t blob_len = 0;
+    const uint8_t *blob = ssh_get_string(p, &blob_len);
+    if (p->bad || blob == NULL) return RV9_IO_ERR_IO;
+
+    if (!ssh_authkey_allowed(blob, blob_len)) {
+        ESP_LOGW(TAG, "key offered by %s is not in " "/f0/authkeys", user);
+        return RV9_IO_OK;      /* not an error, just not authorized */
+    }
+
+    if (!has_sig) {
+        /* "That key would do. Sign with it." Grants nothing by itself. */
+        ssh_buf_t r;
+        ssh_packet_begin(s, &r);
+        ssh_put_u8(&r, SSH_MSG_USERAUTH_PK_OK);
+        ssh_put_cstr(&r, alg);
+        ssh_put_string(&r, blob, blob_len);
+        s->pk_ok = true;
+        return ssh_packet_send(s, &r);
+    }
+
+    size_t sig_len = 0;
+    const uint8_t *sig = ssh_get_string(p, &sig_len);
+    if (p->bad || sig == NULL) return RV9_IO_ERR_IO;
+
+    /*
+     * Rebuild exactly what the client signed. The session id is in it,
+     * which is what stops a signature captured from one session being
+     * replayed into another -- the id is the first exchange hash, and no
+     * two sessions share one.
+     *
+     * Built in the frame buffer: it belongs to the packet layer, which is
+     * not in the middle of anything here, and a kilobyte of stack in a
+     * process running a shell is not available.
+     */
+    ssh_buf_t d;
+    ssh_buf_init(&d, s->frame, sizeof(s->frame));
+    ssh_put_string(&d, s->session_id, SSH_HASH_LEN);
+    ssh_put_u8(&d, SSH_MSG_USERAUTH_REQUEST);
+    ssh_put_cstr(&d, user);
+    ssh_put_cstr(&d, service);
+    ssh_put_cstr(&d, "publickey");
+    ssh_put_u8(&d, 1);
+    ssh_put_cstr(&d, alg);
+    ssh_put_string(&d, blob, blob_len);
+    if (d.bad) return RV9_IO_ERR_INVAL;
+
+    rv9_io_err_t err = ssh_pubkey_verify(blob, blob_len, alg,
+                                         sig, sig_len, d.b, d.len);
+    if (err == RV9_IO_OK) {
+        *ok = true;
+    } else {
+        ESP_LOGW(TAG, "bad signature from %s using %s", user, alg);
+    }
+    return RV9_IO_OK;
 }
 
 /*
@@ -147,6 +233,31 @@ static rv9_io_err_t authenticate(ssh_t *s)
         ssh_get_cstr(&p, service, sizeof(service));
         ssh_get_cstr(&p, method, sizeof(method));
         if (p.bad) return RV9_IO_ERR_IO;
+
+        if (strcmp(method, "publickey") == 0) {
+            bool ok = false, probe = false;
+            err = auth_publickey(s, &p, user, service, &ok, &probe);
+            if (err != RV9_IO_OK) return err;
+
+            if (ok) {
+                strncpy(s->user, user, sizeof(s->user) - 1);
+                ESP_LOGI(TAG, "%s logged in by key", s->user);
+                return send_u8(s, SSH_MSG_USERAUTH_SUCCESS);
+            }
+
+            /* An accepted offer was already answered with PK_OK. */
+            if (probe && s->pk_ok) { s->pk_ok = false; continue; }
+
+            if (!probe && ++tries >= AUTH_TRIES) {
+                ssh_disconnect(s, SSH_DISCONNECT_NO_MORE_AUTH_METHODS,
+                               "too many attempts");
+                return RV9_IO_ERR_MODE;
+            }
+
+            err = auth_failure(s);
+            if (err != RV9_IO_OK) return err;
+            continue;
+        }
 
         if (strcmp(method, "password") == 0) {
             uint8_t change = ssh_get_u8(&p);

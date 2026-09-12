@@ -319,9 +319,17 @@ control layer is late if it is late.
 - **Window size, fixed.** `pty-req` and `window-change` carry the client's
   real dimensions, so `RV9_CON_GS_SIZE` over ssh answers with the truth
   instead of the 80x24 guess §16 had to make.
-- Not done: public key authentication (wants somewhere to keep an
-  authorized_keys, so it wants phase 5), rekeying, more than one session at
-  a time, job control.
+- **Public key authentication — done.** `/f0/authkeys` in the ordinary
+  authorized_keys format; `authkey` to add one, `list`, `clear`. The key
+  must be authorized *and* the client must prove it holds the private half
+  — either check alone lets anybody in. `ecdsa-sha2-nistp256` (verified in
+  hardware) and `rsa-sha2-256`/`512`. **Not Ed25519**: mbedTLS as ESP-IDF
+  ships it has no EdDSA at all, which matters because ssh-keygen defaults
+  to it.
+- Not done: rekeying, more than one session at a time, job control.
+- **No post-quantum key exchange**, which OpenSSH 10 warns about and is
+  right to. `mlkem768x25519-sha256` needs an ML-KEM implementation and
+  there is none in this mbedTLS — a project, not a setting.
 - **A resize signal is still missing.** The driver knows when the window
   changed and has no way to tell a running program. `RV9_SIG_WINCH` is the
   shape; an `RV9_CON_SS_SIZE` setstat is worth having now too, since

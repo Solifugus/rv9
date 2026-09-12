@@ -13,7 +13,7 @@
  */
 #include "modlib.h"
 
-#define LINE_MAX  128
+#define LINE_MAX  256
 #define ARG_MAX   8
 #define SAVE_PATH 5     /* spare slot used to park stdout during redirection */
 

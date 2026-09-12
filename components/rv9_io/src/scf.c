@@ -21,7 +21,7 @@
 #define XLAT_CHUNK 64
 
 /* Line discipline */
-#define LINE_MAX      128
+#define LINE_MAX      512
 #define POLL_MS       10
 #define KEY_BACKSPACE 8
 #define KEY_DELETE    127

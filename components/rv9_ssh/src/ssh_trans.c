@@ -388,8 +388,29 @@ static rv9_io_err_t check_kexinit(ssh_t *s, bool *guess_follows)
         return RV9_IO_ERR_UNSUPPORTED;
     }
 
-    s->strict_kex = ssh_name_in_list(kex, kex_len, KEX_STRICT_C);
+    s->strict_kex    = ssh_name_in_list(kex, kex_len, KEX_STRICT_C);
+    s->want_ext_info = ssh_name_in_list(kex, kex_len, "ext-info-c");
     return RV9_IO_OK;
+}
+
+/*
+ * Tell the client which signature algorithms we can verify.
+ *
+ * Without this, an OpenSSH client assumes a server that has not said
+ * otherwise can only do ssh-rsa -- which is SHA-1, which it disabled in
+ * 8.8 -- and so will not offer an RSA key at all. The key would be in
+ * authorized_keys, the client would hold the private half, and
+ * authentication would fail without either end saying anything useful.
+ */
+static rv9_io_err_t send_ext_info(ssh_t *s)
+{
+    ssh_buf_t p;
+    ssh_packet_begin(s, &p);
+    ssh_put_u8(&p, SSH_MSG_EXT_INFO);
+    ssh_put_u32(&p, 1);
+    ssh_put_cstr(&p, "server-sig-algs");
+    ssh_put_cstr(&p, SSH_SIG_ALGS);
+    return ssh_packet_send(s, &p);
 }
 
 /* Everything hashed into H is a length-prefixed string, K excepted. */
@@ -605,6 +626,11 @@ rv9_io_err_t ssh_transport(ssh_t *s)
      */
     s->enc_out = true;
     if (s->strict_kex) s->seq_out = 0;
+
+    if (s->want_ext_info) {
+        err = send_ext_info(s);
+        if (err != RV9_IO_OK) return err;
+    }
 
     err = ssh_packet_read(s);
     if (err != RV9_IO_OK) return err;
