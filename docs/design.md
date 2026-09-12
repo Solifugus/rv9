@@ -1619,6 +1619,100 @@ Signing H directly produces a signature of exactly the right shape that
 every client rejects. RFC 5656 says so plainly; it just does not read like
 it means what it says.
 
+## 18. Raw input, and an editor
+
+`ed /f0/notes`. Arrows, home/end, page up and down, `^S` to save, `^K` to
+cut, `^X` to leave. Three thousand bytes of module.
+
+The same binary edits in a 236-column SSH window and on the panel at
+thirty by eight, because it asks the path it was handed how big it is and
+never assumes. It asks again on every redraw, which costs one getstat and
+means dragging the corner of a terminal reflows it at the next keystroke.
+
+### The thing that was actually missing
+
+Two pieces were already in place — §16 gave cursor and colour that work
+the same on a framebuffer and a terminal, §17 gave a session that knows
+its real size. The missing one was not obvious until an editor needed it.
+
+**SCF reads a line.** It buffers until return, echoes as you type, handles
+rubout, and discards anything that is not printable. That is exactly right
+for a shell and exactly wrong for anything that draws: an arrow key is
+`ESC [ A`, and the escape was being thrown away before any program could
+see it. An editor built on top of that could not have a cursor key.
+
+So `RV9_SS_RAW`: a read hands over whatever arrived, as soon as it
+arrived, unechoed and unfiltered.
+
+It lives on the **path**, not the device. Echo and newline translation are
+device settings — they were there first and they describe the wire — but
+raw is a claim about how one program intends to read, and putting it on
+the device would let a program leave somebody else's shell in a strange
+state. It is inherited across `fork` with the path, which is what makes
+setting it on stdin mean anything at all.
+
+### Escape sequences without a timed read
+
+The usual way to tell `ESC` from the start of `ESC [ A` is a read with a
+short timeout, and RV-9 has no such thing.
+
+It does not need one. A sequence is recognised only when the whole of it
+is already in hand: terminals send `ESC [ A` in a single write, so an
+`ESC` sitting at the end of the buffer really was somebody pressing
+escape. The ambiguity that motivates the timeout does not survive contact
+with how terminals actually behave.
+
+### Drawing, and the cost of a setstat
+
+Every `m_cursor` is a setstat, which is a write, which over SSH is a
+packet. A full redraw of a 53-row window is 53 packets. So the editor
+redraws one line for ordinary typing and the whole screen only when it has
+to — a scroll, a newline, a resize. That is the classic approach and it is
+here for a reason that is specific to this system rather than inherited
+from tradition.
+
+The text is one flat buffer with newlines in it, and everything else —
+which line we are on, where it starts — is recomputed by scanning. Eight
+kilobytes is small enough that scanning is free, and an index would only
+be a second thing to keep correct.
+
+### And the bug that was not in the editor
+
+The first run looked right and then, after a while, the shell reappeared
+underneath the editor and the two of them fought over the keyboard.
+
+`shell.c` waited **thirty seconds** for a command and then printed a
+prompt anyway. It had not stopped the command; it had arranged for two
+processes to read one terminal. Nothing had noticed before because nothing
+had ever legitimately run for half a minute — every command so far
+finished immediately or was a daemon nobody typed at. An editor is the
+first program a person sits inside.
+
+The shell now waits `RV9_WAIT_FOREVER`, which is what `rshd` and `sshd`
+were already doing in all but name with their hour-long timeouts.
+
+A second one surfaced the same night, from the other direction: `sshd`
+stopped on *any* failure to open `/ssh0`, on the reasoning that neither
+cause got better by retrying. Two do not — no password, and another sshd
+already listening. Everything else is one connection that went wrong, and
+a server that retired over that is a server anyone can switch off from
+across the network by connecting and hanging up. It now stops only on the
+two permanent causes and waits a second before listening again.
+
+### Measured
+
+Driven over SSH from a scripted pty, reading back the escape stream:
+
+| | |
+|---|---|
+| typing a character | one row redrawn, status, cursor |
+| `ESC [ A` with a remembered column | lands where it should |
+| resize 24×80 → 40×100 | next keystroke redraws 39 rows, status at row 40 |
+| 45 seconds idle | not one unsolicited byte |
+| `^X` with changes | warns, then leaves on the second press |
+| save | `/f0/edtest` is 23 bytes, which is exactly the text |
+| three dropped connections | `sshd` still serves the next real login |
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

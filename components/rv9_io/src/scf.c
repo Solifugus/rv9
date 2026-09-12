@@ -30,6 +30,7 @@
 typedef struct {
     char   line[LINE_MAX];
     size_t len;
+    bool   raw;      /* keystrokes rather than lines; see RV9_SS_RAW */
 } scf_path_state_t;
 
 static rv9_io_err_t scf_open(rv9_path_t *path, const char *rest)
@@ -125,6 +126,28 @@ static rv9_io_err_t scf_read(rv9_path_t *path, void *buf, size_t len,
     if (dev->drv->read == NULL) return RV9_IO_ERR_UNSUPPORTED;
     if (st == NULL || len == 0) return RV9_IO_ERR_INVAL;
 
+    /*
+     * Raw: hand over what arrived and keep out of the way. No line, no
+     * echo, no filtering -- a program that draws needs the escape sequence
+     * its terminal actually sent, and the line discipline exists to remove
+     * exactly that.
+     */
+    if (st->raw) {
+        for (;;) {
+            size_t got = 0;
+            rv9_io_err_t err = dev->drv->read((rv9_dev_t *)dev, buf, len, &got);
+
+            if (err == RV9_IO_ERR_WOULDBLOCK || (err == RV9_IO_OK && got == 0)) {
+                rv9_task_delay_ms(POLL_MS);
+                continue;
+            }
+            if (err != RV9_IO_OK) return err;
+
+            if (done) *done = got;
+            return RV9_IO_OK;
+        }
+    }
+
     for (;;) {
         char ch;
         size_t got = 0;
@@ -214,6 +237,13 @@ static rv9_io_err_t scf_getstat(rv9_path_t *path, uint32_t code, void *arg)
         *(uint32_t *)arg = dev->opt[OPT_AUTOLF];
         return RV9_IO_OK;
 
+    case RV9_SS_RAW: {
+        if (arg == NULL) return RV9_IO_ERR_INVAL;
+        scf_path_state_t *st = (scf_path_state_t *)path->fm_state;
+        *(uint32_t *)arg = (st && st->raw) ? 1 : 0;
+        return RV9_IO_OK;
+    }
+
     case RV9_CON_GS_SIZE: {
         if (arg == NULL) return RV9_IO_ERR_INVAL;
 
@@ -277,6 +307,19 @@ static rv9_io_err_t scf_setstat(rv9_path_t *path, uint32_t code, void *arg)
         if (arg == NULL) return RV9_IO_ERR_INVAL;
         dev->opt[OPT_AUTOLF] = *(uint32_t *)arg;
         return RV9_IO_OK;
+
+    case RV9_SS_RAW: {
+        if (arg == NULL) return RV9_IO_ERR_INVAL;
+
+        /* Only a readable path has the state to hold it, which is also
+           the only kind for which it means anything. */
+        scf_path_state_t *st = (scf_path_state_t *)path->fm_state;
+        if (st == NULL) return RV9_IO_ERR_MODE;
+
+        st->raw = (*(uint32_t *)arg != 0);
+        st->len = 0;      /* a half-typed line is not carried across */
+        return RV9_IO_OK;
+    }
 
     case RV9_CON_SS_CURSOR:
     case RV9_CON_SS_COLOUR:

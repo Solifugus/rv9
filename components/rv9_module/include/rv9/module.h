@@ -251,6 +251,16 @@ typedef struct {
     int       (*rt_declare_event)(int event_id, uint32_t min_interval_us);
 } rv9_mod_env_t;
 
+/*
+ * Wait until it exits, however long that is.
+ *
+ * A shell that gives up on its child after some number of seconds and
+ * prints a prompt anyway has not stopped the child -- it has arranged for
+ * two processes to read the same terminal. Anything interactive is a
+ * program that legitimately runs for hours.
+ */
+#define RV9_WAIT_FOREVER ((uint32_t)0xFFFFFFFFu)
+
 /* Seek whence, matching the I/O manager. */
 #define RV9_SEEK_SET 0
 #define RV9_SEEK_CUR 1
@@ -290,7 +300,28 @@ typedef struct {
 #define RV9_SS_AUTOLF      2
 #define RV9_GS_READY       3
 #define RV9_GS_SIZE        4
+#define RV9_SS_RAW         5   /* 0 = lines, 1 = keystrokes */
 #define RV9_SS_DRIVER_BASE 256
+
+/*
+ * Raw input.
+ *
+ * Normally SCF reads a *line*: it buffers until return, echoes, handles
+ * rubout, and throws away anything that is not printable. That is right
+ * for a shell and wrong for anything that draws, because an arrow key is
+ * ESC [ A and the first byte of it would be discarded before any program
+ * saw it.
+ *
+ * In raw mode a read returns whatever has arrived, as soon as it arrives,
+ * unechoed and unfiltered. Ask for several bytes: an escape sequence is
+ * more than one, and getting it in a single read saves guessing whether
+ * more is coming.
+ *
+ * It belongs to the open path rather than the device, so a program that
+ * sets it cannot leave somebody else's shell in a strange state -- but it
+ * is inherited with the path across fork, which is what lets a program set
+ * it on stdin and have it mean something. Put it back before exiting.
+ */
 
 /*
  * Peripheral settings, shared by every PIO device so that a program does

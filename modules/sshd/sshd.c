@@ -38,15 +38,28 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         int c = env->open(LISTEN_PATH, RV9_MODE_RW);
         if (c < 0) {
             /*
-             * Stop, and say which of the two it was. Looping here would
-             * spin: neither of these gets better by trying again, and one
-             * of them is another sshd already doing the job.
+             * Two of these are permanent and the rest are not.
+             *
+             * No password and another sshd already listening will not get
+             * better by trying again, so stop. Anything else is one
+             * connection that went wrong -- a client that hung up during
+             * the handshake, a port scan, a timeout -- and a server that
+             * retired over that would be a server anyone could turn off
+             * from across the network by connecting and leaving.
              */
-            m_say(env, RV9_STDERR,
-                  (c == -RV9_IOE_EXISTS)
-                      ? "sshd: already running\n"
-                      : "sshd: cannot open /ssh0 -- set a password first\n");
-            return -3;
+            if (c == -RV9_IOE_EXISTS) {
+                m_say(env, RV9_STDERR, "sshd: already running\n");
+                return -3;
+            }
+            if (c == -RV9_IOE_MODE) {
+                m_say(env, RV9_STDERR,
+                      "sshd: no login password -- run `passwd` first\n");
+                return -4;
+            }
+
+            /* Pause, so a condition that fails instantly cannot spin. */
+            env->sleep_ms(1000);
+            continue;
         }
 
         st->sessions++;

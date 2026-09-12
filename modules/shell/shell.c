@@ -118,7 +118,10 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
     int status = 0;
 
     if (pid >= 0) {
-        if (env->wait(pid, &status, 30000) < 0) status = -1;
+        /* Until it finishes. Giving up after thirty seconds did not stop
+           the command -- it put a second reader on the same terminal, and
+           an editor and a shell then fought over every keystroke. */
+        if (env->wait(pid, &status, RV9_WAIT_FOREVER) < 0) status = -1;
     }
 
     if (redirected) {

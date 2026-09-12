@@ -97,6 +97,11 @@ Since revisited:
   colour and not once per scanline. Fixed a latent bug on the way: colours
   were stored pre-byte-swapped, which every blend would have got wrong the
   moment a second colour existed.
+- **Raw input — done**, `RV9_SS_RAW`, see design §18. A read hands over
+  keystrokes rather than a line: unechoed, unfiltered, escape sequences
+  intact. Without it an arrow key never reaches a program, because the
+  line discipline drops the escape. It lives on the path rather than the
+  device, so one program cannot leave another's shell strange.
 - **Size over a wire — since fixed by SSH**, phase 9. `pty-req` carries the
   client's real dimensions, so the 80×24 guess now applies only to a
   session with no pty, which is the honest answer there. A resize
@@ -119,6 +124,15 @@ Since revisited:
   a different module, keeping its pid, priority and open paths
 - `sysinfo` in the module ABI, so utilities can ask about modules, processes
   and memory without being part of the kernel
+- **`ed` — a full-screen editor, done**, see design §18. Arrows, home/end,
+  page up/down, ^S save, ^K cut, ^X quit. Three kilobytes. The same binary
+  runs at 236 columns over SSH and 30x8 on the panel, asking the path how
+  big it is on every redraw — so a resize reflows at the next keystroke and
+  no resize signal is needed.
+- **The shell waited thirty seconds for a command and then printed a prompt
+  anyway — fixed.** It had not stopped the command, it had put two
+  processes on one terminal. Nothing noticed until a program existed that a
+  person sits inside for longer than that.
 - `load`/`unlink` as commands, and pipes, did **not** land. Pipes want a PIPE
   file manager, which is better company for RBF in phase 5 than bolted on
   here.
