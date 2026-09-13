@@ -99,15 +99,32 @@ static rv9_proc_t *current_locked(void)
 /* Real-time services, refused to processes that are not in that class:
    declaring a period from an ordinary process would promise a guarantee
    the scheduler underneath it cannot make. */
+/*
+ * Zero means "the period I was admitted at".
+ *
+ * The rate a control law runs at is a property of the control law, so it
+ * belongs in the module's manifest rather than in a constant the module
+ * carries and an operator retypes. fork_common has already resolved it --
+ * from what the caller asked for, or failing that from the manifest -- and
+ * this is how the module reads it back rather than inventing its own.
+ */
 static int env_rt_declare(uint32_t period_us)
 {
     rv9_lock_acquire(s_lock);
     rv9_proc_t *p = current_locked();
     bool ok = (p != NULL && p->cls == RV9_CLASS_REALTIME);
-    if (ok) p->period_us = period_us;
+    if (ok) {
+        if (period_us == 0) period_us = p->period_us;
+        else                p->period_us = period_us;
+    }
     rv9_lock_release(s_lock);
 
     if (!ok) return -1;
+
+    /* Nobody said, and the module did not declare one. A real-time process
+       with no period is not a real-time process. */
+    if (period_us == 0) return -4;
+
     return rv9_rt_declare(period_us) == RV9_OK ? 0 : -2;
 }
 
@@ -613,6 +630,22 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
 
     const rv9_mod_header_t *h = (const rv9_mod_header_t *)mod->image;
 
+    /*
+     * What the module says about itself, where the caller did not say.
+     *
+     * A period belongs to the program, not to whoever typed its name: the
+     * compiler knows the control law's rate and the shell does not. So
+     * `rt <module>` with no period runs it at the rate the module
+     * declared, and an explicit period still wins -- an operator
+     * overriding a program's own figure is a deliberate act.
+     */
+    if (cls == RV9_CLASS_REALTIME && period_us == 0) {
+        uint32_t declared = 0;
+        if (rv9_mod_manifest_u32(mod->image, RV9_MTAG_PERIOD_US, &declared)) {
+            period_us = declared;
+        }
+    }
+
     rv9_proc_t *p = rv9_calloc(1, sizeof(*p));
     if (p == NULL) {
         rv9_mod_unlink(mod);
@@ -653,7 +686,16 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
     /* Hand the child whatever the parent had open, before it can run. */
     if (s_on_fork) s_on_fork(parent, p->pid);
 
-    size_t stack = h->stack_size ? h->stack_size : PROC_DEFAULT_STACK;
+    /* The manifest's figure is the compiler's; the header's is the build's.
+       Either beats the 8 KB default, which is a guess nobody made. */
+    size_t stack = h->stack_size;
+    if (stack == 0) {
+        uint32_t declared = 0;
+        if (rv9_mod_manifest_u32(mod->image, RV9_MTAG_STACK, &declared)) {
+            stack = declared;
+        }
+    }
+    if (stack == 0) stack = PROC_DEFAULT_STACK;
 
     /* A real-time process is not an RV-9 thread: it runs preemptively
        above everything, because its latency must not depend on anyone

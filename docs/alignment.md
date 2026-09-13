@@ -142,9 +142,9 @@ Measured or checked against the running system, 2026-09-12.
 
 | | status |
 |---|---|
-| 1. resource contract in the header | partial — four fields exist, no extension mechanism |
+| 1. resource contract in the header | **done as a mechanism** — an optional TLV manifest the header points at; unknown advisory tags skipped, unknown mandatory tags refused. Most tags have no consumer yet, which is the point |
 | 2. per-program stack | **done**, `stack_size` in `build.conf`; overflow **detected** (guard word, thread killed), not prevented — PMP is phase 7 |
-| 3. RT admission | not started — RT work is launched, not admitted |
+| 3. RT admission | still launched rather than admitted, but the requirement is now *declared*: class, period, deadline, WCET, heap ceiling ride in the manifest, and `rt control` takes its rate from there rather than from a shell default |
 | 4. protected reserves | **partial** — a 12 KB floor RV-9 will not allocate into, so exhaustion is a refusal it reports rather than an abort inside ESP-IDF; no per-process limit, no RT-specific reserve |
 | 5. heap policy by class | see below — the situation is the reverse of what is assumed |
 | 6. device ownership | reference counts only; no owner identity, no exclusivity |
@@ -153,7 +153,7 @@ Measured or checked against the running system, 2026-09-12.
 | 9. failsafe below the process | release-on-exit works; declared safe states do not exist |
 | 10. timing as state | **done**, `RV9_SYS_RT` |
 | 11. no POSIX assumptions | **already true** and worth defending |
-| 12. extensible manifest | not started — the highest-value item |
+| 12. extensible manifest | **done** — `rv9_mod_header_t.manifest_offset` points at a TLV list; sixteen tags registered, `build.conf` emits them, `tools/modinfo.py` reads them back |
 | 13. resource certificate | not started; validation loop partly exists |
 | 14. measurement | **established practice**: `free`, `stacks`, `procs`, `docs/memory.md` |
 | 15. no language semantics in the OS | held so far |

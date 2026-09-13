@@ -82,6 +82,28 @@ for dir in "$ROOT"/modules/*/; do
     stack_size=0        # 0 lets the loader decide (PROC_DEFAULT_STACK)
     revision=0
     mtype=program
+
+    # The resource contract: what the program says it needs, over and above
+    # the four numbers the fixed header holds. Everything here is optional,
+    # and a module that declares none of it gets no manifest at all --
+    # which is every module built before the manifest existed.
+    #
+    # Suffix a key with ! to make it mandatory, meaning a system that does
+    # not understand it must refuse to run the module rather than quietly
+    # ignoring the requirement.
+    desc=""
+    heap_max=""
+    class=""
+    period_us=""
+    deadline_us=""
+    min_inter_us=""
+    wcet_us=""
+    failsafe=""
+    devices=""          # space separated, shared access
+    exclusives=""       # space separated, wanted alone
+    capabilities=""     # space separated
+    mandatory=""        # space separated key names, e.g. "heap_max class"
+
     [[ -f "$dir/build.conf" ]] && source "$dir/build.conf"
 
     "$CC" "${CFLAGS[@]}" "${LDFLAGS[@]}" -o "$OUT/$name.elf" "${srcs[@]}"
@@ -108,12 +130,38 @@ for dir in "$ROOT"/modules/*/; do
         exit 1
     fi
 
+    # Turn the build.conf keys into --tag arguments. A key named in
+    # $mandatory gets the "!" suffix mkmodule.py reads as "refuse the
+    # module rather than ignore this".
+    tags=()
+    add_tag() {
+        local key="$1" value="$2"
+        [[ -n "$value" ]] || return 0
+        for m in $mandatory; do
+            [[ "$m" == "$key" ]] && { tags+=(--tag "$key!=$value"); return 0; }
+        done
+        tags+=(--tag "$key=$value")
+    }
+
+    add_tag desc         "$desc"
+    add_tag heap_max     "$heap_max"
+    add_tag class        "$class"
+    add_tag period_us    "$period_us"
+    add_tag deadline_us  "$deadline_us"
+    add_tag min_inter_us "$min_inter_us"
+    add_tag wcet_us      "$wcet_us"
+    add_tag failsafe     "$failsafe"
+    for d in $devices;      do add_tag device     "$d"; done
+    for d in $exclusives;   do add_tag exclusive  "$d"; done
+    for c in $capabilities; do add_tag capability "$c"; done
+
     python3 "$ROOT/tools/mkmodule.py" \
         --name "$name" \
         --type "$mtype" \
         --static-size "$static_size" \
         --stack-size "$stack_size" \
         --revision "$revision" \
+        "${tags[@]}" \
         "$OUT/$name.bin" "$OUT/$name.mod"
 
     # A module marked .nostore is built but kept out of the flash image --

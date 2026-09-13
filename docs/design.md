@@ -2346,6 +2346,142 @@ And 12,288 is a starting point rather than a measurement: the size of the
 thing that aborted, plus margin. Sizing it properly means watching `low
 water` under the heaviest load the system will really carry.
 
+## 24. What a program says it needs
+
+> A program should be able to describe what machine resources it requires
+> before RV-9 agrees to run it.
+
+The fixed header holds four numbers — static size, stack hint, type, entry
+— and they were never going to be enough. A resource contract wants heap
+ceiling, execution class, period, deadline, minimum inter-arrival, worst-
+case execution, required devices, exclusive versus shared ownership,
+failsafe state, capabilities, which compiler built it. Adding each of those
+to the header in turn means breaking every module in the store, in turn.
+
+So the header points at an optional list of tagged values instead. What was
+`reserved1` is now `manifest_offset`; zero means no manifest, which is
+every module built before this existed, so nothing had to be rebuilt to
+keep working. The list lives between the name and the code:
+
+```
+uint16_t tag
+uint16_t len        bytes of value, padding not counted
+uint8_t  value[len]
+padding to the next multiple of four
+```
+
+Four-byte alignment for a two-byte header costs a couple of bytes per entry
+and buys aligned numeric values, which matters when the producer is a
+Python script and the consumer is a RISC-V core reading flash.
+
+### The bit that says "you must understand this"
+
+An unknown tag is normally skipped. That is what makes the format worth
+having: a compiler can emit tomorrow's field into today's system and both
+sides stay honest.
+
+But some requirements cannot be quietly dropped. *This program must never
+allocate.* *This device must be mine alone.* A loader that skips one of
+those has agreed to a contract it does not understand, which is worse than
+refusing the module.
+
+So the top bit of the tag says which kind it is, and an unknown mandatory
+tag is a refusal — `RV9_MOD_ERR_CONTRACT`, "requires something
+unsupported". The bit lives in the tag rather than in a flags field so that
+the two versions of a field are simply different tags: the producer decides
+per value whether being understood matters, and `control` marks exactly one
+of its six — `heap_max = 0`.
+
+### Declared, not yet enforced
+
+Sixteen tags are registered and most have no consumer. That is the point,
+not a gap: the numbers are the agreement between the compiler and RV-9, and
+a program may describe itself completely to a system that acts on part of
+it. Enforcement arrives later without anything being rebuilt.
+
+Two act today, and both replace a guess with the program's own figure:
+
+- **`RV9_MTAG_STACK`** when the header's `stack_size` is zero, ahead of the
+  8 KB default that nobody chose.
+- **`RV9_MTAG_PERIOD_US`** for a real-time process forked without one.
+
+The second is the more interesting of the two, because it moved a number to
+where it belongs. `control` used to carry `#define DEFAULT_PERIOD_US 1000`
+and `rt` used to default to 1000 as well — the same figure written twice,
+in two places that could not see each other, neither of them the control
+law. Now `rt control` passes zero, the process manager resolves it from the
+manifest, and `env->rt_declare(0)` means "the period I was admitted at".
+The rate of a control law is a property of the control law:
+
+```
+rv9> rt control
+control: 2000 activations at 1000 us     <- from build.conf
+rv9> rt control 2000
+control: 2000 activations at 2000 us     <- an operator overriding it
+```
+
+### Writing and reading
+
+`build.conf` gained the contract keys, so declaring one is a line of text
+next to the module's source rather than a change to the build:
+
+```sh
+desc="periodic PI control loop with honest jitter reporting"
+class=realtime
+heap_max=0
+period_us=1000
+deadline_us=1000
+wcet_us=50
+mandatory="heap_max"
+```
+
+`tools/modinfo.py` reads it back, because a format nobody can inspect is a
+format nobody will trust:
+
+```
+control
+  stack          1536
+  manifest
+     desc           periodic PI control loop with honest jitter reporting
+    !heap_max       0 (no heap at all)
+     class          realtime
+     period_us      1000
+     deadline_us    1000
+     wcet_us        50
+```
+
+The declared WCET is 50 µs and the loop reports 26–27 µs worst observed,
+which is the beginning of item 13: a claim RV-9 can check rather than
+believe.
+
+`mkmodule.py` also accepts a numeric tag, so a producer newer than these
+tools can emit a field neither of them knows.
+
+### Testing data written by somebody else
+
+A manifest is read off flash, which makes it hostile input: a length that
+runs past the end of the module, an offset pointing back into the header,
+an entry that does not advance. None of those can be produced by
+`mkmodule.py`, so a test that reads only well-formed modules tests nothing
+that matters.
+
+`main/module_test.c` builds its images in memory instead — including the
+broken ones and the unknown-mandatory refusal, neither of which would
+otherwise be reachable without a way to get a deliberately bad module onto
+the board. One bounds-checked walker serves the finder, the numeric
+accessors and the contract check, so there is one place to get the bounds
+right. 17 passed, 0 failed.
+
+### One record that still cannot grow this way
+
+`rv9_sys_mem_t` gained three fields for the memory floor, and the reader
+had to be taught to fill a short caller's prefix rather than reject it.
+That is a patch on one record. The sysinfo array records — `rv9_sys_module_t`,
+`rv9_sys_stack_t` — are worse, because the caller's buffer length is
+divided by the record size to get a count, so growing one silently changes
+the stride an older module reads with. They need the same treatment the
+module header just got, and have not had it.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

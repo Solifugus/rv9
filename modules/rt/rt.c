@@ -22,7 +22,10 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     const char *rest = env->arg + i;
     while (*rest == ' ') rest++;
 
-    uint32_t period = 1000;
+    /* Zero means "whatever the module says it needs". A period typed at a
+       shell is an override, not a default: the rate belongs to the control
+       law, and the module's manifest is where it is written down. */
+    uint32_t period = 0;
     if (*rest) {
         uint32_t v = 0;
         for (uint32_t j = 0; rest[j] >= '0' && rest[j] <= '9'; j++) {

@@ -11,7 +11,6 @@
  */
 #include "modlib.h"
 
-#define DEFAULT_PERIOD_US 1000      /* 1 kHz */
 #define RUN_ACTIVATIONS   2000      /* two seconds at 1 kHz */
 
 typedef struct {
@@ -33,7 +32,13 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     control_statics_t *st = (control_statics_t *)env->statics;
     if (st == NULL || env->statics_size < sizeof(*st)) return -3;
 
-    uint32_t period = DEFAULT_PERIOD_US;
+    /*
+     * Zero asks for the period this process was admitted at, which comes
+     * from the manifest in build.conf. The rate is a property of the
+     * control law and belongs written down beside it, not as a constant
+     * here that nothing outside the module can read.
+     */
+    uint32_t period = 0;
     if (env->arg && env->arg[0]) {
         uint32_t v = 0;
         for (uint32_t i = 0; env->arg[i] >= '0' && env->arg[i] <= '9'; i++) {

@@ -41,8 +41,150 @@ const char *rv9_mod_strerror(rv9_mod_err_t err)
     case RV9_MOD_ERR_NOMEM:    return "out of memory";
     case RV9_MOD_ERR_IO:       return "storage error";
     case RV9_MOD_ERR_INVAL:    return "invalid module";
+    case RV9_MOD_ERR_CONTRACT: return "requires something unsupported";
     default:                   return "unknown error";
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* The manifest                                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Walking the list is the same three lines everywhere, and getting the
+ * bounds wrong on data read off flash is how a bad module becomes a
+ * crash. One walker, used by everything.
+ *
+ * `fn` sees each entry and stops the walk by returning false.
+ */
+typedef bool (*tlv_visit_fn)(uint16_t tag, const void *value, uint16_t len,
+                             void *ctx);
+
+static void manifest_walk(const void *image, tlv_visit_fn fn, void *ctx)
+{
+    if (image == NULL) return;
+
+    const rv9_mod_header_t *h = (const rv9_mod_header_t *)image;
+    uint32_t off = h->manifest_offset;
+    if (off == 0) return;
+
+    /* Every offset in a module is checked against module_len, because the
+       header is data and data off a flash partition is not trusted. */
+    if (off < h->header_len || off >= h->module_len) return;
+
+    const uint8_t *base = (const uint8_t *)image;
+
+    while (off + sizeof(rv9_mod_tlv_t) <= h->module_len) {
+        rv9_mod_tlv_t e;
+        memcpy(&e, base + off, sizeof(e));      /* may be unaligned in flash */
+
+        if (RV9_MTAG_NUMBER(e.tag) == RV9_MTAG_END) return;
+
+        uint32_t value_off = off + sizeof(e);
+        if (value_off + e.len > h->module_len) return;   /* runs off the end */
+
+        if (!fn(e.tag, base + value_off, e.len, ctx)) return;
+
+        /* Entries are four-byte aligned, so a numeric value is aligned
+           when its length is. */
+        uint32_t next = value_off + e.len;
+        next += (4 - (next % 4)) % 4;
+        if (next <= off) return;                /* no progress: malformed */
+        off = next;
+    }
+}
+
+typedef struct {
+    uint16_t    want;
+    const void *after;      /* skip everything up to and including this */
+    bool        armed;      /* past `after` yet */
+    const void *found;
+    uint16_t    len;
+} find_ctx_t;
+
+static bool find_visit(uint16_t tag, const void *value, uint16_t len, void *v)
+{
+    find_ctx_t *c = (find_ctx_t *)v;
+
+    if (RV9_MTAG_NUMBER(tag) != c->want) return true;
+
+    if (!c->armed) {
+        if (value == c->after) c->armed = true;
+        return true;
+    }
+
+    c->found = value;
+    c->len   = len;
+    return false;
+}
+
+const void *rv9_mod_manifest_find(const void *image, uint16_t tag,
+                                  const void *after, uint16_t *out_len)
+{
+    find_ctx_t c = {
+        .want  = RV9_MTAG_NUMBER(tag),
+        .after = after,
+        .armed = (after == NULL),
+    };
+    manifest_walk(image, find_visit, &c);
+
+    if (c.found && out_len) *out_len = c.len;
+    return c.found;
+}
+
+bool rv9_mod_manifest_u32(const void *image, uint16_t tag, uint32_t *out)
+{
+    uint16_t len = 0;
+    const void *v = rv9_mod_manifest_find(image, tag, NULL, &len);
+    if (v == NULL || len != sizeof(uint32_t)) return false;
+
+    uint32_t value;
+    memcpy(&value, v, sizeof(value));
+    if (out) *out = value;
+    return true;
+}
+
+bool rv9_mod_manifest_u8(const void *image, uint16_t tag, uint8_t *out)
+{
+    uint16_t len = 0;
+    const void *v = rv9_mod_manifest_find(image, tag, NULL, &len);
+    if (v == NULL || len != sizeof(uint8_t)) return false;
+
+    if (out) *out = *(const uint8_t *)v;
+    return true;
+}
+
+/*
+ * Is there anything in here we have agreed to without understanding?
+ *
+ * An unknown advisory tag is skipped, which is what makes the format worth
+ * having. An unknown mandatory one is a promise this build cannot keep --
+ * "never allocate", "this device alone" -- and running the module anyway
+ * would be worse than refusing it.
+ */
+static bool contract_visit(uint16_t tag, const void *value, uint16_t len,
+                           void *v)
+{
+    (void)value; (void)len;
+
+    if ((tag & RV9_MTAG_MANDATORY) == 0)          return true;
+    if (RV9_MTAG_NUMBER(tag) <= RV9_MTAG_MAX)     return true;
+
+    *(uint16_t *)v = RV9_MTAG_NUMBER(tag);
+    return false;
+}
+
+static rv9_mod_err_t manifest_check(const void *image)
+{
+    uint16_t offender = 0;
+    manifest_walk(image, contract_visit, &offender);
+
+    if (offender != 0) {
+        ESP_LOGE(TAG, "module requires tag %u, which this build does not "
+                      "understand", (unsigned)offender);
+        return RV9_MOD_ERR_CONTRACT;
+    }
+    return RV9_MOD_OK;
 }
 
 rv9_mod_err_t rv9_mod_verify(const void *image, size_t avail)
@@ -73,7 +215,11 @@ rv9_mod_err_t rv9_mod_verify(const void *image, size_t avail)
     crc = rv9_crc32(crc, p + crc_off + sizeof(uint32_t),
                     h->module_len - crc_off - sizeof(uint32_t));
 
-    return (crc == h->crc32) ? RV9_MOD_OK : RV9_MOD_ERR_BADCRC;
+    if (crc != h->crc32) return RV9_MOD_ERR_BADCRC;
+
+    /* Last, and only once the bytes are known to be the bytes that were
+       written: a manifest read out of a corrupt image says nothing. */
+    return manifest_check(image);
 }
 
 static void dir_append(rv9_mod_entry_t *entry)

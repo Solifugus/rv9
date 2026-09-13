@@ -66,11 +66,106 @@ typedef struct __attribute__((packed)) {
     uint8_t  revision;      /* higher revision wins when names collide */
     uint8_t  reserved0;
     uint32_t crc32;
-    uint32_t reserved1;
+    uint32_t manifest_offset; /* TLV manifest, from module start; 0 = none */
 } rv9_mod_header_t;
 
 _Static_assert(sizeof(rv9_mod_header_t) == RV9_MODULE_HDR_LEN,
                "module header must be exactly 40 bytes");
+
+/* ------------------------------------------------------------------ */
+/* The manifest                                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * What a program says it needs, before RV-9 agrees to run it.
+ *
+ * The fixed header holds four numbers -- static size, stack hint, type,
+ * entry -- and they were never going to be enough. A resource contract
+ * wants heap ceiling, execution class, period, deadline, minimum
+ * inter-arrival, required devices, exclusive versus shared ownership,
+ * failsafe state, capabilities, which compiler built it. Adding each of
+ * those to the header in turn means breaking every module in the store,
+ * in turn.
+ *
+ * So the header points at an optional list of tagged values instead, laid
+ * out after the name and before the code. A module with no manifest has
+ * manifest_offset == 0, which is every module built before this existed.
+ *
+ * Layout: entries back to back, each 4-byte aligned, ending at a tag of
+ * RV9_MTAG_END or at the end of the module.
+ *
+ *     uint16_t tag
+ *     uint16_t len        bytes of value, padding not counted
+ *     uint8_t  value[len]
+ *     padding to the next multiple of four
+ *
+ * ---- advisory and mandatory ----
+ *
+ * An unknown tag is normally skipped: that is what makes the format worth
+ * having, because a compiler can emit tomorrow's field into today's
+ * system. But some requirements cannot be quietly dropped -- "this program
+ * must never allocate", "this device must be mine alone" -- and a loader
+ * that ignores one of those has agreed to a contract it does not
+ * understand.
+ *
+ * So the top bit of the tag says which kind it is. An unknown MANDATORY
+ * tag means the module is refused. The bit belongs to the tag rather than
+ * to a flags field so that the two versions of a field are different tags:
+ * a producer decides per value whether being understood matters.
+ */
+#define RV9_MTAG_MANDATORY  0x8000u
+#define RV9_MTAG_NUMBER(t)  ((uint16_t)((t) & 0x7FFFu))
+
+typedef struct __attribute__((packed)) {
+    uint16_t tag;
+    uint16_t len;
+} rv9_mod_tlv_t;
+
+/*
+ * The registry.
+ *
+ * These numbers are the agreement between the compiler and RV-9, and they
+ * are fixed once published. Most have no consumer here yet, and that is
+ * the point: a program may describe itself completely to a system that
+ * only acts on part of it, and the rest becomes enforcement later without
+ * anything being rebuilt.
+ */
+#define RV9_MTAG_END          0x0000  /* ends the list                     */
+#define RV9_MTAG_DESC         0x0001  /* string: what this program is      */
+#define RV9_MTAG_STACK        0x0002  /* u32: bytes of stack required      */
+#define RV9_MTAG_STATIC       0x0003  /* u32: bytes of per-instance data   */
+#define RV9_MTAG_HEAP_MAX     0x0004  /* u32: ceiling; 0 means none at all */
+#define RV9_MTAG_CLASS        0x0005  /* u8:  rv9_mod_class_t              */
+#define RV9_MTAG_PERIOD_US    0x0006  /* u32: release period               */
+#define RV9_MTAG_DEADLINE_US  0x0007  /* u32: from release                 */
+#define RV9_MTAG_MIN_INTER_US 0x0008  /* u32: minimum inter-arrival        */
+#define RV9_MTAG_WCET_US      0x0009  /* u32: worst-case execution         */
+#define RV9_MTAG_DEVICE       0x000A  /* string: needed, shared; repeats   */
+#define RV9_MTAG_EXCLUSIVE    0x000B  /* string: needed alone; repeats     */
+#define RV9_MTAG_FAILSAFE     0x000C  /* string: state to leave hardware in*/
+#define RV9_MTAG_CAPABILITY   0x000D  /* string: privilege wanted; repeats */
+#define RV9_MTAG_COMPILER     0x000E  /* string: what built it             */
+#define RV9_MTAG_RUNTIME      0x000F  /* string: language runtime version  */
+
+/* The highest tag this build understands. Anything above it is unknown,
+   and unknown plus mandatory is a refusal. */
+#define RV9_MTAG_MAX          0x000F
+
+/*
+ * Execution class, as the language means it.
+ *
+ * Distinct from rv9_proc_class_t, which is the two scheduling arrangements
+ * RV-9 actually has. Proaction and reaction are both scheduled as normal
+ * processes today; saying so is the module's business, deciding what to do
+ * about it is RV-9's, and conflating them would lose the distinction the
+ * moment RV-9 learns to treat them differently.
+ */
+typedef enum {
+    RV9_MCLASS_UNSPECIFIED = 0,
+    RV9_MCLASS_PROACTION   = 1,   /* goals and planning; loose timing     */
+    RV9_MCLASS_REACTION    = 2,   /* events and state; bounded preferred  */
+    RV9_MCLASS_REALTIME    = 3,   /* control and sampling; hard deadlines */
+} rv9_mod_class_t;
 
 /* ------------------------------------------------------------------ */
 /* Module ABI -- what a module receives when it runs                   */
@@ -590,6 +685,7 @@ typedef enum {
     RV9_MOD_ERR_NOMEM,
     RV9_MOD_ERR_IO,
     RV9_MOD_ERR_INVAL,
+    RV9_MOD_ERR_CONTRACT,   /* the manifest demands something unknown here */
 } rv9_mod_err_t;
 
 const char *rv9_mod_strerror(rv9_mod_err_t err);
@@ -669,6 +765,29 @@ uint32_t rv9_crc32(uint32_t crc, const void *data, size_t len);
 
 /* Verify a module image already in memory. */
 rv9_mod_err_t rv9_mod_verify(const void *image, size_t avail);
+
+/*
+ * Read one value out of a module's manifest.
+ *
+ * Returns a pointer into the image -- no copy, no allocation, and valid
+ * for as long as the image is. NULL when the tag is absent, which is the
+ * common answer and not an error: almost nothing declares almost anything
+ * yet.
+ *
+ * `tag` is given without the mandatory bit; a value carrying it is found
+ * either way, because whether the producer insisted on being understood
+ * does not change what the value means.
+ *
+ * Repeatable tags -- devices, capabilities -- are walked by passing the
+ * previous value back as `after`, or NULL to start.
+ */
+const void *rv9_mod_manifest_find(const void *image, uint16_t tag,
+                                  const void *after, uint16_t *out_len);
+
+/* The same, for the tags whose value is a little-endian number. Returns
+   false when the tag is absent or the wrong size, leaving *out alone. */
+bool rv9_mod_manifest_u32(const void *image, uint16_t tag, uint32_t *out);
+bool rv9_mod_manifest_u8(const void *image, uint16_t tag, uint8_t *out);
 
 /*
  * Add a module from an image in memory rather than from the store.

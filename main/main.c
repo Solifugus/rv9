@@ -15,6 +15,7 @@
 #include "rv9/ssh_builtin.h"
 #include "kal_selftest.h"
 #include "kernel_test.h"
+#include "module_test.h"
 #include "conformance.h"
 
 #define RV9_RUN_KERNEL_TEST 1
@@ -694,6 +695,8 @@ static void rv9_init_task(void *arg)
 
     /* The KAL contract, against whichever kernel this build runs on. */
     rv9_conformance_run(rv9_ops_freertos());
+
+    rv9_module_selftest();
 
     rv9_mod_dir_init();
     mdir();
