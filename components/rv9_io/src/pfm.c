@@ -848,8 +848,17 @@ static void pfm_ended(rv9_dev_t *dev, rv9_pid_t pid, int fault)
         if (c->name[0] == '\0') continue;
 
         if (c->reserved_by == pid) c->reserved_by = 0;
+        if (c->last_writer != pid) continue;
 
-        if (fault == RV9_FAULT_NONE || c->last_writer != pid) continue;
+        /*
+         * This is the one notice this process's end gets, so the cell stops
+         * naming it afterwards whatever happens below. Pids are reused once
+         * they wrap, and a later process given this number must not be able
+         * to mark a cell it never wrote as its own fault.
+         */
+        c->last_writer = 0;
+
+        if (fault == RV9_FAULT_NONE) continue;
         if (c->held || c->fault != 0) continue;
 
         c->fault = (uint32_t)fault;

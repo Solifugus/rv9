@@ -117,6 +117,18 @@ typedef struct rv9_driver {
     rv9_io_err_t (*setstat)(struct rv9_dev *dev, uint32_t code, void *arg);
 
     /*
+     * The session is being ended while calls are still inside the driver.
+     *
+     * Make them return, promptly and without freeing anything: they are
+     * still using it. `ssh` shuts its socket so a read waiting for a client
+     * that will never type again gets an answer. Called before `close`,
+     * which does the freeing once nothing is inside. Optional; a driver
+     * without it is waited on for a while and then abandoned rather than
+     * freed under its callers.
+     */
+    rv9_io_err_t (*hangup)(struct rv9_dev *dev);
+
+    /*
      * Block devices implement these instead of read/write. A driver is one
      * kind or the other: character drivers move bytes as they arrive, block
      * drivers move whole sectors at an address. Pretending one is the other
@@ -247,6 +259,19 @@ typedef struct rv9_dev {
     bool                 initialised;
     uint32_t             open_count;
 
+    /*
+     * Sessions, for a device whose driver has one (drv->open != NULL).
+     *
+     * `session` names the current one; a path remembers the session it was
+     * opened in, and a path from an ended session gets RV9_IO_ERR_IO from
+     * then on without reaching the driver. `busy` counts calls inside the
+     * driver right now, so a session is never torn down under one.
+     * `hanging` refuses new opens while a hangup is still in progress.
+     */
+    uint32_t             session;
+    uint32_t             busy;
+    bool                 hanging;
+
     struct rv9_dev      *next;
 } rv9_dev_t;
 
@@ -258,6 +283,7 @@ typedef struct rv9_path {
     int64_t    pos;
     void      *fm_state;     /* the file manager's own */
     uint32_t   refs;         /* shared when a child inherits it */
+    uint32_t   session;      /* the device's session when this was opened */
 
     /* The ownership record this path holds a reference on, released when
        the last reference to the path goes. NULL for a path opened before

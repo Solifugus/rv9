@@ -553,6 +553,22 @@ typedef struct {
 #define RV9_GS_READY       3
 #define RV9_GS_SIZE        4
 #define RV9_SS_RAW         5   /* 0 = lines, 1 = keystrokes */
+
+/*
+ * End the session this path belongs to. setstat, arg ignored.
+ *
+ * For a device with sessions -- /ssh0 -- whoever established the session
+ * says when it is over, rather than the last path to it closing. That is
+ * not the same moment: a background job started in the session inherited
+ * its terminal, and would otherwise keep the session, and the device, for
+ * as long as it runs, so that nobody else could log in.
+ *
+ * After a hangup the next open starts a new session. Every path left over
+ * from the old one gets RV9_IOE_IO; the processes holding them are left
+ * running. A control loop started over a network link must not stop
+ * because the link did. RV9_IOE_UNSUPPORTED on a device without sessions.
+ */
+#define RV9_SS_HANGUP      6
 #define RV9_SS_DRIVER_BASE 256
 
 /*

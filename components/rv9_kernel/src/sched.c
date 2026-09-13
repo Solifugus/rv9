@@ -205,6 +205,7 @@ rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
     t->fault       = RV9K_FAULT_NONE;
     t->held        = false;
     t->holds       = 0;
+    t->cancel      = false;
 
     /* Stacks grow down. RISC-V wants the pointer 16-byte aligned. */
     uint32_t *top = stack + words;
@@ -541,7 +542,10 @@ void rv9k_thread_kill(rv9k_thread_t *t)
 int rv9k_thread_stop(rv9k_thread_t *t)
 {
     if (t == NULL || t == s_current || t->state == RV9K_DEAD) return -1;
-    if (t->holds > 0) return -2;
+    if (t->holds > 0) {
+        t->cancel = true;
+        return -2;
+    }
 
     if (t->blocked_on) {
         waitq_remove((rv9k_waitq_t *)t->blocked_on, t);

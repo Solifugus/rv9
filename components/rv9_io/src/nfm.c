@@ -158,6 +158,7 @@ static rv9_io_err_t connect_out(const char *host, uint16_t port, int *out_fd)
             close(fd);
             return RV9_IO_ERR_IO;
         }
+        if (rv9_task_cancelled()) break;    /* being stopped: let go */
         rv9_task_delay_ms(POLL_MS);
     }
 
@@ -204,6 +205,15 @@ static rv9_io_err_t accept_in(uint16_t port, int *out_fd)
                      (unsigned)port, errno, strerror(errno));
             break;
         }
+
+        /*
+         * Being stopped. This loop has no end of its own -- it waits for
+         * somebody to connect -- and the process around it cannot be killed
+         * while it is here, because the listener below would be lost with
+         * its stack and the port bound until reboot. So it is asked to give
+         * up instead, and gives the port back on the way out.
+         */
+        if (rv9_task_cancelled()) break;
         rv9_task_delay_ms(POLL_MS);
     }
 
@@ -283,6 +293,7 @@ static rv9_io_err_t nfm_read(rv9_path_t *path, void *buf, size_t len,
         }
         if (!would_block()) break;
         if (st->nowait) return RV9_IO_ERR_WOULDBLOCK;
+        if (rv9_task_cancelled()) break;    /* being stopped: an error, now */
         rv9_task_delay_ms(POLL_MS);
     }
 
@@ -304,6 +315,7 @@ static rv9_io_err_t nfm_write(rv9_path_t *path, const void *buf, size_t len,
         int n = send(st->fd, p + sent, len - sent, 0);
         if (n > 0) { sent += (size_t)n; waited = 0; continue; }
         if (n < 0 && !would_block()) break;
+        if (rv9_task_cancelled()) break;
         rv9_task_delay_ms(POLL_MS);
         waited += POLL_MS;
     }
@@ -349,6 +361,13 @@ static rv9_io_err_t nfm_getstat(rv9_path_t *path, uint32_t code, void *arg)
 
 static rv9_io_err_t nfm_setstat(rv9_path_t *path, uint32_t code, void *arg)
 {
+    if (code == RV9_NET_SS_SHUTDOWN) {
+        nfm_path_t *st = (nfm_path_t *)path->fm_state;
+        if (st == NULL || st->fd < 0) return RV9_IO_ERR_INVAL;
+        shutdown(st->fd, SHUT_RDWR);
+        return RV9_IO_OK;
+    }
+
     if (code == RV9_NET_SS_NOWAIT) {
         nfm_path_t *st = (nfm_path_t *)path->fm_state;
         if (st == NULL || arg == NULL) return RV9_IO_ERR_INVAL;

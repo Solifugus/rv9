@@ -3706,6 +3706,200 @@ A reader that only compares sequences sees "something changed" and reads
 the same numbers. That is deliberate: the change is the component's state,
 not its value, and `RV9_PUB_GS_INFO` says which.
 
+## 32. A machine that stays up
+
+Everything before this section was about a machine doing the right thing.
+This one is about a machine still being there to do it after a week —
+nobody beside it, nothing rebooting it, every way in being the network.
+
+It began with a finding in §31: driving the board over SSH, `procs` failed
+to start with "no memory" and `sshd` exited. That turned out to be five
+separate defects, each of which degrades a long-running machine rather
+than crashing it, which is what made them easy to miss.
+
+### 1. The process table never shrank
+
+Every process that had ever exited kept its descriptor — about 250 bytes,
+for as long as the machine was up — so that a parent could still ask how it
+ended. Nothing ever decided nobody would ask. Ten forks cost 2.5 KB that
+never came back.
+
+Exited processes now live in a bounded history, forgotten in the order that
+costs least:
+
+- beyond **16**, those whose status has been collected, or whose parent has
+  gone and never will collect it — oldest first;
+- beyond **32**, any — so a background job nobody waits on is remembered
+  for a while, not for ever.
+
+Nothing is forgotten while anybody holds it. A descriptor now carries a
+reference count, held by the process's own task while it runs and by
+anything that keeps a pointer to it across a lock release: a waiter, `kill`,
+the stack-fault collector, the watchdog's handler. The public calls that
+returned raw descriptor pointers are gone in favour of copies,
+`rv9_proc_info` and `rv9_proc_list`, because a pointer handed out yesterday
+may name freed memory today.
+
+On the board, after forty forks: **17** exited processes remembered, and
+forty more forks cost **0 bytes**. With forty uncollected children, **33**
+remembered, the oldest forgotten, and waiting on it returns `NOTFOUND`
+rather than hanging.
+
+### 2. Pids were a sixteen-bit counter
+
+65,535 forks is eighteen hours for a machine running one job a second. Once
+descriptors can be forgotten, a wrapped counter would eventually hand out a
+number that still names a remembered process, and a `wait` or `kill` would
+land on the wrong one. Allocation now skips any pid in use, running or
+remembered, and never issues 0. Tested by moving the counter to the edge:
+65534, 65535, then 1.
+
+The same reuse reached PFM: a cell remembers the process that last wrote
+it, so that a fault can be published into it (§31). A later process given
+the same number could have marked an old cell with its own fault. The cell
+now forgets its writer once that writer's end has been processed — which
+needed the end reported to file managers exactly once, fault and all, so it
+is: after the table, on every path out including a refused fork.
+
+### 3. A background job kept the session
+
+`/ssh0` is a device with a session: one client, established on first open.
+The I/O manager refused a second open while any path to it existed, which
+was right for a second `sshd` and wrong for this: `deaf &` typed over SSH
+inherits the terminal, and after `exit` it still holds a path. So every
+later login was refused — and `sshd` read that refusal as another `sshd`,
+and retired for good.
+
+A session now ends when the program that established it says so:
+
+- `RV9_SS_HANGUP`, a setstat the I/O manager answers itself. `sshd` issues
+  it when its shell ends;
+- the device's session number moves on. A path remembers the session it was
+  opened in, and one from an ended session gets `RV9_IOE_IO` without
+  reaching the driver;
+- **the job holding it keeps running.** A control loop started over a
+  wireless link must not stop because the link did.
+
+The hard part is a job that is *inside* the driver when the session ends —
+writing to the terminal, or blocked reading it. Freeing the session under
+it would be a use-after-free. So calls into a session device are counted
+(`busy`), in the order that makes the count trustworthy: increment, then
+check the session, so a hangup that moves the session on and then reads the
+count sees every call that could still reach the driver. With nothing
+inside, the session closes normally, goodbye to the client and all. With
+something inside, the driver's new `hangup` shuts the socket — without
+freeing it — so a blocked read returns, and the session is freed only once
+`busy` reaches zero. If it never does, the session is abandoned rather than
+freed under a caller, and the log says so.
+
+On the board, a session left with `deaf talk &` running exits, and the next
+login gets a prompt; `procs` in it shows the talker still alive.
+
+### 4. Killing a process mid-open lost what the open had built
+
+The first test of supervision killed `sshd` while it waited in `accept()`,
+and every `sshd` after it failed with:
+
+```
+W rv9-nfm: cannot listen on 22: errno 112
+```
+
+Address in use. The listening socket had lived in a local variable of the
+open, on the killed thread's stack, and was never closed; the session
+structure, twelve kilobytes, went with it. §29 had flagged "killed partway
+through an open" as unexamined. This was the examination, and the answer
+was worse than a leak: SSH was gone until reboot.
+
+§29's rule was that a thread holding a lock is not stopped. An open that
+is waiting holds something too — state only it can take down — so it now
+counts as holding: `rv9_task_hold` around the blocking part of every open.
+And because such an open may wait forever, a refused kill also marks the
+thread cancelled. NFM's accept, connect, read and write loops check that
+and give up, closing their socket on the way out; the open returns, the
+hold is released, and the retried kill lands. A kill that gives up clears
+the mark, so a process left alive does not find its own waits failing.
+
+Tested with `deaf accept`, which waits on a port inside an open: killed in
+**2 ms**, a second copy then listens on the same port, and the heap is within
+half a kilobyte of where it started.
+
+### 5. Nothing restarted the way in
+
+The console shell was always restarted when it ended. The two network
+shells were started once. On a machine nobody is beside, that is exactly
+backwards — and `sshd` had just shown two separate ways to die.
+
+`init` now supervises all three alike: notices when one ends, restarts it
+after a pause that doubles while it keeps failing (1 s up to 60 s) and
+resets once it has stayed up for a minute. `sshd` no longer exits for a
+missing password either; it says so once and waits, so setting one with
+`passwd` brings SSH up without a reboot.
+
+```
+rv9> kill -f 7
+W rv9-proc: pid 7 ('sshd') killed
+W rv9: sshd (pid 7) ended with -12; starting it again in 1000 ms
+```
+
+and the next SSH login gets a prompt.
+
+### And then the memory itself
+
+With all of that fixed, one SSH session with one background job still left
+too little heap to fork `procs`. Not a leak — three login cycles returned the
+heap to within eight bytes — but a machine with 29 KB free at idle, and a
+session costing 10 KB of it. `stacks` said where:
+
+| | given | used |
+|---|---|---|
+| `sshd` (after handshakes) | 8192 | 2512 |
+| `shell` (serving a session) | 8192 | 1400 |
+| `rshd` | 8192 | 1148 |
+
+All three had the 8 KB default, chosen long ago because interrupt frames
+land on whatever stack is current. The high-water marks above were taken
+with WiFi busy and so include them. They are now declared at 4096, 4096 and
+3072 — roughly three times what was used — and an overflow is still caught
+by the guard, and now also restarted by `init`.
+
+Idle heap went from **29.1 KB to 44.1 KB**. The same session with a
+background job, `rt control`, `pubs` and `stacks` in it forked everything
+it was asked to, with nothing refused, and the heap came back to 43.6 KB
+when it was over.
+
+### Tested
+
+`proc-test`, 11 checks: forty forks leave the history bounded and forty more
+cost nothing; uncollected children are kept longer, then forgotten, and a
+forgotten pid says so; pids survive the wrap. `fault-test` grows to 73 with
+the open that was killed while waiting. The hangup, supervision and memory
+figures above are from the board over SSH and serial, not from a test at
+boot, because they need a client on the far end.
+
+### What this does not do
+
+**Hangup is only for session devices.** `rshd`'s connections are ordinary
+sockets; a background job keeps one open until it exits, costing a socket
+but not blocking the next login.
+
+**A background job reading a terminal still competes with the shell for
+it.** `deaf listen &` swallowed the lines typed after it, including `exit`.
+That is what an interactive terminal with two readers does anywhere; RV-9
+has no foreground process group to arbitrate it.
+
+**Cancellation reaches the network loops only.** A process killed inside a
+different blocking open — a driver that waits on hardware with no end — is
+refused for as long as it waits, and the kill reports a timeout rather
+than stopping it.
+
+**The history sizes and the stack sizes are measured figures, not derived
+ones.** 16 and 32 are policy; 4096 and 3072 are three times this week's
+high-water. A stack that grows with new features needs measuring again,
+and `stacks` is where to look.
+
+**One login in one test run showed no prompt** and the next two did. It did
+not recur in any later run; it is recorded rather than explained.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

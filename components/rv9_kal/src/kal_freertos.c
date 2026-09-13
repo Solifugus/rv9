@@ -143,6 +143,11 @@ rv9_err_t rv9_task_kill(rv9_task_t task)
     return RV9_ERR_UNSUPPORTED;
 }
 
+void rv9_task_hold(void)   { }
+void rv9_task_unhold(void) { }
+bool rv9_task_cancelled(void) { return false; }
+void rv9_task_uncancel(rv9_task_t task) { (void)task; }
+
 void rv9_task_delete(rv9_task_t task)
 {
     vTaskDelete((TaskHandle_t)task);   /* NULL means "this task" */

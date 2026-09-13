@@ -121,6 +121,20 @@ typedef struct rv9_proc {
     bool              overrun_noted;    /* the watchdog's wait has been logged */
     uint64_t          overrun_since_ms; /* first asked to stop it, or 0 */
 
+    /*
+     * How long this descriptor may be kept. See "How long a process is
+     * remembered" in proc.c.
+     *
+     * refs counts whoever holds a pointer to it outside the process lock --
+     * the process's own task while it runs, a waiter, `kill`, a collector.
+     * A descriptor is never freed while refs is non-zero. waited is set
+     * once somebody has collected its status. ended_seq orders the dead,
+     * so the oldest are forgotten first.
+     */
+    uint16_t          refs;
+    bool              waited;
+    uint32_t          ended_seq;
+
     uint64_t          started_ms;
 
     char              arg[64];        /* what fork was given, for env->arg */
@@ -251,7 +265,36 @@ rv9_proc_err_t rv9_proc_kill(rv9_pid_t pid);
  */
 rv9_proc_err_t rv9_proc_chain(const char *module_name);
 
-const rv9_proc_t *rv9_proc_get(rv9_pid_t pid);
+/*
+ * What is known about a process, copied out.
+ *
+ * A copy and not a pointer, because a descriptor is not kept forever: an
+ * exited process is forgotten once enough others have exited after it
+ * (see proc.c), and a pointer handed out earlier would then point at freed
+ * memory. False when there is no such process, including one forgotten.
+ */
+typedef struct {
+    rv9_pid_t        pid;
+    rv9_pid_t        parent;
+    char             name[32];
+    rv9_proc_state_t state;
+    int              exit_status;
+    int              fault;          /* RV9_FAULT_* */
+    bool             waited;         /* its status has been collected */
+} rv9_proc_info_t;
+
+bool rv9_proc_info(rv9_pid_t pid, rv9_proc_info_t *out);
+
+/* The process table as sysinfo reports it: fills up to `max` records and
+   returns how many processes there are. out == NULL just counts. */
+int rv9_proc_list(rv9_sys_proc_t *out, int max);
+
+/*
+ * Where pid allocation continues from. For tests only: the allocator's
+ * behaviour at the wrap cannot otherwise be reached without forking
+ * sixty-five thousand processes.
+ */
+void rv9_proc_set_next_pid(rv9_pid_t pid);
 
 /*
  * A process's private storage, or NULL once it has exited and the storage
@@ -261,7 +304,6 @@ const rv9_proc_t *rv9_proc_get(rv9_pid_t pid);
  * a process is still running.
  */
 const void *rv9_proc_statics(rv9_pid_t pid);
-const rv9_proc_t *rv9_proc_next(const rv9_proc_t *prev);   /* NULL to start */
 
 /*
  * Aging can be turned off, which is useful for exactly one thing:

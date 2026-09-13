@@ -19,6 +19,7 @@
 #include "io_test.h"
 #include "pub_test.h"
 #include "fault_test.h"
+#include "proc_test.h"
 #include "conformance.h"
 
 #define RV9_RUN_KERNEL_TEST 1
@@ -438,56 +439,101 @@ static void inversion_demo(void)
                     RV9_PRIO_LOW, NULL);
 }
 
-/* A shell on the network, alongside the one on the cable. */
-static void start_rshd(void)
-{
-    rv9_pid_t pid = 0;
-    if (rv9_proc_fork("rshd", RV9_PRIO_LOW, NULL, &pid) == RV9_PROC_OK) {
-        ESP_LOGI(TAG, "rshd listening on port 2300 (nc <ip> 2300)");
-    } else {
-        ESP_LOGW(TAG, "could not start rshd");
-    }
-}
-
 /*
- * And one over SSH. It stops by itself if no password has been set, which
- * is the state a board is in until somebody runs `passwd` -- the log line
- * from the driver says so, and is more use than a server nobody can log
- * in to.
+ * The services init keeps running.
+ *
+ * The console shell always was restarted when it ended; the two network
+ * shells were started once and left to it. On a machine nobody is sitting
+ * beside, that is backwards -- the way in over the network is the one that
+ * matters most, and it was the one that could die for good. `sshd` did,
+ * during testing, over a misreading that has since been fixed. The next
+ * such misreading should cost a login attempt, not a trip to the board.
+ *
+ * So all three are supervised alike: noticed when they end, and started
+ * again after a pause that doubles while they keep failing and resets
+ * once one has stayed up. A service that fails at once every time costs a
+ * log line a minute, not a spin.
  */
-static void start_sshd(void)
-{
-    rv9_pid_t pid = 0;
-    if (rv9_proc_fork("sshd", RV9_PRIO_LOW, NULL, &pid) == RV9_PROC_OK) {
-        ESP_LOGI(TAG, "sshd listening on port 22 (ssh <user>@<ip>)");
-    } else {
-        ESP_LOGW(TAG, "could not start sshd");
-    }
-}
+typedef struct {
+    const char *name;
+    int         priority;
+    const char *says;           /* logged when it starts, the first time */
+    rv9_pid_t   pid;
+    uint32_t    backoff_ms;
+    uint64_t    next_ms;
+    uint64_t    started_ms;
+    bool        announced;
+} service_t;
+
+#define SERVICE_POLL_MS     250
+#define SERVICE_BACKOFF_MS  1000
+#define SERVICE_BACKOFF_MAX 60000
+#define SERVICE_STAYED_UP   60000  /* this long and a failure is a new one */
+
+static service_t s_services[] = {
+    { .name = "rshd",  .priority = RV9_PRIO_LOW,
+      .says = "rshd listening on port 2300 (nc <ip> 2300)" },
+    { .name = "sshd",  .priority = RV9_PRIO_LOW,
+      .says = "sshd listening on port 22 (ssh <user>@<ip>)" },
+    { .name = "shell", .priority = RV9_PRIO_NORMAL,
+      .says = "shell on /uart0 (log quiet while it runs)" },
+};
 
 static void init_shell_loop(void)
 {
-    start_rshd();
-    start_sshd();
-
-    ESP_LOGI(TAG, "starting shell on /uart0 (log quiet while it runs)");
+    const size_t n = sizeof(s_services) / sizeof(s_services[0]);
 
     for (;;) {
-        esp_log_level_set("*", ESP_LOG_WARN);
+        uint64_t now = rv9_time_ms();
 
-        rv9_pid_t pid = 0;
-        if (rv9_proc_fork("shell", RV9_PRIO_NORMAL, NULL, &pid) != RV9_PROC_OK) {
-            esp_log_level_set("*", ESP_LOG_INFO);
-            ESP_LOGE(TAG, "could not start shell; giving up");
-            return;
+        for (size_t i = 0; i < n; i++) {
+            service_t *s = &s_services[i];
+
+            if (s->pid != RV9_PID_NONE) {
+                int status = 0;
+                rv9_proc_err_t w = rv9_proc_wait(s->pid, &status, 0);
+                if (w == RV9_PROC_ERR_TIMEOUT) continue;     /* still up */
+
+                /* Ended, or forgotten -- which is ended too. */
+                bool stayed = (now - s->started_ms) >= SERVICE_STAYED_UP;
+                s->backoff_ms = stayed ? SERVICE_BACKOFF_MS
+                              : (s->backoff_ms == 0) ? SERVICE_BACKOFF_MS
+                              : (s->backoff_ms * 2 > SERVICE_BACKOFF_MAX)
+                                    ? SERVICE_BACKOFF_MAX
+                                    : s->backoff_ms * 2;
+                ESP_LOGW(TAG, "%s (pid %u) ended with %d; starting it again "
+                              "in %lu ms", s->name, (unsigned)s->pid,
+                         (w == RV9_PROC_OK) ? status : 0,
+                         (unsigned long)s->backoff_ms);
+                s->pid     = RV9_PID_NONE;
+                s->next_ms = now + s->backoff_ms;
+            }
+
+            if (now < s->next_ms) continue;
+
+            rv9_pid_t pid = 0;
+            if (rv9_proc_fork(s->name, s->priority, NULL, &pid) == RV9_PROC_OK) {
+                s->pid        = pid;
+                s->started_ms = now;
+                if (!s->announced) {
+                    ESP_LOGI(TAG, "%s", s->says);
+                    s->announced = true;
+                }
+            } else {
+                s->backoff_ms = (s->backoff_ms == 0) ? SERVICE_BACKOFF_MS
+                              : (s->backoff_ms * 2 > SERVICE_BACKOFF_MAX)
+                                    ? SERVICE_BACKOFF_MAX
+                                    : s->backoff_ms * 2;
+                s->next_ms = now + s->backoff_ms;
+                ESP_LOGW(TAG, "could not start %s; trying again in %lu ms",
+                         s->name, (unsigned long)s->backoff_ms);
+            }
         }
 
-        int status = 0;
-        rv9_proc_wait(pid, &status, RV9_WAIT_FOREVER);
-
-        esp_log_level_set("*", ESP_LOG_INFO);
-        ESP_LOGI(TAG, "shell exited with %d, restarting", status);
-        rv9_task_delay_ms(300);
+        /* Quiet while the console shell is in use; warnings still show,
+           which is where a service restarting belongs. */
+        esp_log_level_set("*", ESP_LOG_WARN);
+        rv9_task_delay_ms(SERVICE_POLL_MS);
     }
 }
 
@@ -515,16 +561,22 @@ static void procs(void)
 {
     static const char *state_name[] = { "?", "active", "waiting", "exited" };
 
-    ESP_LOGI(TAG, "process table:");
-    ESP_LOGI(TAG, "  %3s %-10s %-8s %4s %4s %4s %6s",
-             "pid", "name", "state", "base", "age", "eff", "status");
+    /* A copy, taken under the process lock: a pointer walk of the live
+       table would be walking memory that pruning may free. */
+    static rv9_sys_proc_t recs[24];
+    int n = rv9_proc_list(recs, 24);
+    if (n > 24) n = 24;
 
-    for (const rv9_proc_t *p = rv9_proc_next(NULL); p; p = rv9_proc_next(p)) {
+    ESP_LOGI(TAG, "process table:");
+    ESP_LOGI(TAG, "  %3s %-10s %-8s %4s %4s %6s",
+             "pid", "name", "state", "base", "eff", "status");
+
+    for (int i = 0; i < n; i++) {
+        const rv9_sys_proc_t *p = &recs[i];
         const char *sn = (p->state < 4) ? state_name[p->state] : "?";
-        ESP_LOGI(TAG, "  %3u %-10s %-8s %4d %4d %4d %6d",
+        ESP_LOGI(TAG, "  %3u %-10s %-8s %4d %4d %6d",
                  (unsigned)p->pid, p->name, sn,
-                 p->base_priority, p->age, p->effective_priority,
-                 p->exit_status);
+                 p->base_priority, p->effective_priority, (int)p->status);
     }
 }
 
@@ -716,6 +768,10 @@ static void rv9_init_task(void *arg)
     /* Needs the module store, the claim table and /gpio: it forks real
        modules and judges them by the pin they leave behind. */
     rv9_fault_selftest();
+
+    /* Last of the tests, because it forks the most: what it checks is
+       that forking a lot leaves the machine as it found it. */
+    rv9_proc_selftest();
 
     run_module("hello");
 

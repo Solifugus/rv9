@@ -44,12 +44,14 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     int n = env->sysinfo(RV9_SYS_PROCS, st->procs, sizeof(st->procs));
     if (n < 0) return -3;
 
-    m_say(env, RV9_STDOUT, "pid par name        state   base eff ended\n");
+    /* Six wide: pids wrap at 65535 now rather than growing without end, and
+       a five-digit pid ran into the next column. */
+    m_say(env, RV9_STDOUT, "pid   par   name        state   base eff ended\n");
 
     for (int i = 0; i < n; i++) {
         const rv9_sys_proc_t *p = &st->procs[i];
-        m_numpad(env, RV9_STDOUT, p->pid, 4);
-        m_numpad(env, RV9_STDOUT, p->parent, 4);
+        m_numpad(env, RV9_STDOUT, p->pid, 6);
+        m_numpad(env, RV9_STDOUT, p->parent, 6);
         m_pad(env, RV9_STDOUT, p->name, 12);
         m_pad(env, RV9_STDOUT, state_name(p->state), 8);
         m_numpad(env, RV9_STDOUT, p->base_priority, 5);

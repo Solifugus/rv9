@@ -368,6 +368,7 @@ static rv9_path_t *path_new(rv9_dev_t *dev, const char *rest, uint32_t mode,
     p->pos   = 0;
     p->refs  = 1;
     p->claim = claim;
+    p->session = __atomic_load_n(&dev->session, __ATOMIC_ACQUIRE);
 
     *err = RV9_IO_OK;
     return p;
@@ -414,12 +415,101 @@ static rv9_io_err_t dev_first_open(rv9_dev_t *dev, uint32_t mode)
  */
 static bool dev_open_refused(const rv9_dev_t *dev)
 {
-    return dev->drv->open != NULL && dev->open_count > 0;
+    return dev->drv->open != NULL && (dev->open_count > 0 || dev->hanging);
 }
 
 static void dev_last_close(rv9_dev_t *dev)
 {
     if (dev->drv->close) dev->drv->close(dev);
+}
+
+/* ---- sessions ---- */
+
+/*
+ * Enter the driver on behalf of a path, or be told its session is over.
+ *
+ * In that order -- count first, then check -- so a hangup that moves the
+ * session on and then reads `busy` sees every call that could still reach
+ * the driver: one that got in before the move is counted, one that comes
+ * after sees the new session and turns back. Devices without sessions pay
+ * one comparison.
+ */
+static RV9_RT_CODE bool session_enter(rv9_path_t *p)
+{
+    rv9_dev_t *d = p->dev;
+    if (d->drv->open == NULL) return true;
+
+    __atomic_add_fetch(&d->busy, 1, __ATOMIC_ACQ_REL);
+    if (p->session == __atomic_load_n(&d->session, __ATOMIC_ACQUIRE)) {
+        return true;
+    }
+    __atomic_sub_fetch(&d->busy, 1, __ATOMIC_ACQ_REL);
+    return false;
+}
+
+static RV9_RT_CODE void session_leave(rv9_path_t *p)
+{
+    if (p->dev->drv->open != NULL) {
+        __atomic_sub_fetch(&p->dev->busy, 1, __ATOMIC_ACQ_REL);
+    }
+}
+
+/* How long a hangup waits for calls to leave the driver after it has been
+   asked to make them. Long against a socket shutdown; short against a
+   person waiting to log in again. */
+#define HANGUP_WAIT_MS 5000
+
+static rv9_io_err_t hangup(rv9_path_t *p)
+{
+    rv9_dev_t *dev = p->dev;
+    if (dev->drv->open == NULL) return RV9_IO_ERR_UNSUPPORTED;
+
+    rv9_lock_acquire(s_lock);
+    bool live = (p->session == dev->session) && dev->open_count > 0 &&
+                !dev->hanging;
+    if (live) {
+        dev->hanging = true;
+        __atomic_add_fetch(&dev->session, 1, __ATOMIC_ACQ_REL);
+        dev->open_count = 0;
+    }
+    rv9_lock_release(s_lock);
+
+    if (!live) return RV9_IO_OK;        /* already over */
+
+    /*
+     * Nobody inside: an ordinary close, with its goodbye to the client.
+     * Somebody inside -- a background job writing to the terminal, or
+     * waiting to read from it -- is made to return first, and the session
+     * is freed only once nothing is using it.
+     */
+    bool freed = true;
+    if (__atomic_load_n(&dev->busy, __ATOMIC_ACQUIRE) != 0) {
+        ESP_LOGW(TAG, "%s: session ended with %lu calls still inside; "
+                      "cutting them off", dev->name,
+                 (unsigned long)dev->busy);
+        if (dev->drv->hangup) dev->drv->hangup(dev);
+
+        uint64_t until = rv9_time_ms() + HANGUP_WAIT_MS;
+        while (__atomic_load_n(&dev->busy, __ATOMIC_ACQUIRE) != 0) {
+            if (rv9_time_ms() >= until) { freed = false; break; }
+            rv9_task_delay_ms(5);
+        }
+    }
+
+    if (freed) {
+        dev_last_close(dev);
+    } else {
+        /* Better a session's worth of memory lost than freed under a call
+           still using it. Said, so it is not a mystery later. */
+        ESP_LOGE(TAG, "%s: calls would not leave the old session; it is "
+                      "abandoned, not freed", dev->name);
+        dev->drv_state = NULL;
+    }
+
+    rv9_lock_acquire(s_lock);
+    dev->hanging = false;
+    rv9_lock_release(s_lock);
+    return RV9_IO_OK;
 }
 
 /* Let go of a path that never became one, or has finished being one. */
@@ -471,9 +561,18 @@ static void path_release(rv9_path_t *p, rv9_dev_t **idle)
 
     rv9_dev_t *dev = p->dev;
 
+    /*
+     * A path from a session that has already been hung up is no longer
+     * counted in the device, and must not uncount the session that replaced
+     * it -- or close it. The file manager's own state is still its own.
+     */
+    bool stale = (dev->drv->open != NULL && p->session != dev->session);
+
     if (dev->fmgr->close) dev->fmgr->close(p);
-    if (dev->open_count) dev->open_count--;
-    if (dev->open_count == 0 && idle) *idle = dev;
+    if (!stale) {
+        if (dev->open_count) dev->open_count--;
+        if (dev->open_count == 0 && idle) *idle = dev;
+    }
 
     path_free(p);
 }
@@ -533,8 +632,19 @@ int rv9_io_open(const char *name, uint32_t mode)
     dev->open_count++;
     rv9_lock_release(s_lock);
 
+    /*
+     * Not to be stopped in the middle of. What follows may build state only
+     * it can take down -- NFM's listener waits in accept() holding a bound
+     * socket, `ssh` holds a session -- and a process killed partway through
+     * lost all of it with its stack: the socket stayed bound, and every
+     * sshd after it was told the port was in use, for the life of the
+     * machine. So the open counts as holding, a kill is refused and marks
+     * the thread cancelled, and the waits inside give up and unwind.
+     */
+    rv9_task_hold();
     rv9_io_err_t err = first ? dev_first_open(dev, mode) : RV9_IO_OK;
     if (err == RV9_IO_OK) err = path_open(p, rest);
+    rv9_task_unhold();
 
     if (err != RV9_IO_OK) {
         if (first) dev_last_close(dev);
@@ -590,9 +700,11 @@ RV9_RT_CODE rv9_io_err_t rv9_io_read(int num, void *buf, size_t len, size_t *don
     if (p == NULL) return RV9_IO_ERR_BADPATH;
     if (!(p->mode & RV9_MODE_READ)) return RV9_IO_ERR_MODE;
     if (p->dev->fmgr->read == NULL) return RV9_IO_ERR_UNSUPPORTED;
+    if (!session_enter(p)) return RV9_IO_ERR_IO;
 
     size_t moved = 0;
     rv9_io_err_t err = p->dev->fmgr->read(p, buf, len, &moved);
+    session_leave(p);
     if (done) *done = moved;
     return err;
 }
@@ -607,9 +719,11 @@ RV9_RT_CODE rv9_io_err_t rv9_io_write(int num, const void *buf, size_t len,
     if (p == NULL) return RV9_IO_ERR_BADPATH;
     if (!(p->mode & RV9_MODE_WRITE)) return RV9_IO_ERR_MODE;
     if (p->dev->fmgr->write == NULL) return RV9_IO_ERR_UNSUPPORTED;
+    if (!session_enter(p)) return RV9_IO_ERR_IO;
 
     size_t moved = 0;
     rv9_io_err_t err = p->dev->fmgr->write(p, buf, len, &moved);
+    session_leave(p);
     if (done) *done = moved;
     return err;
 }
@@ -677,7 +791,10 @@ rv9_io_err_t rv9_io_seek(int num, int64_t offset, int whence)
     rv9_path_t *p = path_for_caller(num);
     if (p == NULL) return RV9_IO_ERR_BADPATH;
     if (p->dev->fmgr->seek == NULL) return RV9_IO_ERR_UNSUPPORTED;
-    return p->dev->fmgr->seek(p, offset, whence);
+    if (!session_enter(p)) return RV9_IO_ERR_IO;
+    rv9_io_err_t err = p->dev->fmgr->seek(p, offset, whence);
+    session_leave(p);
+    return err;
 }
 
 rv9_io_err_t rv9_io_getstat(int num, uint32_t code, void *arg)
@@ -685,15 +802,25 @@ rv9_io_err_t rv9_io_getstat(int num, uint32_t code, void *arg)
     rv9_path_t *p = path_for_caller(num);
     if (p == NULL) return RV9_IO_ERR_BADPATH;
     if (p->dev->fmgr->getstat == NULL) return RV9_IO_ERR_UNSUPPORTED;
-    return p->dev->fmgr->getstat(p, code, arg);
+    if (!session_enter(p)) return RV9_IO_ERR_IO;
+    rv9_io_err_t err = p->dev->fmgr->getstat(p, code, arg);
+    session_leave(p);
+    return err;
 }
 
 rv9_io_err_t rv9_io_setstat(int num, uint32_t code, void *arg)
 {
     rv9_path_t *p = path_for_caller(num);
     if (p == NULL) return RV9_IO_ERR_BADPATH;
+
+    /* The I/O manager's own, whatever the file manager is. */
+    if (code == RV9_SS_HANGUP) return hangup(p);
+
     if (p->dev->fmgr->setstat == NULL) return RV9_IO_ERR_UNSUPPORTED;
-    return p->dev->fmgr->setstat(p, code, arg);
+    if (!session_enter(p)) return RV9_IO_ERR_IO;
+    rv9_io_err_t err = p->dev->fmgr->setstat(p, code, arg);
+    session_leave(p);
+    return err;
 }
 
 /* ---- detached paths: a path held by a driver rather than a process ---- */
@@ -739,9 +866,12 @@ rv9_io_err_t rv9_io_open_detached(const char *name, uint32_t mode,
     rv9_lock_release(s_lock);
 
     /* Same two-stage shape as rv9_io_open, and for the same reason: what
-       follows may sit waiting for a connection. */
+       follows may sit waiting for a connection -- and, the same, it is not
+       to be stopped in the middle of. */
+    rv9_task_hold();
     rv9_io_err_t err = first ? dev_first_open(dev, mode) : RV9_IO_OK;
     if (err == RV9_IO_OK) err = path_open(p, rest);
+    rv9_task_unhold();
 
     if (err != RV9_IO_OK) {
         if (first) dev_last_close(dev);
@@ -762,9 +892,11 @@ rv9_io_err_t rv9_io_read_path(rv9_path_t *p, void *buf, size_t len, size_t *done
     if (p == NULL || buf == NULL) return RV9_IO_ERR_INVAL;
     if (!(p->mode & RV9_MODE_READ)) return RV9_IO_ERR_MODE;
     if (p->dev->fmgr->read == NULL) return RV9_IO_ERR_UNSUPPORTED;
+    if (!session_enter(p)) return RV9_IO_ERR_IO;
 
     size_t moved = 0;
     rv9_io_err_t err = p->dev->fmgr->read(p, buf, len, &moved);
+    session_leave(p);
     if (done) *done = moved;
     return err;
 }
@@ -776,9 +908,11 @@ rv9_io_err_t rv9_io_write_path(rv9_path_t *p, const void *buf, size_t len,
     if (p == NULL || buf == NULL) return RV9_IO_ERR_INVAL;
     if (!(p->mode & RV9_MODE_WRITE)) return RV9_IO_ERR_MODE;
     if (p->dev->fmgr->write == NULL) return RV9_IO_ERR_UNSUPPORTED;
+    if (!session_enter(p)) return RV9_IO_ERR_IO;
 
     size_t moved = 0;
     rv9_io_err_t err = p->dev->fmgr->write(p, buf, len, &moved);
+    session_leave(p);
     if (done) *done = moved;
     return err;
 }
@@ -787,7 +921,10 @@ rv9_io_err_t rv9_io_setstat_path(rv9_path_t *p, uint32_t code, void *arg)
 {
     if (p == NULL) return RV9_IO_ERR_INVAL;
     if (p->dev->fmgr->setstat == NULL) return RV9_IO_ERR_UNSUPPORTED;
-    return p->dev->fmgr->setstat(p, code, arg);
+    if (!session_enter(p)) return RV9_IO_ERR_IO;
+    rv9_io_err_t err = p->dev->fmgr->setstat(p, code, arg);
+    session_leave(p);
+    return err;
 }
 
 void rv9_io_close_path(rv9_path_t *p)
@@ -914,10 +1051,15 @@ static void notify_ended(rv9_pid_t pid, int fault)
     }
 }
 
-/* From the process manager, once the table says how a process ended. */
+/*
+ * From the process manager, once the table says how a process ended --
+ * exactly once per process, including one refused at fork. That single
+ * notice is what lets a file manager both release what the process
+ * reserved and publish how it ended, without the second undoing the first.
+ */
 static void io_on_ended(rv9_pid_t pid, int fault)
 {
-    if (fault != RV9_FAULT_NONE) notify_ended(pid, fault);
+    notify_ended(pid, fault);
 }
 
 static void io_on_exit(rv9_pid_t pid)
@@ -985,10 +1127,8 @@ static void io_on_exit(rv9_pid_t pid)
      */
     if (nfs > 0) apply_failsafes(fs, nfs);
 
-    /* And what it reserved inside file managers -- a declared publication.
-       On every path out, including a fork refused halfway through
-       admission, which is also how a partial reservation is undone. */
-    notify_ended(pid, RV9_FAULT_NONE);
+    /* What it reserved inside file managers is released by io_on_ended,
+       which comes after the table is written -- once, with the reason. */
 }
 
 /*

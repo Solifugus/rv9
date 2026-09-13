@@ -27,6 +27,18 @@
  */
 #define RV9_NET_SS_NOWAIT    (RV9_SS_DRIVER_BASE + 5)
 
+/*
+ * Shut the connection down in both directions, without closing the path.
+ * setstat, arg ignored.
+ *
+ * For another thread than the one using the path: a read waiting on a
+ * peer that will never send returns at once, as if the peer had closed,
+ * and the path stays valid until its owner closes it. Closing it instead
+ * would free the socket under the read. This is how a hung-up SSH session
+ * gets a background job's read to let go.
+ */
+#define RV9_NET_SS_SHUTDOWN  (RV9_SS_DRIVER_BASE + 6)
+
 #define RV9_NET_MAX_APS 12
 
 typedef struct __attribute__((packed)) {

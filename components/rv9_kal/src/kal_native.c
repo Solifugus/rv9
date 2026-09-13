@@ -251,6 +251,29 @@ bool rv9_task_alive(rv9_task_t task)
     return rv9k_thread_alive((const rv9k_thread_t *)task);
 }
 
+void rv9_task_hold(void)
+{
+    rv9k_thread_t *t = rv9_kal_self_thread();
+    if (t != NULL) t->holds++;
+}
+
+void rv9_task_unhold(void)
+{
+    rv9k_thread_t *t = rv9_kal_self_thread();
+    if (t != NULL && t->holds > 0) t->holds--;
+}
+
+bool rv9_task_cancelled(void)
+{
+    rv9k_thread_t *t = rv9_kal_self_thread();
+    return t != NULL && t->cancel;
+}
+
+void rv9_task_uncancel(rv9_task_t task)
+{
+    if (rv9k_is_thread(task)) ((rv9k_thread_t *)task)->cancel = false;
+}
+
 rv9_err_t rv9_task_kill(rv9_task_t task)
 {
     /* Both ends must be threads. The thread table belongs to the host task

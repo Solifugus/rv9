@@ -166,6 +166,27 @@ int  rv9_task_fault(rv9_task_t task);
 rv9_err_t rv9_task_kill(rv9_task_t task);
 
 /*
+ * Mark the calling task as inside something that must not be interrupted
+ * by rv9_task_kill: counted like a held lock, nested, and released with
+ * rv9_task_unhold. For blocking operations that build state only they can
+ * tear down -- an open that has made a listening socket and is waiting in
+ * accept() for somebody to connect. Stopped in the middle, the socket
+ * would stay bound for the life of the machine.
+ *
+ * rv9_task_cancelled says whether a kill has been refused on this account.
+ * A loop that waits should check it and give up, cleaning up as it goes;
+ * the kill then succeeds once the hold is released. rv9_task_uncancel
+ * clears it, for a kill that gave up waiting.
+ *
+ * No-ops on host tasks and on the FreeRTOS backend, which cannot be killed
+ * this way anyway.
+ */
+void rv9_task_hold(void);
+void rv9_task_unhold(void);
+bool rv9_task_cancelled(void);
+void rv9_task_uncancel(rv9_task_t task);
+
+/*
  * Is this task still able to run?
  *
  * The ordinary way a process ends is by returning, and the trampoline that

@@ -22,6 +22,7 @@
 
 typedef struct {
     uint32_t sessions;
+    uint32_t said_no_password;
 } sshd_statics_t;
 
 __attribute__((section(".text.entry")))
@@ -38,23 +39,39 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         int c = env->open(LISTEN_PATH, RV9_MODE_RW);
         if (c < 0) {
             /*
-             * Two of these are permanent and the rest are not.
+             * One of these is permanent and the rest are not.
              *
-             * No password and another sshd already listening will not get
-             * better by trying again, so stop. Anything else is one
-             * connection that went wrong -- a client that hung up during
-             * the handshake, a port scan, a timeout -- and a server that
-             * retired over that would be a server anyone could turn off
-             * from across the network by connecting and leaving.
+             * Another sshd already serving the device will not go away by
+             * trying again, so stop. Anything else is one connection that
+             * went wrong -- a client that hung up during the handshake, a
+             * port scan, a timeout -- and a server that retired over that
+             * would be a server anyone could turn off from across the
+             * network by connecting and leaving.
+             *
+             * EXISTS used to be reached another way too: a background job
+             * started over SSH kept the terminal after its session ended,
+             * this read that as a second sshd, and retired for good. The
+             * session is now hung up when its shell ends (below), so a
+             * leftover job no longer holds the device.
              */
             if (c == -RV9_IOE_EXISTS) {
                 m_say(env, RV9_STDERR, "sshd: already running\n");
                 return -3;
             }
+
+            /*
+             * No password is not permanent either -- somebody can run
+             * `passwd` -- and stopping over it meant a reboot before the
+             * first login. Said once, then waited out quietly.
+             */
             if (c == -RV9_IOE_MODE) {
-                m_say(env, RV9_STDERR,
-                      "sshd: no login password -- run `passwd` first\n");
-                return -4;
+                if (!st->said_no_password) {
+                    m_say(env, RV9_STDERR, "sshd: no login password -- run "
+                                           "`passwd`; waiting for one\n");
+                    st->said_no_password = 1;
+                }
+                env->sleep_ms(5000);
+                continue;
             }
 
             /* Pause, so a condition that fails instantly cannot spin. */
@@ -80,6 +97,15 @@ int rv9_module_entry(const rv9_mod_env_t *env)
             m_num(env, RV9_STDERR, pid);
             m_say(env, RV9_STDERR, "\n");
         }
+
+        /*
+         * The session ends when its shell does -- not when the last path to
+         * the terminal closes, which may be never. Anything the shell left
+         * running in the background keeps running, and finds its terminal
+         * gone; the next client gets a session of its own.
+         */
+        uint32_t zero = 0;
+        env->setstat(c, RV9_SS_HANGUP, &zero);
 
         env->dup2(SAVE_IN, RV9_STDIN);
         env->dup2(SAVE_OUT, RV9_STDOUT);

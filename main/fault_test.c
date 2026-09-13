@@ -156,14 +156,61 @@ static void a_process_that_will_not_listen(void)
           status == -RV9_PROC_ERR_KILLED,
           "its status says killed, which no module returns");
 
-    const rv9_proc_t *p = rv9_proc_get(pid);
-    check(p != NULL && p->fault == RV9_FAULT_KILLED,
+    rv9_proc_info_t pi;
+    check(rv9_proc_info(pid, &pi) && pi.fault == RV9_FAULT_KILLED,
           "and so does the process table");
 
     check(rv9_proc_kill(pid) == RV9_PROC_ERR_NOTFOUND,
           "killing it twice finds nothing");
     check(rv9_proc_signal(pid, RV9_SIG_STOP) == RV9_PROC_ERR_NOTFOUND,
           "and a signal to the dead is not delivered");
+}
+
+/* ------------------------------------------------------------------ */
+
+/*
+ * Killed while an open is still waiting.
+ *
+ * The first supervision test on the board killed `sshd` while it waited in
+ * accept(), and every sshd after it was told port 22 was in use: the
+ * listening socket had lived on the killed thread's stack and was never
+ * closed. So the proof here is not that the kill returns -- it did then
+ * too -- but that the port can be listened on again afterwards, and that
+ * nothing the open had allocated stayed allocated.
+ */
+static void a_process_blocked_in_an_open(void)
+{
+    size_t heap0 = rv9_heap_free();
+    rv9_pid_t a = 0, b = 0;
+    rv9_proc_info_t pi;
+    int status = 0;
+
+    check(rv9_proc_fork("deaf", RV9_PRIO_NORMAL, "accept", &a) == RV9_PROC_OK,
+          "a process waits for a connection, inside an open");
+    rv9_task_delay_ms(300);
+    check(rv9_proc_info(a, &pi) && pi.state != RV9_PROC_EXITED,
+          "and is still waiting");
+
+    uint64_t t0 = rv9_time_ms();
+    rv9_proc_err_t err = rv9_proc_kill(a);
+    uint32_t took = (uint32_t)(rv9_time_ms() - t0);
+    check(err == RV9_PROC_OK, "it is killed");
+    check(took < 500, "once the open has let go, promptly");
+    ESP_LOGI(TAG, "  (killed in %lu ms)", (unsigned long)took);
+    rv9_proc_wait(a, &status, 0);
+
+    check(rv9_proc_fork("deaf", RV9_PRIO_NORMAL, "accept", &b) == RV9_PROC_OK,
+          "a second copy is started on the same port");
+    rv9_task_delay_ms(300);
+    check(rv9_proc_info(b, &pi) && pi.state != RV9_PROC_EXITED,
+          "and can listen there: the first gave the port back");
+
+    rv9_proc_kill(b);
+    rv9_proc_wait(b, &status, 0);
+
+    int32_t lost = (int32_t)heap0 - (int32_t)rv9_heap_free();
+    ESP_LOGI(TAG, "  (heap %d bytes lower than before)", (int)lost);
+    check(lost < 1024, "and nothing either open allocated stayed allocated");
 }
 
 /* ------------------------------------------------------------------ */
@@ -236,8 +283,8 @@ static void a_loop_that_misses_its_deadline(void)
     check(status == -RV9_PROC_ERR_DEADLINE,
           "its status says it missed a deadline, not that it returned");
 
-    const rv9_proc_t *p = rv9_proc_get(pid);
-    check(p != NULL && p->fault == RV9_FAULT_DEADLINE,
+    rv9_proc_info_t pi;
+    check(rv9_proc_info(pid, &pi) && pi.fault == RV9_FAULT_DEADLINE,
           "the process table says DEADLINE");
     check(pin_read() == 0, "its pin was parked at 0");
     check(rv9_rt_slots_used() == slots, "it will not be released again");
@@ -418,8 +465,9 @@ static void stopped_from_outside(const char *module, const char *arg,
     check(ended, "it is stopped, though it never waits again");
     check(status == want_status, "its status says why");
 
-    const rv9_proc_t *p = rv9_proc_get(pid);
-    check(p != NULL && p->fault == want_fault, "and so does the table");
+    rv9_proc_info_t pi;
+    check(rv9_proc_info(pid, &pi) && pi.fault == want_fault,
+          "and so does the table");
     check(pin_read() == 0, "its pin was parked");
     check(rv9_rt_slots_used() == slots, "its release slot is free");
     check(took < 2000, "promptly, not eventually");
@@ -441,6 +489,8 @@ bool rv9_fault_selftest(void)
     not_while_holding();
     ESP_LOGI(TAG, "--- a process that will not listen ---");
     a_process_that_will_not_listen();
+    ESP_LOGI(TAG, "--- a process killed inside an open ---");
+    a_process_blocked_in_an_open();
     ESP_LOGI(TAG, "--- a loop killed between activations ---");
     a_loop_killed_between_activations();
     ESP_LOGI(TAG, "--- a loop that misses its deadline ---");

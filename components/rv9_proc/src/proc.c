@@ -74,6 +74,15 @@ void rv9_proc_set_ended_hook(rv9_proc_ended_hook_t hook)
     s_on_ended = hook;
 }
 
+/* Undo whatever admission reserved for a process that will not run. Both
+   hooks, because reservations inside file managers are released by the
+   second. */
+static void undo_fork(rv9_pid_t pid)
+{
+    if (s_on_exit)  s_on_exit(pid);
+    if (s_on_ended) s_on_ended(pid, RV9_FAULT_NONE);
+}
+
 void rv9_proc_set_hooks(rv9_proc_fork_hook_t on_fork,
                         rv9_proc_exit_hook_t on_exit)
 {
@@ -126,6 +135,112 @@ static rv9_proc_t *current_locked(void)
         if (p->task == self) return p;
     }
     return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* How long a process is remembered                                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A descriptor outlives its process so that somebody can still ask how it
+ * ended. For a long time nothing ever decided that nobody would ask again,
+ * and every process that had ever run kept one: about 250 bytes each, for
+ * as long as the machine was up. A shell session that forked a few dozen
+ * commands was enough to leave `procs` unable to start, and on a machine
+ * meant to run for months that is the wrong shape entirely.
+ *
+ * So the dead are remembered in a bounded history, and forgotten in an
+ * order that costs the least:
+ *
+ *   beyond PROC_HISTORY, a process whose status has been collected, or
+ *   whose parent has gone and so never will collect it, oldest first;
+ *
+ *   beyond PROC_HISTORY_MAX, any exited process, oldest first -- a
+ *   background job nobody waits on is still remembered for a while, but
+ *   not for ever.
+ *
+ * Nothing is forgotten while anybody holds it (refs), and a waiter holds
+ * what it waits on. Pruning happens when a process is forked, which is the
+ * only thing that makes the table grow.
+ */
+#define PROC_HISTORY      16
+#define PROC_HISTORY_MAX  32
+
+static uint32_t s_ended_seq;
+
+static void hold_locked(rv9_proc_t *p) { p->refs++; }
+
+static void put(rv9_proc_t *p)
+{
+    rv9_lock_acquire(s_lock);
+    if (p->refs > 0) p->refs--;
+    rv9_lock_release(s_lock);
+}
+
+static void ended_locked(rv9_proc_t *p)
+{
+    p->state     = RV9_PROC_EXITED;
+    p->ended_seq = ++s_ended_seq;
+}
+
+/* The system itself (pid 0) counts as a parent that may yet ask. */
+static bool parent_may_wait_locked(const rv9_proc_t *p)
+{
+    if (p->parent == RV9_PID_NONE) return true;
+    const rv9_proc_t *q = find_locked(p->parent);
+    return q != NULL && q->state != RV9_PROC_EXITED;
+}
+
+static void prune_locked(void)
+{
+    for (;;) {
+        unsigned exited = 0;
+        rv9_proc_t *oldest_any = NULL, *oldest_done = NULL;
+
+        for (rv9_proc_t *p = s_procs; p; p = p->next) {
+            if (p->state != RV9_PROC_EXITED) continue;
+            exited++;
+            if (p->refs != 0 || p->collecting) continue;
+
+            if (oldest_any == NULL || p->ended_seq < oldest_any->ended_seq) {
+                oldest_any = p;
+            }
+            if ((p->waited || !parent_may_wait_locked(p)) &&
+                (oldest_done == NULL ||
+                 p->ended_seq < oldest_done->ended_seq)) {
+                oldest_done = p;
+            }
+        }
+
+        rv9_proc_t *victim = NULL;
+        if (exited > PROC_HISTORY_MAX)  victim = oldest_any;
+        else if (exited > PROC_HISTORY) victim = oldest_done;
+        if (victim == NULL) return;
+
+        for (rv9_proc_t **pp = &s_procs; *pp; pp = &(*pp)->next) {
+            if (*pp == victim) { *pp = victim->next; break; }
+        }
+        rv9_free(victim);
+    }
+}
+
+/*
+ * The next free pid.
+ *
+ * Sixteen bits is 65535 forks, which a machine running a job every second
+ * spends in eighteen hours. Wrapping is fine; handing out a number that
+ * still names a process -- running, or remembered -- is not, because a
+ * wait or a kill would then land on the wrong one. So a pid in use is
+ * skipped, and 0 is never issued.
+ */
+static rv9_pid_t next_pid_locked(void)
+{
+    for (uint32_t tries = 0; tries <= 0xFFFFu; tries++) {
+        rv9_pid_t pid = s_next_pid;
+        s_next_pid = (s_next_pid >= 0xFFFFu) ? 1 : (rv9_pid_t)(s_next_pid + 1);
+        if (pid != RV9_PID_NONE && find_locked(pid) == NULL) return pid;
+    }
+    return RV9_PID_NONE;
 }
 
 /* ------------------------------------------------------------------ */
@@ -316,7 +431,7 @@ static void finish(rv9_proc_t *p, int rc, int fault,
     rv9_lock_acquire(s_lock);
     p->exit_status = rc;
     p->fault       = fault;
-    p->state       = RV9_PROC_EXITED;
+    ended_locked(p);
     rv9_lock_release(s_lock);
 
     if (fault == RV9_FAULT_DEADLINE && timing != NULL) {
@@ -345,10 +460,14 @@ static void finish(rv9_proc_t *p, int rc, int fault,
     if (s_on_ended) s_on_ended(p->pid, fault);
 
     /* Release the module link and the private storage. The descriptor stays
-       so that a parent can still wait on it and see the status. */
+       so that a parent can still wait on it and see the status -- for a
+       while: see "How long a process is remembered". */
     rv9_mod_unlink(p->module);
     rv9_free(p->statics);
     p->statics = NULL;
+
+    /* The task's own hold, last: nothing below touches the descriptor. */
+    put(p);
 
     rv9_task_delete(NULL);
 }
@@ -553,7 +672,7 @@ static void collect_faulted(rv9_proc_t *p)
     p->exit_status = (fault == RV9_FAULT_KILLED) ? -RV9_PROC_ERR_KILLED
                                                  : -RV9_PROC_ERR_FAULT;
     p->fault       = fault ? fault : RV9_FAULT_STACK;
-    p->state       = RV9_PROC_EXITED;
+    ended_locked(p);
     p->collecting  = false;
     rv9_lock_release(s_lock);
 
@@ -569,6 +688,10 @@ static void collect_faulted(rv9_proc_t *p)
     if (mod) rv9_mod_unlink(mod);
     rv9_free(st);
     rv9_task_reap(tk);      /* the slot may be reused now */
+
+    /* The dead task's hold, dropped on its behalf. The caller's own hold,
+       if it has one, is the caller's to drop. */
+    put(p);
 }
 
 /* Sweep every process. Called from places that are already looking. */
@@ -624,6 +747,7 @@ static bool rt_overrun(rv9_task_t task, int why)
             break;
         }
     }
+    if (p != NULL) hold_locked(p);
     if (p != NULL && p->module != NULL) {
         code  = p->module->image;
         len   = p->module->size;
@@ -663,9 +787,13 @@ static bool rt_overrun(rv9_task_t task, int why)
                          ? "is far past its deadline and still running"
                          : "has held the CPU without waiting");
         }
+        put(p);
         return false;
     }
-    if (err != RV9_OK) return true;     /* it ended itself meanwhile */
+    if (err != RV9_OK) {                /* it ended itself meanwhile */
+        put(p);
+        return true;
+    }
 
     rv9_rt_stats_t st;
     bool have = (rv9_rt_stats_for(task, &st) == RV9_OK);
@@ -687,7 +815,7 @@ static bool rt_overrun(rv9_task_t task, int why)
     p->task        = NULL;
     p->exit_status = status;
     p->fault       = fault;
-    p->state       = RV9_PROC_EXITED;
+    ended_locked(p);
     rv9_lock_release(s_lock);
 
     if (why == RV9_RT_DEADLINE) {
@@ -706,6 +834,9 @@ static bool rt_overrun(rv9_task_t task, int why)
     rv9_task_delete(task);
     if (mod) rv9_mod_unlink(mod);
     rv9_free(statics);
+
+    put(p);      /* ours */
+    put(p);      /* and the deleted task's, which it cannot drop itself */
     return true;
 }
 
@@ -1236,8 +1367,14 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
      * way round: the alternative is a claim with nothing to release it.
      */
     rv9_lock_acquire(s_lock);
-    rv9_pid_t pid = s_next_pid++;
+    prune_locked();
+    rv9_pid_t pid = next_pid_locked();
     rv9_lock_release(s_lock);
+
+    if (pid == RV9_PID_NONE) {      /* every pid names somebody */
+        rv9_mod_unlink(mod);
+        return RV9_PROC_ERR_NOMEM;
+    }
 
     /*
      * Admission, before anything is allocated on this program's behalf.
@@ -1251,7 +1388,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
     if (s_on_claim != NULL) {
         int refused = s_on_claim(pid, mod->image, module_name);
         if (refused != RV9_PROC_OK) {
-            if (s_on_exit) s_on_exit(pid);      /* undo a partial claim */
+            undo_fork(pid);      /* undo a partial claim */
             rv9_mod_unlink(mod);
             return (rv9_proc_err_t)refused;
         }
@@ -1272,7 +1409,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
             on_deadline > RV9_ON_DEADLINE_FAULT) {
             ESP_LOGE(TAG, "admit '%s': on_deadline %u is not a policy this "
                           "system knows", module_name, (unsigned)on_deadline);
-            if (s_on_exit) s_on_exit(pid);
+            undo_fork(pid);
             rv9_mod_unlink(mod);
             return RV9_PROC_ERR_CONTRACT;
         }
@@ -1286,7 +1423,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
         rv9_proc_err_t adm = admit_rt(mod->image, module_name, interval,
                                       stack, &wcet_us, &deadline_us);
         if (adm != RV9_PROC_OK) {
-            if (s_on_exit) s_on_exit(pid);
+            undo_fork(pid);
             rv9_mod_unlink(mod);
             return adm;
         }
@@ -1294,7 +1431,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
 
     rv9_proc_t *p = rv9_calloc(1, sizeof(*p));
     if (p == NULL) {
-        if (s_on_exit) s_on_exit(pid);
+        undo_fork(pid);
         rv9_mod_unlink(mod);
         return RV9_PROC_ERR_NOMEM;
     }
@@ -1303,7 +1440,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
         p->statics = rv9_calloc(1, h->static_size);
         if (p->statics == NULL) {
             rv9_free(p);
-            if (s_on_exit) s_on_exit(pid);
+            undo_fork(pid);
             rv9_mod_unlink(mod);
             return RV9_PROC_ERR_NOMEM;
         }
@@ -1327,6 +1464,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
     p->deadline_us        = deadline_us;
     p->on_deadline        = on_deadline;
     p->stack_bytes        = (uint32_t)stack;
+    p->refs               = 1;      /* the task's, dropped at the end of finish() */
     strncpy(p->name, module_name, sizeof(p->name) - 1);
     if (arg != NULL) strncpy(p->arg, arg, sizeof(p->arg) - 1);
 
@@ -1347,17 +1485,19 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
                           &p->task);
     if (err != RV9_OK) {
         /* Leave the descriptor in the table marked dead rather than unpick
-           the list from here; it costs a few bytes and keeps this simple. */
+           the list from here; pruning forgets it like any other. There is
+           no task to hold it. */
         rv9_lock_acquire(s_lock);
-        p->state = RV9_PROC_EXITED;
         p->exit_status = -1;
+        p->refs        = 0;
+        ended_locked(p);
         rv9_lock_release(s_lock);
 
         /* The fork hook has already run, so this process owns a path table
            and whatever it reserved. Nothing else will ever tell the I/O
            manager it is gone -- the trampoline that normally does so is
            exactly the thing that failed to start. */
-        if (s_on_exit) s_on_exit(pid);
+        undo_fork(pid);
 
         rv9_mod_unlink(mod);
         return RV9_PROC_ERR_NOMEM;
@@ -1387,17 +1527,21 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
 
 rv9_proc_err_t rv9_proc_wait(rv9_pid_t pid, int *out_status, uint32_t timeout_ms)
 {
+    /* Held, so it cannot be forgotten while this is looking at it. */
     rv9_lock_acquire(s_lock);
     rv9_proc_t *p = find_locked(pid);
+    if (p != NULL) hold_locked(p);
     rv9_lock_release(s_lock);
 
     if (p == NULL) return RV9_PROC_ERR_NOTFOUND;
 
     uint64_t deadline = rv9_time_ms() + timeout_ms;
+    rv9_proc_err_t result = RV9_PROC_OK;
 
     while (p->state != RV9_PROC_EXITED) {
         if (timeout_ms != RV9_WAIT_FOREVER && rv9_time_ms() >= deadline) {
-            return RV9_PROC_ERR_TIMEOUT;
+            result = RV9_PROC_ERR_TIMEOUT;
+            break;
         }
         rv9_task_delay_ms(WAIT_POLL_MS);
 
@@ -1410,8 +1554,15 @@ rv9_proc_err_t rv9_proc_wait(rv9_pid_t pid, int *out_status, uint32_t timeout_ms
         if (mine) collect_faulted(p);
     }
 
-    if (out_status) *out_status = p->exit_status;
-    return RV9_PROC_OK;
+    rv9_lock_acquire(s_lock);
+    if (result == RV9_PROC_OK) {
+        if (out_status) *out_status = p->exit_status;
+        p->waited = true;       /* collected: the first to be forgotten */
+    }
+    if (p->refs > 0) p->refs--;
+    rv9_lock_release(s_lock);
+
+    return result;
 }
 
 rv9_proc_err_t rv9_proc_chain(const char *module_name)
@@ -1454,6 +1605,9 @@ rv9_proc_err_t rv9_proc_signal(rv9_pid_t pid, uint32_t signals)
  */
 #define KILL_WAIT_MS 500
 
+static rv9_proc_err_t kill_held(rv9_proc_t *p, rv9_pid_t pid,
+                                rv9_proc_class_t cls, rv9_task_t task);
+
 rv9_proc_err_t rv9_proc_kill(rv9_pid_t pid)
 {
     rv9_lock_acquire(s_lock);
@@ -1462,11 +1616,21 @@ rv9_proc_err_t rv9_proc_kill(rv9_pid_t pid)
     bool live = (p != NULL && p->state != RV9_PROC_EXITED);
     rv9_proc_class_t cls  = live ? p->cls  : RV9_CLASS_NORMAL;
     rv9_task_t       task = live ? p->task : NULL;
+    if (live && p != me) hold_locked(p);
     rv9_lock_release(s_lock);
 
     if (!live)   return RV9_PROC_ERR_NOTFOUND;
     if (p == me) return RV9_PROC_ERR_INVAL;
 
+    rv9_proc_err_t err = kill_held(p, pid, cls, task);
+    put(p);
+    return err;
+}
+
+/* The body of kill, with the descriptor held by the caller throughout. */
+static rv9_proc_err_t kill_held(rv9_proc_t *p, rv9_pid_t pid,
+                                rv9_proc_class_t cls, rv9_task_t task)
+{
     uint64_t until = rv9_time_ms() + KILL_WAIT_MS;
 
     /*
@@ -1507,7 +1671,15 @@ rv9_proc_err_t rv9_proc_kill(rv9_pid_t pid)
             return RV9_PROC_ERR_INVAL;
         }
         if (rv9_time_ms() >= until) {
-            ESP_LOGW(TAG, "pid %u held a lock for %d ms; not stopped",
+            /* Given up, so the request to give up is withdrawn: a process
+               left marked cancelled would find every later wait of its own
+               ending early, for no reason it could see. */
+            rv9_lock_acquire(s_lock);
+            if (p->task != NULL) rv9_task_uncancel(p->task);
+            rv9_lock_release(s_lock);
+
+            ESP_LOGW(TAG, "pid %u was inside something it could not be "
+                          "stopped in for %d ms; not stopped",
                      (unsigned)pid, KILL_WAIT_MS);
             return RV9_PROC_ERR_TIMEOUT;
         }
@@ -1534,12 +1706,37 @@ rv9_proc_err_t rv9_proc_kill(rv9_pid_t pid)
     return RV9_PROC_OK;
 }
 
-const rv9_proc_t *rv9_proc_get(rv9_pid_t pid)
+bool rv9_proc_info(rv9_pid_t pid, rv9_proc_info_t *out)
+{
+    if (out == NULL) return false;
+
+    rv9_lock_acquire(s_lock);
+    const rv9_proc_t *p = find_locked(pid);
+    if (p != NULL) {
+        memset(out, 0, sizeof(*out));
+        out->pid         = p->pid;
+        out->parent      = p->parent;
+        memcpy(out->name, p->name, sizeof(out->name));
+        out->state       = p->state;
+        out->exit_status = p->exit_status;
+        out->fault       = p->fault;
+        out->waited      = p->waited;
+    }
+    rv9_lock_release(s_lock);
+    return p != NULL;
+}
+
+int rv9_proc_list(rv9_sys_proc_t *out, int max)
+{
+    if (out == NULL || max <= 0) return proc_list_op(NULL, 0);
+    return proc_list_op(out, (uint32_t)max * sizeof(rv9_sys_proc_t));
+}
+
+void rv9_proc_set_next_pid(rv9_pid_t pid)
 {
     rv9_lock_acquire(s_lock);
-    rv9_proc_t *p = find_locked(pid);
+    s_next_pid = (pid == RV9_PID_NONE) ? 1 : pid;
     rv9_lock_release(s_lock);
-    return p;
 }
 
 const void *rv9_proc_statics(rv9_pid_t pid)
@@ -1549,11 +1746,6 @@ const void *rv9_proc_statics(rv9_pid_t pid)
     const void *st = p ? p->statics : NULL;
     rv9_lock_release(s_lock);
     return st;
-}
-
-const rv9_proc_t *rv9_proc_next(const rv9_proc_t *prev)
-{
-    return prev ? prev->next : s_procs;
 }
 
 void rv9_proc_aging_set(bool enabled)

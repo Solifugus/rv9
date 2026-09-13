@@ -93,9 +93,15 @@ struct rv9k_thread {
     void          *local;           /* one pointer belonging to this thread */
     int            fault;           /* RV9K_FAULT_*, why the kernel stopped it */
 
-    /* Locks this thread holds right now, of either kind. A thread holding
-       one cannot be stopped from outside: see rv9k_thread_stop. */
+    /* Locks this thread holds right now, of either kind -- and blocking
+       operations it is inside that must finish to leave nothing behind. A
+       thread holding one cannot be stopped from outside: see
+       rv9k_thread_stop. */
     uint32_t       holds;
+
+    /* Somebody tried to stop this thread while it held something. Anything
+       it is blocked in that can give up early should, and let go. */
+    bool           cancel;
     bool           held;            /* corpse kept for whoever is watching */
 
     rv9k_thread_t *next;
@@ -288,7 +294,10 @@ void rv9k_thread_kill(rv9k_thread_t *t);
  * control loop is a second failure caused by fixing the first.
  *
  * So a thread holding anything is not stopped. The caller is told, and
- * asks again; the lock is normally held for microseconds.
+ * asks again; the lock is normally held for microseconds. The thread is
+ * also marked `cancel`, because what it holds is not always a lock: it may
+ * be inside an open waiting for a network connection that never comes,
+ * and only it can let go of the socket that wait created.
  *
  * The corpse is held like a stack fault's, fault RV9K_FAULT_KILLED, so the
  * layer that asked can read what happened before the slot is reused.

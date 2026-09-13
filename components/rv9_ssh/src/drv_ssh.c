@@ -819,7 +819,27 @@ static rv9_io_err_t ssh_setstat(rv9_dev_t *dev, uint32_t code, void *arg)
     }
 }
 
+/*
+ * Make every call inside this session return, without freeing anything.
+ *
+ * A background job reading the terminal of a session that has ended is
+ * waiting for a client that will never type again, in a loop only a
+ * closed socket ends. Shutting the socket is that end; `eof` stops a call
+ * that is between packets from starting another. The session itself is
+ * freed by ssh_close, once the I/O manager has seen every call leave.
+ */
+static rv9_io_err_t ssh_hangup(rv9_dev_t *dev)
+{
+    ssh_t *s = (ssh_t *)dev->drv_state;
+    if (s == NULL) return RV9_IO_OK;
+
+    s->eof = true;
+    if (s->net != NULL) rv9_io_setstat_path(s->net, RV9_NET_SS_SHUTDOWN, NULL);
+    return RV9_IO_OK;
+}
+
 static const rv9_driver_t ssh_driver = {
+    .hangup  = ssh_hangup,
     .name    = "ssh",
     .init    = ssh_init,
     .open    = ssh_open,
