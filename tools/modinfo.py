@@ -33,9 +33,15 @@ CLASSES = {0: "unspecified", 1: "proaction", 2: "reaction", 3: "realtime"}
 U32 = {"stack", "static", "heap_max", "period_us", "deadline_us",
        "min_inter_us", "wcet_us"}
 U8 = {"class"}
+FS = {"failsafe"}
 
 
 def show_value(name, raw):
+    if name in FS and len(raw) >= 5:
+        # u32 value then the device path, unterminated.
+        value = struct.unpack("<I", raw[:4])[0]
+        path = raw[4:].decode("utf-8", "replace")
+        return f"{path} = {value}"
     if name in U32 and len(raw) == 4:
         n = struct.unpack("<I", raw)[0]
         if name == "heap_max" and n == 0:

@@ -62,6 +62,18 @@ struct rv9_claim {
     bool              exclusive;
     bool              reserved;      /* a fork-time reservation is outstanding */
     uint16_t          refs;
+
+    /*
+     * Where this device is to be left when its owner stops.
+     *
+     * It lives on the ownership record rather than on the process because
+     * the two questions are one question: "whose was this" and "what
+     * should it be left at" are answered by the same row, and a failsafe
+     * for a device nobody owns is not a thing that can exist.
+     */
+    bool              has_failsafe;
+    uint32_t          failsafe_value;
+
     struct rv9_claim *next;
 };
 
@@ -249,6 +261,63 @@ void rv9_claim_release_pid(rv9_pid_t owner)
     rv9_lock_release(s_lock);
 }
 
+/*
+ * Record what a device is to be left at when this owner stops.
+ *
+ * Refuses unless the caller already owns the resource, which is the
+ * admission check rather than an extra one: a program may promise to park
+ * what it declared it must own, and nothing else. A failsafe naming
+ * somebody else's actuator is a promise it has no standing to make.
+ */
+rv9_io_err_t rv9_claim_failsafe(const char *resource, rv9_pid_t owner,
+                                uint32_t value)
+{
+    if (resource == NULL) return RV9_IO_ERR_INVAL;
+    if (s_lock == NULL)   return RV9_IO_ERR_NOTFOUND;
+
+    rv9_io_err_t err = RV9_IO_ERR_NOTFOUND;
+
+    rv9_lock_acquire(s_lock);
+    for (struct rv9_claim *c = s_claims; c; c = c->next) {
+        if (c->owner != owner || strcmp(c->name, resource) != 0) continue;
+        c->has_failsafe   = true;
+        c->failsafe_value = value;
+        err = RV9_IO_OK;
+        break;
+    }
+    rv9_lock_release(s_lock);
+
+    return err;
+}
+
+/*
+ * Copy out what this owner promised to park, before anything is released.
+ *
+ * A copy rather than a walk under callback, because applying a failsafe
+ * means opening a device -- which takes this lock. The caller gets a
+ * snapshot and does the physical work with nothing held.
+ */
+int rv9_claim_failsafes(rv9_pid_t owner, rv9_claim_fs_t *out, int max)
+{
+    if (s_lock == NULL) return 0;
+
+    int n = 0;
+    rv9_lock_acquire(s_lock);
+
+    for (struct rv9_claim *c = s_claims; c; c = c->next) {
+        if (c->owner != owner || !c->has_failsafe) continue;
+        if (out != NULL && n < max) {
+            strncpy(out[n].name, c->name, sizeof(out[n].name) - 1);
+            out[n].name[sizeof(out[n].name) - 1] = '\0';
+            out[n].value = c->failsafe_value;
+        }
+        n++;
+    }
+
+    rv9_lock_release(s_lock);
+    return n;
+}
+
 int rv9_claim_list(rv9_sys_claim_t *out, int max)
 {
     if (s_lock == NULL) return 0;
@@ -266,6 +335,8 @@ int rv9_claim_list(rv9_sys_claim_t *out, int max)
             out[n].exclusive        = c->exclusive ? 1 : 0;
             out[n].reserved_at_fork = c->reserved ? 1 : 0;
             out[n].refs             = c->refs;
+            out[n].has_failsafe     = c->has_failsafe ? 1 : 0;
+            out[n].failsafe_value   = c->failsafe_value;
         }
         n++;
     }

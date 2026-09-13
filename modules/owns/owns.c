@@ -60,6 +60,12 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         m_say(env, RV9_STDOUT, "  ");
         m_say(env, RV9_STDOUT, st->c[i].exclusive ? "exclusive" : "shared");
         if (st->c[i].reserved_at_fork) m_say(env, RV9_STDOUT, ", reserved");
+
+        /* What RV-9 owes this device when its owner stops. */
+        if (st->c[i].has_failsafe) {
+            m_say(env, RV9_STDOUT, ", parks at ");
+            m_num(env, RV9_STDOUT, (int32_t)st->c[i].failsafe_value);
+        }
         m_say(env, RV9_STDOUT, "\n");
     }
 

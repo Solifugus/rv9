@@ -74,6 +74,22 @@ struct rv9_path;
 typedef struct rv9_driver {
     const char *name;
 
+    /*
+     * Does a unit keep its state after the last path to it closes?
+     *
+     * True for /gpio, which holds its level deliberately -- setting an
+     * enable line and having it drop when the command finished would be
+     * useless. False for /pwm0, equally deliberately: it holds a hardware
+     * channel that must be given back, and an actuator still running
+     * because a program exited is a bad surprise.
+     *
+     * The distinction was always there in the drivers. It is declared here
+     * because a declared failsafe outlives its program only on a device of
+     * the first kind, and admission should be able to say so rather than
+     * letting the author find out from the machine.
+     */
+    bool retains;
+
     rv9_io_err_t (*init)(struct rv9_dev *dev);
     rv9_io_err_t (*term)(struct rv9_dev *dev);
 
@@ -244,6 +260,24 @@ void         rv9_claim_drop(struct rv9_claim *c);
 rv9_io_err_t rv9_claim_reserve(const char *resource, rv9_pid_t owner,
                                bool exclusive);
 void         rv9_claim_release_pid(rv9_pid_t owner);
+
+/*
+ * Where a device is to be left when its owner stops.
+ *
+ * Recorded against an existing claim, so it can only be set by a process
+ * that already owns the resource -- which is the whole of the check.
+ * RV9_IO_ERR_NOTFOUND means the caller does not own it.
+ */
+rv9_io_err_t rv9_claim_failsafe(const char *resource, rv9_pid_t owner,
+                                uint32_t value);
+
+typedef struct {
+    char     name[RV9_CLAIM_NAME_MAX];
+    uint32_t value;
+} rv9_claim_fs_t;
+
+/* Snapshot what this owner promised to park. Counts when out is NULL. */
+int rv9_claim_failsafes(rv9_pid_t owner, rv9_claim_fs_t *out, int max);
 
 /* Fill records, or count them when out is NULL. */
 int  rv9_claim_list(rv9_sys_claim_t *out, int max);

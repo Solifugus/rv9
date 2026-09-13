@@ -102,6 +102,28 @@ static RV9_RT_CODE void gpio_edge_isr(void *arg)
 #define MAX_PINS 40
 static uint8_t s_open_count[MAX_PINS];
 static uint8_t s_output_count[MAX_PINS];
+
+/*
+ * Two things about a pin that outlive every path to it.
+ *
+ * `reclaimed` -- RV-9 has taken this pin away from the IOMUX. Doing that
+ * again is destructive: gpio_reset_pin restores the peripheral routing and
+ * the pull-up, which is exactly what we spent the first open undoing. It
+ * must happen once per pin, not once per generation of openers.
+ *
+ * `driving` -- somebody has, at some point, opened this pin for writing.
+ * It stays an output from then on. Direction is the union of what openers
+ * want *and what the pin already is*, because the level a previous opener
+ * set is only still there while something is driving it.
+ *
+ * Both were missing, and between them they made a documented guarantee
+ * false: closing a pin preserved its level, and the very next open threw
+ * it away. `pin 2 0` then `pin 2` read 1 -- the reset had re-enabled the
+ * pull-up and the lone reader had stopped driving the pin. Everything the
+ * close does carefully was undone by the open.
+ */
+static uint8_t s_reclaimed[MAX_PINS];
+static uint8_t s_driving[MAX_PINS];
 static rv9_lock_t s_lock;
 
 static rv9_io_err_t gpio_unit_open(rv9_dev_t *dev, uint32_t unit,
@@ -126,21 +148,32 @@ static rv9_io_err_t gpio_unit_open(rv9_dev_t *dev, uint32_t unit,
     rv9_lock_acquire(s_lock);
     bool first = (s_open_count[unit] == 0);
     s_open_count[unit]++;
-    if (u->output) s_output_count[unit]++;
-    bool drive = (s_output_count[unit] > 0);
+    if (u->output) { s_output_count[unit]++; s_driving[unit] = 1; }
+
+    /* Sticky: once a pin is an output it stays one. A reader arriving
+       after a writer has gone must not stop the pin driving what the
+       writer left on it. */
+    bool drive     = (s_output_count[unit] > 0) || s_driving[unit];
+    bool reclaim   = first && !s_reclaimed[unit];
+    if (reclaim) s_reclaimed[unit] = 1;
     rv9_lock_release(s_lock);
 
     /*
-     * Reclaim the pin, but only the first time.
+     * Reclaim the pin, but only ever once.
      *
      * A GPIO on this chip usually comes up routed to some peripheral
      * through the IOMUX, and configuring it as GPIO does not undo that --
      * so the pin reads and writes as if nothing happened, which is exactly
      * how it presented: every pin accepted a write and read back zero.
+     *
+     * Doing it a second time is not harmless. gpio_reset_pin puts the
+     * routing and the pull-up back, so an enable line somebody set is
+     * quietly dropped the next time anything opens the pin -- including a
+     * command that only wanted to read it.
      */
     esp_err_t err;
     if (first) {
-        gpio_reset_pin((gpio_num_t)unit);
+        if (reclaim) gpio_reset_pin((gpio_num_t)unit);
 
         gpio_config_t cfg = {
             .pin_bit_mask = 1ULL << unit,
@@ -333,6 +366,10 @@ static rv9_io_err_t gpio_unit_stat(rv9_dev_t *dev, void *state, bool set,
 
 static const rv9_driver_t gpio_drv = {
     .name       = "gpio",
+    /* A pin keeps its level after the last path closes -- see the comment
+       on gpio_unit_open. That is what makes a failsafe on a pin outlive
+       the program that declared it. */
+    .retains    = true,
     .unit_open  = gpio_unit_open,
     .unit_close = gpio_unit_close,
     .unit_read  = gpio_unit_read,

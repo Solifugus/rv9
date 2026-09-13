@@ -142,7 +142,7 @@ typedef struct __attribute__((packed)) {
 #define RV9_MTAG_WCET_US      0x0009  /* u32: worst-case execution         */
 #define RV9_MTAG_DEVICE       0x000A  /* string: needed, shared; repeats   */
 #define RV9_MTAG_EXCLUSIVE    0x000B  /* string: needed alone; repeats     */
-#define RV9_MTAG_FAILSAFE     0x000C  /* string: state to leave hardware in*/
+#define RV9_MTAG_FAILSAFE     0x000C  /* u32 value + path; repeats. See below */
 #define RV9_MTAG_CAPABILITY   0x000D  /* string: privilege wanted; repeats */
 #define RV9_MTAG_COMPILER     0x000E  /* string: what built it             */
 #define RV9_MTAG_RUNTIME      0x000F  /* string: language runtime version  */
@@ -150,6 +150,41 @@ typedef struct __attribute__((packed)) {
 /* The highest tag this build understands. Anything above it is unknown,
    and unknown plus mandatory is a refusal. */
 #define RV9_MTAG_MAX          0x000F
+
+/*
+ * What a device must be left at when its owner stops.
+ *
+ * One entry per actuator, repeated -- a program parking a robot sets a
+ * throttle and a brake and an enable line, and those are three constants
+ * on three devices, not one string describing an intention.
+ *
+ * The value is deliberately a constant and the device deliberately a path:
+ *
+ *     uint16_t tag = RV9_MTAG_FAILSAFE
+ *     uint16_t len = 4 + strlen(path)
+ *     uint32_t value
+ *     char     path[len - 4]        not NUL-terminated
+ *
+ * Nothing here can allocate, wait, call anything, or read the dead
+ * program's memory, because there is nothing here but a number and a
+ * name. That is the point: a failsafe is applied *after* its program has
+ * stopped, frequently because that program ran off its own stack, and
+ * anything richer would be asking the corpse for help.
+ *
+ * The path must be one the same manifest claimed with RV9_MTAG_EXCLUSIVE.
+ * A program may only promise to park what it owns; anything else is a
+ * promise about somebody else's device, and admission refuses it.
+ */
+#define RV9_FAILSAFE_MIN_LEN  5       /* a value and at least one character */
+
+/*
+ * A failsafe survives only on a device that holds its state when the last
+ * path closes. /gpio does, deliberately. /pwm0 deliberately does not -- it
+ * stops driving, because an actuator still running because a program
+ * exited is a bad surprise. On such a device the driver's own release
+ * behaviour is the safe state and a declared value is redundant at best;
+ * admission says so rather than pretending otherwise.
+ */
 
 /*
  * Execution class, as the language means it.
@@ -573,6 +608,21 @@ typedef struct __attribute__((packed)) {
     uint8_t  exclusive;
     uint8_t  reserved_at_fork;
     uint32_t refs;             /* opens outstanding, plus the reservation */
+
+    /*
+     * What this device is to be left at when its owner stops, from the
+     * owner's manifest.
+     *
+     * Appended -- but note that an *array* record cannot grow the way
+     * rv9_sys_mem_t can. The caller's buffer length is divided by the
+     * record size to get a stride, so a module built against the shorter
+     * version reads misaligned rather than short. Every module in the
+     * store is rebuilt together, which is why this is survivable and not
+     * why it is right; see docs/design.md §24.
+     */
+    uint8_t  has_failsafe;
+    uint8_t  fs_reserved[3];
+    uint32_t failsafe_value;
 } rv9_sys_claim_t;
 
 /*

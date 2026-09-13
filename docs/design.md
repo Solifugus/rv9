@@ -2751,14 +2751,145 @@ and the claim are two separate moments and two programs can both pass the
 check. A refusal therefore spends a pid, which is the right way round: the
 alternative is a claim with nothing to release it.
 
-### What this does not do
+## 27. Where a device is left
 
-Nothing puts a device into any particular state on the way out. `/pwm0`
-stops driving when its path closes because its driver chooses to; `/gpio`
-deliberately holds its level. Neither is a *declared* failsafe, and
-`RV9_MTAG_FAILSAFE` still has nothing behind it. Ownership was the
-prerequisite — you cannot ask "what state should this be left in" until you
-can answer "whose was it" — and that is the next piece.
+Ownership answered *whose was this*. This answers *and what should it be
+left at*, which is the same row of the same table — a failsafe for a device
+nobody owns is not a thing that can exist.
+
+R9's §15 states the requirement exactly, and it is a strong one:
+
+> It must compile to declarative safe-state operations that RV-9 or a
+> trusted supervisor can perform **without executing code in the failed
+> component**. A failsafe may name owned devices and constant safe
+> configurations, but may not allocate, wait, call arbitrary functions, or
+> depend on the failed component's private state.
+
+So `RV9_MTAG_FAILSAFE` is not a string describing an intention. It is a
+number and a device name, repeated once per actuator:
+
+```
+uint16_t tag = RV9_MTAG_FAILSAFE
+uint16_t len = 4 + strlen(path)
+uint32_t value
+char     path[len - 4]
+```
+
+Nothing in that can allocate, wait, or call anything, because there is
+nothing in it but a constant and a name. That is not a limitation worked
+around; it is the reason the mechanism is trustworthy. A failsafe is
+applied with its program already dead — frequently because it ran off its
+own stack — and anything richer would be asking the corpse for help.
+
+```
+# build.conf
+exclusives="/pwm0/3 /gpio/2"
+failsafes="/gpio/2=0"
+```
+
+### You may only promise to park what you own
+
+A failsafe is recorded against an existing claim, so the check is the data
+structure rather than a rule somebody has to remember:
+
+```
+rv9> hold                       # with failsafes="/gpio/7=0" declared
+E rv9-io: admit 'hold': it promises to leave /gpio/7 at 0, but never claimed it
+hold: its declaration contradicts itself (see the log)
+```
+
+`CONTRACT`, not `BUSY` — this is a manifest disagreeing with itself, and
+the fix is a `build.conf` line rather than stopping something else. Note
+that `CONTRACT` is now reachable by an ordinary fork and not only by `rt`.
+
+### On every way out, not only the bad ones
+
+R9 distinguishes `on stop` (cooperative, while healthy) from `failsafe`
+(applied to the wreckage). RV-9 does not need to: `on stop` runs inside the
+module, so it has already happened by the time RV-9 sees an exit at all.
+What is left is the same question either way — this device had an owner, it
+no longer does, and the owner said where to leave it.
+
+Applying it only on faults would mean the safety path is the one that
+almost never runs.
+
+### Demonstrated, not asserted
+
+`hold` drives `/gpio/2` high, chains to `smash`, and is killed by the §22
+stack guard:
+
+```
+rv9> pin 2 1
+/gpio/2 := 1, reads 1
+
+rv9> hold crash
+holding /pwm0/3 and /gpio/2 as pid 9
+/gpio/2 is now 1; RV-9 owes it a 0
+now dying without letting go...
+descending...
+E rv9-proc: pid 9 ('smash') killed: stack overflow
+W rv9-io: failsafe: /gpio/2 left at 0
+hold returned -6
+
+rv9> pin 2
+/gpio/2 = 0
+```
+
+The pin is driven high on purpose so that 0 afterwards is evidence rather
+than the value it happened to have anyway.
+
+### A promise a device cannot keep
+
+A failsafe outlives its program only on a device that holds its state when
+the last path closes. `rv9_driver_t.retains` now declares which those are;
+`/gpio` does, `/pwm0` does not — it gives the hardware channel back and
+stops driving, which is its own safe state. Declaring a value for a
+non-retaining device is not refused, because the value still holds while
+the program lives, but admission says so:
+
+```
+W rv9-io: admit 'hold': /pwm0/3 does not hold its state when released;
+          its failsafe lasts only until then
+```
+
+### The bug this found, which was the point of measuring
+
+`/gpio` claimed to hold its level past close. It did not, and had not since
+interrupts were added. Two defects in `gpio_unit_open`, both undoing what
+`gpio_unit_close` had carefully preserved:
+
+- `gpio_reset_pin()` ran on every *first* open — meaning every time the
+  open count went 0→1, not once per pin. It restores the IOMUX routing and
+  the pull-up, which is precisely what the first open exists to undo.
+- direction was `s_output_count[unit] > 0`. With nobody open that is zero,
+  so a reader arriving after a writer had gone reconfigured the pin as a
+  plain input and stopped driving whatever the writer left on it.
+
+```
+rv9> pin 2 0
+/gpio/2 := 0, reads 0        # true inside the open
+rv9> pin 2
+/gpio/2 = 1                  # and gone by the next one
+```
+
+`pin 5 1` to enable something and any later `pin 5` to check it would drop
+the enable line — read-only observation with a side effect, on the exact
+kind of signal this machine exists to hold steady. Two sticky per-pin flags
+fix it: reclaim once per pin rather than once per generation of openers,
+and let an output stay an output.
+
+The failsafe work did not cause this. It made it *visible*, because a
+failsafe is the first thing in RV-9 whose whole purpose is to still be true
+after everybody has let go.
+
+### What is still missing
+
+`RV9_MTAG_CAPABILITY` remains registered with nothing behind it. And a
+failsafe is applied when the *process* stops — not when it misses a
+deadline while still running, which is R9 §15.3's `DEADLINE` fault. RV-9
+detects overruns and counts them; it does not yet stop a component for
+them. That is the next piece of §15.3, and it needs the component to be
+stoppable from outside, which is `RV9_SIG_STOP` with nothing to send it.
 
 ## 9. Migration to a native kernel
 

@@ -168,6 +168,12 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         } else if (pid == -RV9_PE_NODEV) {
             m_say(env, RV9_STDOUT, ": it needs a device this machine does "
                                    "not have (see the log)\n");
+        } else if (pid == -RV9_PE_CONTRACT) {
+            /* Reachable by an ordinary fork now, not only by 'rt': a
+               failsafe naming a device the program never claimed is a
+               manifest contradicting itself. */
+            m_say(env, RV9_STDOUT, ": its declaration contradicts itself "
+                                   "(see the log)\n");
         } else {
             m_say(env, RV9_STDOUT, ": no such module\n");
         }

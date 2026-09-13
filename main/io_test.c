@@ -184,6 +184,41 @@ static void death(void)
 }
 
 /*
+ * A failsafe is recorded against an ownership record, which is what makes
+ * "you may only promise to park what you own" a consequence of the data
+ * structure rather than a rule somebody has to remember to check.
+ */
+static void failsafes(void)
+{
+    rv9_claim_fs_t fs[4];
+
+    check(rv9_claim_failsafe(RES_A, PID_X, 0) == RV9_IO_ERR_NOTFOUND,
+          "a failsafe on a device nobody owns is refused");
+
+    check(rv9_claim_reserve(RES_A, PID_X, true) == RV9_IO_OK, "own it first");
+    check(rv9_claim_failsafe(RES_A, PID_Y, 0) == RV9_IO_ERR_NOTFOUND,
+          "and a failsafe on somebody else's device too");
+    check(rv9_claim_failsafe(RES_A, PID_X, 7) == RV9_IO_OK,
+          "the owner may say where to leave it");
+
+    check(rv9_claim_failsafes(PID_X, fs, 4) == 1 && fs[0].value == 7 &&
+          strcmp(fs[0].name, RES_A) == 0,
+          "and it comes back with the device it belongs to");
+    check(rv9_claim_failsafes(PID_Y, fs, 4) == 0,
+          "nobody else has promised anything");
+
+    /* Restating it is the last word, not a second entry. */
+    check(rv9_claim_failsafe(RES_A, PID_X, 0) == RV9_IO_OK &&
+          rv9_claim_failsafes(PID_X, fs, 4) == 1 && fs[0].value == 0,
+          "saying it twice replaces rather than accumulates");
+
+    rv9_claim_release_pid(PID_X);
+    check(rv9_claim_failsafes(PID_X, fs, 4) == 0,
+          "and the promise goes when the claim does");
+    check(!rv9_claim_owner(RES_A, NULL, NULL), "nothing left behind");
+}
+
+/*
  * The mode bit, through a real open on a real device.
  *
  * Everything above talks to the claim table directly, which tests the
@@ -224,6 +259,7 @@ bool rv9_io_selftest(void)
     upgrading();
     reservations();
     death();
+    failsafes();
     exclusive_open();
 
     if (s_failed == 0) {

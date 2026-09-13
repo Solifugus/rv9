@@ -850,12 +850,62 @@ static void io_on_fork(rv9_pid_t parent, rv9_pid_t child)
     rv9_lock_release(s_lock);
 }
 
+/*
+ * Leave this process's actuators where it said they should be left.
+ *
+ * Run after everything of its own is closed and released, and through a
+ * fresh detached open, because the alternative is worse than it looks: to
+ * write through the dying process's own path we would have to keep that
+ * path alive, and the process this is for is frequently one that ran off
+ * its stack. Nothing here touches anything the dead program owned except
+ * the device itself.
+ *
+ * A device that does not hold its state past release (see rv9_driver_t
+ * .retains) is left where its driver leaves it -- /pwm0 stops driving,
+ * which is its own declared safe state. The value is still written, both
+ * because it is what was promised and because the device may be reopened
+ * before anything else touches it.
+ */
+#define MAX_FAILSAFES 8
+
+static void apply_failsafes(const rv9_claim_fs_t *fs, int n)
+{
+    for (int i = 0; i < n; i++) {
+        rv9_path_t *p = NULL;
+        rv9_io_err_t err = rv9_io_open_detached(fs[i].name, RV9_MODE_WRITE, &p);
+        if (err != RV9_IO_OK) {
+            ESP_LOGE(TAG, "failsafe: cannot open %s to park it: %s",
+                     fs[i].name, rv9_io_strerror(err));
+            continue;
+        }
+
+        size_t done = 0;
+        uint32_t v = fs[i].value;
+        err = rv9_io_write_path(p, &v, sizeof(v), &done);
+        rv9_io_close_path(p);
+
+        if (err != RV9_IO_OK) {
+            ESP_LOGE(TAG, "failsafe: cannot park %s at %lu: %s", fs[i].name,
+                     (unsigned long)v, rv9_io_strerror(err));
+        } else {
+            ESP_LOGW(TAG, "failsafe: %s left at %lu", fs[i].name,
+                     (unsigned long)v);
+        }
+    }
+}
+
 static void io_on_exit(rv9_pid_t pid)
 {
     /* Devices this process was the last user of. Told after the lock goes,
        because a driver being told may close a path of its own. */
     rv9_dev_t *idle[RV9_MAX_PATHS];
     int nidle = 0;
+
+    /* Taken before anything is released, because releasing is what frees
+       the records these live on. */
+    rv9_claim_fs_t fs[MAX_FAILSAFES];
+    int nfs = rv9_claim_failsafes(pid, fs, MAX_FAILSAFES);
+    if (nfs > MAX_FAILSAFES) nfs = MAX_FAILSAFES;
 
     rv9_lock_acquire(s_lock);
 
@@ -894,6 +944,20 @@ static void io_on_exit(rv9_pid_t pid)
     rv9_claim_release_pid(pid);
 
     for (int i = 0; i < nidle; i++) dev_last_close(idle[i]);
+
+    /*
+     * Last, and on every path out of a process rather than only the bad
+     * ones.
+     *
+     * The distinction between orderly stop and failure belongs to the
+     * program: R9's `on stop` runs while the module is still healthy, so
+     * it has already happened by the time RV-9 sees an exit at all. What
+     * is left here is the same question either way -- this device had an
+     * owner, it no longer does, and the owner said where to leave it.
+     * Applying it only on faults would mean the safety path is the one
+     * that almost never runs.
+     */
+    if (nfs > 0) apply_failsafes(fs, nfs);
 }
 
 /*
@@ -918,6 +982,81 @@ static void io_on_exit(rv9_pid_t pid)
  * this is a fork failing and not an open failing, and the person reading
  * the message is being told why their program did not start.
  */
+/* Does the device behind this path hold its state once released? */
+static bool device_retains(const char *resource)
+{
+    char devname[16];
+    const char *rest = "";
+    split_path(resource, devname, sizeof(devname), &rest);
+
+    rv9_lock_acquire(s_lock);
+    rv9_dev_t *dev = find_dev(devname);
+    bool retains = (dev != NULL && dev->drv->retains);
+    rv9_lock_release(s_lock);
+
+    return retains;
+}
+
+/*
+ * What this program promises to leave its actuators at.
+ *
+ * Read after the exclusives, and only after, because a failsafe is
+ * recorded against an ownership record that must already exist. A program
+ * that names a device it did not claim is contradicting its own manifest
+ * -- it has promised to park something it never asked to own -- so the
+ * refusal is CONTRACT rather than BUSY: the fix is a build.conf line, not
+ * stopping something else.
+ */
+static int claim_failsafes(rv9_pid_t pid, const void *image,
+                           const char *progname)
+{
+    const void *v = NULL;
+    uint16_t len = 0;
+
+    while ((v = rv9_mod_manifest_find(image, RV9_MTAG_FAILSAFE, v,
+                                      &len)) != NULL) {
+        if (len < RV9_FAILSAFE_MIN_LEN) {
+            ESP_LOGE(TAG, "admit '%s': a failsafe entry is malformed",
+                     progname);
+            return RV9_PROC_ERR_CONTRACT;
+        }
+
+        uint32_t value;
+        memcpy(&value, v, sizeof(value));       /* may be unaligned in flash */
+
+        char res[RV9_CLAIM_NAME_MAX];
+        size_t n = (size_t)len - sizeof(value);
+        if (n > sizeof(res) - 1) n = sizeof(res) - 1;
+        memcpy(res, (const uint8_t *)v + sizeof(value), n);
+        res[n] = '\0';
+
+        if (rv9_claim_failsafe(res, pid, value) != RV9_IO_OK) {
+            ESP_LOGE(TAG, "admit '%s': it promises to leave %s at %lu, but "
+                          "never claimed it", progname, res,
+                     (unsigned long)value);
+            return RV9_PROC_ERR_CONTRACT;
+        }
+
+        /*
+         * Say so when the promise cannot be kept past the last close.
+         *
+         * Not a refusal: the value still holds while the program is alive
+         * and during the window before the device is released, and the
+         * driver's own release behaviour is a safe state in its own
+         * right. But a program whose author believes the servo will stay
+         * where it was parked should find that out from the log rather
+         * than from the servo.
+         */
+        if (!device_retains(res)) {
+            ESP_LOGW(TAG, "admit '%s': %s does not hold its state when "
+                          "released; its failsafe lasts only until then",
+                     progname, res);
+        }
+    }
+
+    return RV9_PROC_OK;
+}
+
 static int io_claim_for_fork(rv9_pid_t pid, const void *image,
                              const char *progname)
 {
@@ -967,7 +1106,7 @@ static int io_claim_for_fork(rv9_pid_t pid, const void *image,
         }
     }
 
-    return RV9_PROC_OK;
+    return claim_failsafes(pid, image, progname);
 }
 
 rv9_io_err_t rv9_io_set_system_std(const char *in, const char *out)

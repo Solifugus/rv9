@@ -39,9 +39,16 @@ CLASSES = {"unspecified": 0, "proaction": 1, "reaction": 2, "realtime": 3}
 U32_TAGS = {"stack", "static", "heap_max", "period_us", "deadline_us",
             "min_inter_us", "wcet_us"}
 U8_TAGS = {"class"}
-STR_TAGS = {"desc", "device", "exclusive", "failsafe", "capability",
+STR_TAGS = {"desc", "device", "exclusive", "capability",
             "compiler", "runtime"}
-REPEATABLE = {"device", "exclusive", "capability"}
+
+# A failsafe is a constant and a device, written PATH=VALUE. It encodes as
+# the u32 value followed by the path, because that is the only shape RV-9
+# can act on with the declaring program already dead: a number and a name,
+# nothing to call and nothing to read.
+FS_TAGS = {"failsafe"}
+
+REPEATABLE = {"device", "exclusive", "capability", "failsafe"}
 
 
 def encode_manifest(entries):
@@ -74,6 +81,22 @@ def encode_manifest(entries):
             payload = str(value).encode("utf-8")
             if len(payload) > 255:
                 raise ValueError(f"{name} is too long ({len(payload)} bytes)")
+        elif name in FS_TAGS:
+            spec = str(value)
+            if "=" not in spec:
+                raise ValueError(f"{name} wants PATH=VALUE, got {spec!r}")
+            path, _, number = spec.rpartition("=")
+            path = path.strip()
+            if not path.startswith("/"):
+                raise ValueError(f"{name} path must be absolute: {path!r}")
+            try:
+                n = int(number.strip(), 0)
+            except ValueError:
+                raise ValueError(
+                    f"{name} value must be a number, got {number!r}") from None
+            payload = struct.pack("<I", n) + path.encode("utf-8")
+            if len(payload) > 255:
+                raise ValueError(f"{name} path is too long: {path!r}")
         else:
             raise ValueError(f"no encoding for tag {name!r}")
 
