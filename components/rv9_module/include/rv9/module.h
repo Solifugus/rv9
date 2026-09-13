@@ -151,10 +151,11 @@ typedef struct __attribute__((packed)) {
 #define RV9_MTAG_WATCHES      0x0012  /* string: a cell it reads; repeats  */
 #define RV9_MTAG_MEM_MAX      0x0013  /* u32: bytes it and all it starts may
                                          hold at once; see RV9_PE_BUDGET */
+#define RV9_MTAG_PLACEMENT    0x0014  /* u8:  RV9_PLACE_*                  */
 
 /* The highest tag this build understands. Anything above it is unknown,
    and unknown plus mandatory is a refusal. */
-#define RV9_MTAG_MAX          0x0013
+#define RV9_MTAG_MAX          0x0014
 
 /*
  * Publications, declared rather than conventional.
@@ -197,6 +198,25 @@ typedef struct __attribute__((packed)) {
  */
 #define RV9_ON_DEADLINE_REPORT 0
 #define RV9_ON_DEADLINE_FAULT  1
+
+/*
+ * RV9_MTAG_PLACEMENT: R9's `priority` escape hatch, for a real-time program.
+ *
+ * Priority is derived from the admitted workload (design §33), and there
+ * are two levels, so the hatch can only say which one. It is a constraint
+ * on the placement, not a way round the analysis: a pinned program is
+ * never the one moved to make room, and when its pin leaves some loop
+ * unable to meet its deadline, the program is refused UNSCHEDULABLE,
+ * as any other would be.
+ *
+ *   DERIVED  the default: wherever the analysis puts it
+ *   URGENT   never below the radio -- for a loop whose bound must not
+ *            depend on work the analysis cannot see
+ *   ROUTINE  never above it -- for a loop that must not delay the radio
+ */
+#define RV9_PLACE_DERIVED 0
+#define RV9_PLACE_URGENT  1
+#define RV9_PLACE_ROUTINE 2
 
 /*
  * What a device must be left at when its owner stops.

@@ -77,7 +77,9 @@ loadable pieces:
   utilisation. A loop that fits the CPU but would make another loop late is
   refused, and the log names which loop and by how much.
 - **Priority is derived** from deadlines. Admitting a tight loop can move a
-  heavy one below it.
+  heavy one below it. A program can pin itself `urgent` or `routine`,
+  but a pin constrains the analysis rather than overriding it: if the pin
+  would make any loop late, the program is refused.
 - **Deadline misses and runaway loops are enforced.** A 2 ms watchdog stops
   a loop that stops waiting for its releases. The loop's declared
   **failsafes** are applied (the motor is parked) and the fault is
@@ -149,7 +151,7 @@ entirely is the remaining kernel work.
 
 ```
 kal 45   conform 23   mod 17   io 44   pub 38
-fault 76   proc 11   sched 11   mem 13
+fault 76   proc 11   sched 15   mem 13
 ```
 
 The boot suites cover the following:

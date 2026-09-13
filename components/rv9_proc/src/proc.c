@@ -1421,6 +1421,7 @@ typedef struct {
     uint32_t    c, t, d;
     bool        bounded;    /* has a release interval, so can be analysed */
     bool        urgent;
+    uint8_t     pin;        /* RV9_PLACE_*: DERIVED may be moved, others not */
     uint32_t    bound;
 } rt_item_t;
 
@@ -1468,7 +1469,9 @@ static bool level_meets(rt_item_t *items, int n, bool urgent, int *bad)
    deadline under any placement this makes, or -1. */
 static int place_rt(rt_item_t *items, int n)
 {
-    for (int i = 0; i < n; i++) items[i].urgent = true;
+    for (int i = 0; i < n; i++) {
+        items[i].urgent = (items[i].pin != RV9_PLACE_ROUTINE);
+    }
 
     int bad = -1;
     while (!level_meets(items, n, true, &bad)) {
@@ -1476,6 +1479,9 @@ static int place_rt(rt_item_t *items, int n)
         for (int i = 0; i < n; i++) {
             if (!items[i].bounded || !items[i].urgent) continue;
             urgent_bounded++;
+            /* A pin is kept, not weighed: if only pinned tasks could move,
+               the placement fails and admission says so. */
+            if (items[i].pin != RV9_PLACE_DERIVED) continue;
             if (victim < 0 || items[i].d > items[victim].d) victim = i;
         }
         /* One task alone that cannot meet its deadline will not meet it
@@ -1506,9 +1512,19 @@ static int place_rt(rt_item_t *items, int n)
 static rv9_proc_err_t admit_rt(const void *image, const char *name,
                                uint32_t interval_us, size_t stack,
                                uint32_t *out_wcet, uint32_t *out_deadline,
-                               bool *out_urgent, uint32_t *out_bound)
+                               bool *out_urgent, uint32_t *out_bound,
+                               uint8_t *out_place)
 {
-    if (out_urgent) *out_urgent = true;
+    uint8_t place = RV9_PLACE_DERIVED;
+    (void)rv9_mod_manifest_u8(image, RV9_MTAG_PLACEMENT, &place);
+    if (place > RV9_PLACE_ROUTINE) {
+        ESP_LOGE(TAG, "admit '%s': placement %u is not one this system knows",
+                 name, (unsigned)place);
+        return RV9_PROC_ERR_CONTRACT;
+    }
+
+    if (out_place)  *out_place  = place;
+    if (out_urgent) *out_urgent = (place != RV9_PLACE_ROUTINE);
     if (out_bound)  *out_bound  = 0;
 
     if (rv9_rt_slots_used() >= rv9_rt_slot_count()) {
@@ -1603,6 +1619,7 @@ static rv9_proc_err_t admit_rt(const void *image, const char *name,
             rt_item_t *it = &items[n++];
             memset(it, 0, sizeof(*it));
             it->p       = q;
+            it->pin     = q->rt_place;
             it->t       = q->period_us;
             it->bounded = (it->t != 0);
             it->d       = (q->deadline_us != 0 && q->deadline_us < it->t)
@@ -1623,6 +1640,10 @@ static rv9_proc_err_t admit_rt(const void *image, const char *name,
         me->d       = (has_deadline && deadline < interval_us) ? deadline
                                                                : interval_us;
         me->c       = has_wcet ? wcet : 0;
+        me->pin     = place;
+
+        bool pinned = false;
+        for (int i = 0; i < n; i++) pinned |= (items[i].pin != RV9_PLACE_DERIVED);
 
         int bad = place_rt(items, n);
         if (bad >= 0) {
@@ -1638,8 +1659,9 @@ static rv9_proc_err_t admit_rt(const void *image, const char *name,
 
             ESP_LOGE(TAG, "admit '%s': with it admitted, %s would answer in "
                           "%lu us against a %lu us deadline, however the "
-                          "real-time work is placed", name, who,
-                     (unsigned long)b->bound, (unsigned long)b->d);
+                          "real-time work is placed%s", name, who,
+                     (unsigned long)b->bound, (unsigned long)b->d,
+                     pinned ? " around the declared placements" : "");
             return RV9_PROC_ERR_UNSCHEDULABLE;
         }
 
@@ -1665,8 +1687,9 @@ static rv9_proc_err_t admit_rt(const void *image, const char *name,
         if (out_bound)  *out_bound  = me->bound;
         rv9_lock_release(s_lock);
 
-        ESP_LOGI(TAG, "admit '%s': %s, response bound %lu us against %lu",
+        ESP_LOGI(TAG, "admit '%s': %s%s, response bound %lu us against %lu",
                  name, me->urgent ? "urgent" : "routine",
+                 place != RV9_PLACE_DERIVED ? " (declared)" : "",
                  (unsigned long)me->bound, (unsigned long)me->d);
     }
 
@@ -1851,6 +1874,7 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
     uint8_t on_deadline = RV9_ON_DEADLINE_REPORT;
     bool rt_urgent = true;
     uint32_t rt_bound = 0;
+    uint8_t rt_place = RV9_PLACE_DERIVED;
     if (cls == RV9_CLASS_REALTIME) {
         /*
          * What a miss means, read once here and not trusted beyond what is
@@ -1877,7 +1901,7 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
 
         rv9_proc_err_t adm = admit_rt(mod->image, module_name, interval,
                                       stack, &wcet_us, &deadline_us,
-                                      &rt_urgent, &rt_bound);
+                                      &rt_urgent, &rt_bound, &rt_place);
         if (adm != RV9_PROC_OK) {
             refuse_fork(pid, &charge);
             rv9_mod_unlink(mod);
@@ -1921,6 +1945,7 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
     p->on_deadline        = on_deadline;
     p->rt_urgent          = (cls == RV9_CLASS_REALTIME) ? rt_urgent : false;
     p->rt_bound_us        = rt_bound;
+    p->rt_place           = rt_place;
     p->stack_bytes        = (uint32_t)stack;
     p->refs               = 1;      /* the task's, dropped at the end of finish() */
     p->serial             = charge.serial;

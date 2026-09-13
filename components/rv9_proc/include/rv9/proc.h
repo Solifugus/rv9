@@ -103,6 +103,7 @@ typedef struct rv9_proc {
        bound that placement gives it (0: none computed). */
     bool              rt_urgent;
     uint32_t          rt_bound_us;
+    uint8_t           rt_place;         /* RV9_PLACE_*: what it declared */
 
     /* What its stack was actually created with. The KAL can measure how
        much of a stack is unused but cannot always say how big it was --

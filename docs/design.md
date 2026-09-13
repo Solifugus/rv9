@@ -4083,9 +4083,8 @@ nothing becomes less schedulable — but not always as good as it could be.
 programs admitted at the same instant are each checked against the other's
 absence, as the utilisation check always was.
 
-**The explicit `priority` escape hatch in R9 §13 is not implemented.** With
-two levels, it could only mean "urgent" or "routine", and whether that is
-worth offering is a question for the language.
+**The explicit `priority` escape hatch in R9 §13 was not implemented here.**
+It is now, as a declared placement; see §36.
 
 ## 34. What a compiler may rely on
 
@@ -4365,6 +4364,78 @@ named above change class.
 component tree and check it against `budget_default` from the profile
 before it ever reaches a board. The data to do that is now published, but
 nothing uses it.
+
+## 36. The escape hatch, kept honest
+
+R9 §13 asks that priority be derived, and keeps an explicit `priority 10`
+as an escape hatch. §33 left the hatch out. With two levels there is no
+number to honour, and a hatch that lets a program choose its own
+level defeats the analysis that makes admission mean something.
+
+The answer R9 accepted is that the hatch should be a **constraint on the
+placement, not an override of it**.
+
+### `placement`
+
+A new u8 manifest tag, `placement` (0x0014):
+
+| value | meaning |
+|---|---|
+| `derived` (0) | the default: wherever §33's analysis puts it |
+| `urgent` (1) | never below the radio |
+| `routine` (2) | never ahead of it |
+
+`place_rt` starts a routine-pinned task at routine instead of urgent,
+and when it looks for a task to move down, it skips pinned ones.
+Everything else is unchanged. Both levels are still analysed, every
+bound is still computed, and if the pins leave some loop unable to meet
+its deadline, the program is refused `UNSCHEDULABLE` as any other would
+be. The log says so:
+
+```
+admit 'st-rt-pinu': with it admitted, pid 10 ('fastloop') would answer in
+3100 us against a 3000 us deadline, however the real-time work is placed
+around the declared placements
+```
+
+A value RV-9 does not know is refused `CONTRACT`, for the same reason an
+unknown `on_deadline` is: running it under some other placement would be
+agreeing to a contract nobody offered.
+
+`urgent` is also the answer to R9's second open question from §33, whether
+a component can say it must never run beneath the radio. It can now, as a
+constraint rather than a number.
+
+### What pinning can cost
+
+A pin can make a workload unschedulable where the derivation would have
+fitted it. `st-rt-fits` (10 ms, 6 ms deadline, 600 µs) was admitted at
+routine beside `fastloop` in §33. The same loop pinned urgent is refused.
+Above the fast loop it would push the fast loop to 3100 µs, and moving
+the fast loop down instead makes it no better. That is the hatch working:
+the program gets the level it asked for or it does not run, and nobody
+else's deadline pays for it.
+
+### Tested
+
+`sched-test` now has 15 checks. The four new ones:
+- A loop pinned routine runs routine even alone, where the derivation
+  would put it at urgent.
+- The pinned-urgent `st-rt-pinu` is refused beside `fastloop`.
+- An unknown placement (7) is refused.
+- The fast loop was not disturbed by any of it.
+
+The target profile publishes the tag and its value names.
+
+### What this does not do
+
+**Placement is not shown in `rt`.** The table's level column comes from the
+KAL's statistics, which know where a task runs but not why. The admission
+log says `(declared)`.
+
+**A pin does not bound the radio.** `urgent` keeps a loop out from under
+the radio. It does not make routine bounds include the host's work, which
+remains true of every routine loop as §33 says.
 
 ## 9. Migration to a native kernel
 

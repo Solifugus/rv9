@@ -119,9 +119,10 @@ static void pair(bool derive)
     rv9_proc_rt_derive(true);
 }
 
-/* A realtime module with a period, a deadline and a cost, and a return. */
+/* A realtime module with a period, a deadline and a cost, and a return.
+   `placement` is written only when it is not negative. */
 static bool make_rt_module(const char *name, uint32_t period, uint32_t deadline,
-                           uint32_t wcet)
+                           uint32_t wcet, int placement)
 {
     static uint8_t buf[128];
     memset(buf, 0, sizeof(buf));
@@ -144,6 +145,13 @@ static bool make_rt_module(const char *name, uint32_t period, uint32_t deadline,
         len += sizeof(e);
         memcpy(buf + len, &tags[i].v, sizeof(uint32_t));
         len += sizeof(uint32_t);
+    }
+    if (placement >= 0) {
+        rv9_mod_tlv_t e = { .tag = RV9_MTAG_PLACEMENT, .len = sizeof(uint8_t) };
+        memcpy(buf + len, &e, sizeof(e));
+        len += sizeof(e);
+        buf[len] = (uint8_t)placement;
+        len += 4;                           /* entries are 4-byte aligned */
     }
     len += sizeof(rv9_mod_tlv_t);           /* RV9_MTAG_END */
 
@@ -188,13 +196,13 @@ static void admission(void)
     rv9_task_delay_ms(30);
 
     rv9_pid_t pid = 0;
-    check(make_rt_module("st-rt-tight", 10000, 2800, 600) &&
+    check(make_rt_module("st-rt-tight", 10000, 2800, 600, -1) &&
           rv9_proc_fork_rt("st-rt-tight", 0, NULL, &pid)
               == RV9_PROC_ERR_UNSCHEDULABLE,
           "a loop that fits the CPU but not the deadlines is refused");
 
     pid = 0;
-    check(make_rt_module("st-rt-fits", 10000, 6000, 600) &&
+    check(make_rt_module("st-rt-fits", 10000, 6000, 600, -1) &&
           rv9_proc_fork_rt("st-rt-fits", 0, NULL, &pid) == RV9_PROC_OK,
           "one whose deadline leaves room is admitted");
 
@@ -209,6 +217,48 @@ static void admission(void)
     check(status == 0, "and the fast loop was not disturbed");
 }
 
+/*
+ * R9's escape hatch: a declared placement constrains the analysis and
+ * never overrides it. Pinned routine, a loop that would have been urgent
+ * alone is not. Pinned urgent, the candidate the derivation admitted
+ * below the fast loop above is refused, because above it the fast loop
+ * would wait 600 us and answer in 3100 against 3000.
+ */
+static void placements(void)
+{
+    rv9_pid_t pid = 0;
+    int status = 0;
+    rv9_proc_info_t info;
+
+    check(make_rt_module("st-rt-pinr", 10000, 9000, 600, RV9_PLACE_ROUTINE) &&
+          rv9_proc_fork_rt("st-rt-pinr", 0, NULL, &pid) == RV9_PROC_OK &&
+          rv9_proc_info(pid, &info) && !info.rt_urgent,
+          "pinned routine, a loop alone runs routine");
+    if (pid) rv9_proc_wait(pid, &status, 1000);
+
+    rv9_pid_t fast = 0;
+    if (!fork_rt("fastloop", &fast)) {
+        check(false, "start fastloop");
+        return;
+    }
+    rv9_task_delay_ms(30);
+
+    pid = 0;
+    check(make_rt_module("st-rt-pinu", 10000, 6000, 600, RV9_PLACE_URGENT) &&
+          rv9_proc_fork_rt("st-rt-pinu", 0, NULL, &pid)
+              == RV9_PROC_ERR_UNSCHEDULABLE,
+          "pinned urgent where that would make the fast loop late: refused");
+
+    pid = 0;
+    check(make_rt_module("st-rt-badpin", 10000, 6000, 600, 7) &&
+          rv9_proc_fork_rt("st-rt-badpin", 0, NULL, &pid)
+              == RV9_PROC_ERR_CONTRACT,
+          "a placement this system does not know is refused");
+
+    rv9_proc_wait(fast, &status, 5000);
+    check(status == 0, "and the fast loop was not disturbed");
+}
+
 bool rv9_sched_selftest(void)
 {
     s_passed = s_failed = 0;
@@ -219,6 +269,8 @@ bool rv9_sched_selftest(void)
     pair(false);
     ESP_LOGI(TAG, "--- admission by deadlines, not utilisation ---");
     admission();
+    ESP_LOGI(TAG, "--- a declared placement: constraint, not override ---");
+    placements();
 
     if (s_failed == 0) {
         ESP_LOGI(TAG, "sched: %d/%d passed", s_passed, s_passed);

@@ -19,7 +19,7 @@
   },
   "manifest": {
     "mandatory_bit": 32768,
-    "highest_known_tag": 19,
+    "highest_known_tag": 20,
     "unknown_advisory": "skipped",
     "unknown_mandatory": "module refused",
     "layout": "entries of u16 tag, u16 length, value, padded to 4 bytes; ends at tag 0 or the end of the module",
@@ -166,6 +166,18 @@
         "encoding": "u32",
         "repeatable": false,
         "enforced": true
+      },
+      {
+        "name": "placement",
+        "tag": 20,
+        "encoding": "u8",
+        "repeatable": false,
+        "enforced": true,
+        "values": {
+          "derived": 0,
+          "urgent": 1,
+          "routine": 2
+        }
       }
     ]
   },
@@ -178,6 +190,11 @@
   "on_deadline": {
     "REPORT": 0,
     "FAULT": 1
+  },
+  "placement": {
+    "DERIVED": 0,
+    "URGENT": 1,
+    "ROUTINE": 2
   },
   "faults": [
     {
