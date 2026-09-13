@@ -4100,10 +4100,11 @@ the static profile is typed in:
   error. Each tag carries its number, encoding, whether it repeats, and
   its value names.
 - **"Enforced"** is true only where some component source outside the header
-  refers to the tag. Five are registered with nothing behind them —
-  `static`, `class`, `capability`, `compiler`, `runtime` — and the profile
-  says so rather than letting a compiler assume they mean something. The
-  first draft counted boot tests as consumers, and `desc` came out
+  refers to the tag. Six are registered with nothing in the firmware behind
+  them — `desc`, `static`, `class`, `capability`, `compiler`, `runtime` —
+  and the profile says so rather than letting a compiler assume they mean
+  something. (`desc` is read, but only by `tools/modinfo.py` on the host.)
+  The first draft counted boot tests as consumers, and `desc` came out
   "enforced"; tests are no longer counted.
 - **Calls** are every field of `rv9_mod_env_t` in order, with the ABI version
   that added it, parsed from the struct's own `--- ABI n ---` markers.
