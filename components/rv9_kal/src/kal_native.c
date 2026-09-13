@@ -116,10 +116,13 @@ uint32_t rv9_ms_to_ticks(uint32_t ms) { return RV9K_MS_TO_TICKS(ms); }
 /* ---------------- starting the kernel ---------------- */
 
 /* Thread stacks must be internal memory: they are written and executed
-   from with the flash cache potentially disabled. */
+   from with the flash cache potentially disabled. Through the KAL, not
+   straight to the heap, so that the floor applies -- a stack is the
+   largest single thing a new process asks for, and it is exactly the
+   request that should be refused rather than granted into the reserve. */
 static void *task_stack_alloc(size_t n)
 {
-    return heap_caps_malloc(n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    return rv9_alloc_internal(n);
 }
 
 
@@ -464,37 +467,8 @@ uint32_t rv9_queue_count(rv9_queue_t queue)
     return rv9k_queue_count(&((native_queue_t *)queue)->q);
 }
 
-/* ---------------- memory ---------------- */
-
-void *rv9_alloc(size_t size)                { return malloc(size); }
-void *rv9_calloc(size_t count, size_t size) { return calloc(count, size); }
-void  rv9_free(void *ptr)                   { free(ptr); }
-
-void *rv9_alloc_dma(size_t size)
-{
-    return heap_caps_malloc(size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-}
-
-void *rv9_alloc_exec(size_t size)
-{
-#ifdef MALLOC_CAP_EXEC
-    void *p = heap_caps_malloc(size, MALLOC_CAP_EXEC | MALLOC_CAP_8BIT);
-    if (p != NULL) return p;
-#endif
-    return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-}
-
-size_t rv9_heap_free(void)      { return heap_caps_get_free_size(MALLOC_CAP_DEFAULT); }
-size_t rv9_heap_low_water(void) { return heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT); }
-
-size_t rv9_heap_free_exec(void)
-{
-#ifdef MALLOC_CAP_EXEC
-    return heap_caps_get_free_size(MALLOC_CAP_EXEC | MALLOC_CAP_8BIT);
-#else
-    return heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-#endif
-}
+/* Memory lives in kal_mem.c: allocation on this board comes from
+   ESP-IDF whichever kernel backs the KAL, so there is one copy of it. */
 
 /* ---------------- critical sections ---------------- */
 

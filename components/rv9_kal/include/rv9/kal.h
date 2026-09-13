@@ -459,11 +459,45 @@ void *rv9_alloc_dma(size_t size);
    cheap -- but do not assume that of every future target. */
 void *rv9_alloc_exec(size_t size);
 
+/* Internal RAM specifically: thread stacks are written to with the flash
+   cache disabled, so they cannot live anywhere else. */
+void *rv9_alloc_internal(size_t size);
+
 void  rv9_free(void *ptr);
 
 size_t rv9_heap_free(void);        /* bytes currently free */
 size_t rv9_heap_free_exec(void);   /* bytes free that may be executed */
 size_t rv9_heap_low_water(void);   /* smallest free ever seen */
+
+/*
+ * The floor: memory RV-9 will not take.
+ *
+ * Everything above allocates through this file and can be told no.
+ * ESP-IDF's own internals -- WiFi, the PHY, the SPI driver -- cannot: they
+ * allocate straight from the heap and abort when they fail, inside a layer
+ * RV-9 does not own. That is a reboot caused by somebody else's request,
+ * and it is how this board actually died: the window, an SSH session and a
+ * control loop together.
+ *
+ * So the last few kilobytes are never offered to RV-9. An allocation that
+ * would take free memory below the floor returns NULL, the process manager
+ * says "no memory to start it", and the machine stays up. It does not make
+ * more memory exist -- it chooses which failure happens, and only one of
+ * them leaves a system running.
+ *
+ * `rv9_heap_free` says how much exists. `rv9_heap_available` says how much
+ * may be spent, which is the number that decides whether the next process
+ * starts; reporting the first as though it were the second is how a system
+ * walks confidently into a wall.
+ */
+size_t   rv9_heap_floor(void);
+void     rv9_heap_floor_set(size_t bytes);
+size_t   rv9_heap_available(void);
+uint32_t rv9_heap_refusals(void);   /* allocations turned away, since boot */
+
+/* Spend the reserve deliberately. For making a failure legible, and
+   nothing else -- never for anything a module can reach. */
+void *rv9_alloc_critical(size_t size);
 
 /* ------------------------------------------------------------------ */
 /* Critical sections                                                   */

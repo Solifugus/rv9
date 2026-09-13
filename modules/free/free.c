@@ -1,5 +1,11 @@
 /*
  * free -- report memory and system counts.
+ *
+ * "Free" and "available" are different questions and both are printed.
+ * The last few kilobytes are reserved for ESP-IDF's own internals, which
+ * abort rather than fail when they cannot allocate; available is what RV-9
+ * may actually spend, and it is the number that decides whether the next
+ * process starts.
  */
 #include "modlib.h"
 
@@ -13,6 +19,12 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 
     m_say(env, RV9_STDOUT, "heap free      ");
     m_num(env, RV9_STDOUT, (int32_t)m.heap_free);
+    m_say(env, RV9_STDOUT, "\navailable      ");
+    m_num(env, RV9_STDOUT, (int32_t)m.heap_available);
+    m_say(env, RV9_STDOUT, "\nreserved       ");
+    m_num(env, RV9_STDOUT, (int32_t)m.heap_floor);
+    m_say(env, RV9_STDOUT, "\nrefused        ");
+    m_num(env, RV9_STDOUT, (int32_t)m.heap_refusals);
     m_say(env, RV9_STDOUT, "\nlow water      ");
     m_num(env, RV9_STDOUT, (int32_t)m.heap_low_water);
     m_say(env, RV9_STDOUT, "\nexecutable     ");

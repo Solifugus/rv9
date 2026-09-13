@@ -2249,6 +2249,103 @@ hanging. Three runs in a row cost 816 bytes of heap, which is four retained
 process descriptors and nothing else — the paths were closed, the module
 unlinked and the statics freed by a passer-by.
 
+## 23. A floor under the heap
+
+The board died like this:
+
+```
+ESP_ERROR_CHECK failed: ESP_ERR_NO_MEM at phy_track_pll_init
+abort() was called
+Rebooting...
+```
+
+The window, an SSH session and a control loop, all at once. Nothing RV-9
+did was wrong — it allocated what it needed and got it. The failure landed
+on the WiFi PHY, which asked next and could not be told no, because
+ESP-IDF's internals do not return NULL when they run out; they abort. A
+reboot, in a layer RV-9 does not own, caused by somebody else's request.
+On a vehicle that is the whole system stopping because a display wanted a
+buffer.
+
+### It is not RV-9's reserve
+
+The asymmetry is the whole design. RV-9's allocations come through the KAL
+and *can* be refused — a NULL propagates to "no memory to start it" and the
+shell carries on. ESP-IDF's cannot. So the last 12 KB are never offered to
+the side that can take the news.
+
+`CONFIG_RV9_HEAP_FLOOR` bytes are simply subtracted from what RV-9 believes
+it has. `rv9_heap_free` still says what exists; `rv9_heap_available` says
+what may be spent, and that is the number that decides whether the next
+process starts. Reporting the first as though it were the second is how a
+system walks confidently into a wall, so `free` prints both.
+
+The floor does not make more memory exist. It chooses which of two failures
+happens, and only one of them leaves a system running.
+
+### One copy of it
+
+Memory moved to `kal_mem.c`, built whichever kernel backs the KAL, because
+allocation on this board comes from ESP-IDF either way. The two backends
+had carried identical copies since phase 0 and had already drifted once.
+
+Two places allocate without going through `rv9_alloc` and both had to be
+brought in: the native backend's thread stacks, which need internal RAM,
+now use `rv9_alloc_internal`; and `xTaskCreate` on the FreeRTOS backend,
+which allocates its own stack and knows nothing of the floor, so
+`rv9_task_create` asks first. A stack is the largest single thing a new
+process wants, and it is exactly the request that should be refused rather
+than granted out of the reserve.
+
+`rv9_alloc_critical` spends the reserve on purpose. There is one thing
+worth spending it on — making a failure legible — and nothing a module can
+reach should call it.
+
+### Growing a record without breaking what reads it
+
+`free` needed three new numbers, which meant three new fields on
+`rv9_sys_mem_t`. The old code began `if (len < sizeof(rv9_sys_mem_t))
+return -1;` — so growing the record would have made every module in the
+store fail to read it, having asked for the length it was built against.
+
+It now fills what the caller asked for, up to what it knows: fields may be
+appended, never reordered or removed, and a short caller gets a correctly
+filled prefix. That is a patch on one record, not a mechanism. The
+extensible manifest is the next job.
+
+### Testing a reserve without exhausting the machine
+
+The KAL self-test raises the floor above the entire heap rather than trying
+to run out of memory, which would be a test that damages what it runs on.
+It checks the refusal is a NULL and not an abort, that it is counted, that
+DMA memory is refused too — same RAM, different capability mask, and
+treating the pools as separate would let the reserve be spent three times
+over — that `rv9_alloc_critical` still works, and that lowering the floor
+gives the memory back. 45 passed, 0 failed.
+
+The graceful-refusal end of it was checked on the board with a deliberate
+52,500-byte floor, leaving 556 bytes:
+
+```
+rv9> mdir
+mdir: no memory to start it
+rv9> free
+free: no memory to start it
+```
+
+The shell is still there. That is the entire claim.
+
+### What it is not
+
+A floor, not a budget. It stops RV-9 taking ESP-IDF's last bytes and says
+nothing about one process taking another's — any program may still consume
+everything RV-9 is allowed to have. A per-process limit, and a reserve
+inside the reserve for real-time work, are both still missing.
+
+And 12,288 is a starting point rather than a measurement: the size of the
+thing that aborted, plus margin. Sizing it properly means watching `low
+water` under the heaviest load the system will really carry.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

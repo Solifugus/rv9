@@ -145,7 +145,7 @@ Measured or checked against the running system, 2026-09-12.
 | 1. resource contract in the header | partial — four fields exist, no extension mechanism |
 | 2. per-program stack | **done**, `stack_size` in `build.conf`; overflow **detected** (guard word, thread killed), not prevented — PMP is phase 7 |
 | 3. RT admission | not started — RT work is launched, not admitted |
-| 4. protected reserves | **nothing**; exhaustion aborts inside ESP-IDF |
+| 4. protected reserves | **partial** — a 12 KB floor RV-9 will not allocate into, so exhaustion is a refusal it reports rather than an abort inside ESP-IDF; no per-process limit, no RT-specific reserve |
 | 5. heap policy by class | see below — the situation is the reverse of what is assumed |
 | 6. device ownership | reference counts only; no owner identity, no exclusivity |
 | 7. RT-safe marked machine-readably | documented in prose, `RV9_RT_CODE` in source; not readable |

@@ -442,13 +442,28 @@ typedef struct {
 #define RV9_SYS_RT       4     /* rv9_sys_rt_t, one per real-time task */
 #define RV9_SYS_STACK    5     /* rv9_sys_stack_t, one per live process */
 
+/*
+ * Fields may be appended to this record but never reordered or removed.
+ * A module built against a shorter version passes the length it knows
+ * about and is filled up to there -- see env_sysinfo. The first five
+ * fields are what shipped before the floor existed and are the minimum
+ * any caller must ask for.
+ */
 typedef struct __attribute__((packed)) {
     uint32_t heap_free;
     uint32_t heap_low_water;
     uint32_t heap_exec_free;
     uint32_t module_count;
     uint32_t proc_count;
+
+    uint32_t heap_floor;       /* reserved; RV-9 will not allocate into it */
+    uint32_t heap_available;   /* free above the floor: what may be spent */
+    uint32_t heap_refusals;    /* allocations turned away since boot */
 } rv9_sys_mem_t;
+
+/* What a caller must ask for at minimum, and the boundary that must not
+   move: everything before it shipped in the original record. */
+#define RV9_SYS_MEM_MIN offsetof(rv9_sys_mem_t, heap_floor)
 
 typedef struct __attribute__((packed)) {
     char     name[32];

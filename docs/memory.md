@@ -128,13 +128,13 @@ the window costs nothing when nobody is drawing.
 
 ## Reserved
 
-**There is no reserve. This is the gap that matters most.**
+**12,288 bytes, and RV-9 will not touch them.**
 
-Nothing sets memory aside for interrupts, real-time work, or failsafe, and
-nothing refuses an allocation to protect them. Any process may allocate
-until the machine dies, and the machine dies badly: running the window,
-an SSH session and a control loop together exhausted the heap and ESP-IDF
-aborted inside the WiFi PHY —
+The reserve is not for RV-9's benefit. It is for everything RV-9 cannot
+ask. WiFi, the PHY, the SPI driver and ESP-IDF's own internals allocate
+straight from the heap, and when they fail they do not return NULL — they
+abort. Running the window, an SSH session and a control loop together used
+to end here:
 
 ```
 ESP_ERROR_CHECK failed: ESP_ERR_NO_MEM at phy_track_pll_init
@@ -142,18 +142,50 @@ abort() was called
 Rebooting...
 ```
 
-— which is a reboot, in a layer RV-9 does not own, triggered by an
-unrelated component's allocation failing. On a vehicle that is the whole
-system stopping because a display wanted a buffer.
+— a reboot, in a layer RV-9 does not own, caused by an unrelated
+component's request failing. On a vehicle that is the whole system stopping
+because a display wanted a buffer.
 
-What is missing, in the order it would be worth building:
+Everything of RV-9's goes through `rv9_alloc` and friends, and those *can*
+be told no. So the last 12 KB are simply never offered: an allocation that
+would take free memory below the floor returns NULL, the process manager
+reports "no memory to start it", and the machine stays up. It does not make
+more memory exist — it decides which of two failures happens, and only one
+of them leaves a system running.
 
-- **A floor.** A reserve below which ordinary allocation fails and says so,
-  leaving enough for the kernel, interrupts and an orderly shutdown.
-- **Failure that is survivable.** `rv9_alloc` returning NULL is handled in
-  most places; ESP-IDF's `ESP_ERROR_CHECK` aborting is not, and RV-9 cannot
-  catch it. Keeping well clear of the edge is the only defence available.
-- **A per-process limit**, so one program cannot take the machine down.
+`free` reports both numbers, because they answer different questions:
+
+```
+heap free      53116     what exists
+available      40828     what RV-9 may spend
+reserved       12288     the floor
+refused            0     allocations turned away since boot
+```
+
+Forced to the edge deliberately — a build with the floor at 52,500, leaving
+556 bytes — the board behaves:
+
+```
+rv9> mdir
+mdir: no memory to start it
+rv9> free
+free: no memory to start it
+```
+
+The shell is still there. That is the whole point.
+
+12,288 is a starting point, not a measurement: it is the size of the thing
+that aborted plus margin, set by `CONFIG_RV9_HEAP_FLOOR` and tunable. The
+way to size it properly is to watch `low water` under the heaviest load the
+system will really see. Boot itself dips to about 35 KB free.
+
+Still missing:
+
+- **A per-process limit**, so one program cannot take everything RV-9 is
+  allowed to have. The floor protects ESP-IDF from RV-9; nothing yet
+  protects RV-9's processes from each other.
+- **A reserve inside the reserve** for real-time work specifically. An RT
+  process competes for the same available bytes as a chart.
 
 ## What this means for a language runtime
 
@@ -163,14 +195,22 @@ What is missing, in the order it would be worth building:
 - **Memory is, and it is mostly stacks and WiFi.** Both are choices.
 - **Concurrency density is a stack-size decision**, and the measurement to
   size it by now exists.
-- **There is no safety net.** A runtime that over-allocates does not get an
-  error; it gets a reboot from underneath. Until there is a reserve, the
-  runtime should hold its own ceiling and stay well inside it.
+- **Over-allocating now fails rather than reboots.** A runtime that asks for
+  too much gets NULL and a process that will not start, not an abort from
+  underneath. That is a floor, not a budget: it stops RV-9 taking ESP-IDF's
+  last bytes, and says nothing about one program taking another's.
+- **`available`, not `free`, is the number to plan against**, and a runtime
+  should still hold its own ceiling well inside it.
+- **Running off a stack is caught, and it is fatal.** The process is killed
+  and its parent gets `-RV9_PROC_ERR_FAULT`. A generated program's stack
+  needs to be sized from its own call graph, which a compiler can do better
+  than a person guessing.
 
 ## Reproducing these numbers
 
-- `free` — heap free, low water, executable free
+- `free` — heap free, available, reserved, refused, low water, executable
 - `stacks` — per-process stack given and used
+- `smash` — prove the stack guard fires on this build
 - `procs`, `mdir` — process and module inventory
 - Device costs came from a temporary probe in `rv9_io_attach_from_modules`
   logging heap between attachments; not kept, easily re-added.

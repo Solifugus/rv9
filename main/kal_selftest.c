@@ -238,6 +238,40 @@ static void test_memory(void)
     check(rv9_heap_free() > 0, "heap_free reports something");
     check(rv9_heap_low_water() <= rv9_heap_free(),
           "low water mark is not above current free");
+
+    /*
+     * The floor.
+     *
+     * Tested by raising it to swallow the whole heap rather than by trying
+     * to exhaust memory, which would be a test that damages the machine it
+     * runs on. What matters is that the refusal is a NULL and not an abort,
+     * and that it is a refusal rather than a failure -- the memory is still
+     * there afterwards.
+     */
+    size_t saved = rv9_heap_floor();
+
+    rv9_heap_floor_set(rv9_heap_free() + 1);
+    uint32_t refused_before = rv9_heap_refusals();
+    check(rv9_heap_available() == 0, "no memory is available below the floor");
+
+    void *nope = rv9_alloc(64);
+    check(nope == NULL, "an allocation into the reserve is refused");
+    check(rv9_heap_refusals() == refused_before + 1, "and is counted");
+    rv9_free(nope);
+
+    check(rv9_calloc(64, 1) == NULL, "calloc is refused too");
+    check(rv9_alloc_dma(64) == NULL, "and DMA memory, which is the same RAM");
+
+    /* The reserve is spendable on purpose, for reporting the refusal. */
+    void *yes = rv9_alloc_critical(64);
+    check(yes != NULL, "the reserve can still be spent deliberately");
+    rv9_free(yes);
+
+    rv9_heap_floor_set(saved);
+    void *back = rv9_alloc(1024);
+    check(back != NULL, "lowering the floor gives the memory back");
+    rv9_free(back);
+    check(rv9_heap_floor() == saved, "the floor is where it was");
 }
 
 static void test_critical(void)

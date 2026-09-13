@@ -17,4 +17,24 @@ config RV9_KERNEL_NATIVE
         Both are built from the same sources above the KAL and pass the
         same conformance suite.
 
+config RV9_HEAP_FLOOR
+    int "Heap RV-9 will not take (bytes)"
+    default 12288
+    help
+        A reserve that ordinary allocation is refused out of.
+
+        The floor is not for RV-9's benefit. It is for everything RV-9
+        cannot ask: WiFi, the PHY, the SPI driver and ESP-IDF's own
+        internals allocate straight from the heap and abort when they
+        cannot get what they need -- inside a layer RV-9 does not own,
+        which on a vehicle means the whole system stopping because a
+        display wanted a buffer.
+
+        Allocations that go through the KAL can be told no. So the last
+        few kilobytes are simply never offered to them: a request that
+        would take free memory below this returns NULL, a process fails
+        to start and says so, and the machine stays up.
+
+        Zero disables it, which is how RV-9 behaved before phase 4.
+
 endmenu

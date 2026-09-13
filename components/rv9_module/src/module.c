@@ -419,22 +419,38 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
 
     switch (what) {
     case RV9_SYS_MEM: {
-        if (len < sizeof(rv9_sys_mem_t)) return -1;
-        rv9_sys_mem_t *m = (rv9_sys_mem_t *)buf;
+        /*
+         * Fill what the caller asked for, not what we happen to know.
+         *
+         * This record grows -- the floor added three fields to it. A
+         * module built against the shorter version passes the length it
+         * knows about, and demanding the current length would turn every
+         * addition here into a breaking change for everything already in
+         * the store. It gets its prefix, correctly filled.
+         */
+        if (len < RV9_SYS_MEM_MIN) return -1;
+
+        rv9_sys_mem_t m;
+        memset(&m, 0, sizeof(m));
 
         uint32_t mods = 0;
         for (rv9_mod_entry_t *e = s_dir; e; e = e->next) mods++;
 
-        m->heap_free      = (uint32_t)rv9_heap_free();
-        m->heap_low_water = (uint32_t)rv9_heap_low_water();
-        m->heap_exec_free = (uint32_t)rv9_heap_free_exec();
-        m->module_count   = mods;
-        m->proc_count     = 0;
+        m.heap_free      = (uint32_t)rv9_heap_free();
+        m.heap_low_water = (uint32_t)rv9_heap_low_water();
+        m.heap_exec_free = (uint32_t)rv9_heap_free_exec();
+        m.module_count   = mods;
+        m.proc_count     = 0;
+        m.heap_floor     = (uint32_t)rv9_heap_floor();
+        m.heap_available = (uint32_t)rv9_heap_available();
+        m.heap_refusals  = rv9_heap_refusals();
 
         if (s_proc_ops && s_proc_ops->procs) {
             int n = s_proc_ops->procs(NULL, 0);
-            if (n > 0) m->proc_count = (uint32_t)n;
+            if (n > 0) m.proc_count = (uint32_t)n;
         }
+
+        memcpy(buf, &m, len < sizeof(m) ? len : sizeof(m));
         return 1;
     }
 
