@@ -22,6 +22,16 @@ static const char *state_name(uint8_t s)
     }
 }
 
+/* If/else returning literals, not a table: a table of string pointers is
+   an absolute address, and the build refuses modules that hold one. */
+static const char *fault_name(uint8_t f)
+{
+    if (f == RV9_FAULT_STACK)    return "STACK";
+    if (f == RV9_FAULT_KILLED)   return "killed";
+    if (f == RV9_FAULT_DEADLINE) return "DEADLINE";
+    return "fault ?";
+}
+
 __attribute__((section(".text.entry")))
 int rv9_module_entry(const rv9_mod_env_t *env)
 {
@@ -33,15 +43,28 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     int n = env->sysinfo(RV9_SYS_PROCS, st->procs, sizeof(st->procs));
     if (n < 0) return -3;
 
-    m_say(env, RV9_STDOUT, "pid par name        state   base eff\n");
+    m_say(env, RV9_STDOUT, "pid par name        state   base eff ended\n");
 
     for (int i = 0; i < n; i++) {
-        m_numpad(env, RV9_STDOUT, st->procs[i].pid, 4);
-        m_numpad(env, RV9_STDOUT, st->procs[i].parent, 4);
-        m_pad(env, RV9_STDOUT, st->procs[i].name, 12);
-        m_pad(env, RV9_STDOUT, state_name(st->procs[i].state), 8);
-        m_numpad(env, RV9_STDOUT, st->procs[i].base_priority, 5);
-        m_num(env, RV9_STDOUT, st->procs[i].effective_priority);
+        const rv9_sys_proc_t *p = &st->procs[i];
+        m_numpad(env, RV9_STDOUT, p->pid, 4);
+        m_numpad(env, RV9_STDOUT, p->parent, 4);
+        m_pad(env, RV9_STDOUT, p->name, 12);
+        m_pad(env, RV9_STDOUT, state_name(p->state), 8);
+        m_numpad(env, RV9_STDOUT, p->base_priority, 5);
+        m_numpad(env, RV9_STDOUT, p->effective_priority, 4);
+
+        /* How it ended, which for a machine that moves is the column that
+           matters: returning, being stopped, and missing a deadline are
+           three different stories about the same actuator. */
+        if (p->state == 3) {
+            if (p->fault != RV9_FAULT_NONE) {
+                m_say(env, RV9_STDOUT, fault_name(p->fault));
+            } else {
+                m_say(env, RV9_STDOUT, "status ");
+                m_num(env, RV9_STDOUT, p->status);
+            }
+        }
         m_say(env, RV9_STDOUT, "\n");
     }
     return 0;

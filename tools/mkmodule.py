@@ -30,15 +30,20 @@ TAGS = {
     "deadline_us": 0x0007, "min_inter_us": 0x0008, "wcet_us": 0x0009,
     "device": 0x000A, "exclusive": 0x000B, "failsafe": 0x000C,
     "capability": 0x000D, "compiler": 0x000E, "runtime": 0x000F,
+    "on_deadline": 0x0010,
 }
 
 CLASSES = {"unspecified": 0, "proaction": 1, "reaction": 2, "realtime": 3}
+ON_DEADLINE = {"report": 0, "fault": 1}
+
+# The names a u8 tag may be written with, per tag.
+U8_NAMES = {"class": CLASSES, "on_deadline": ON_DEADLINE}
 
 # How each tag's value is encoded, so a build.conf says `heap_max=0` and
 # gets four bytes rather than the string "0".
 U32_TAGS = {"stack", "static", "heap_max", "period_us", "deadline_us",
             "min_inter_us", "wcet_us"}
-U8_TAGS = {"class"}
+U8_TAGS = {"class", "on_deadline"}
 STR_TAGS = {"desc", "device", "exclusive", "capability",
             "compiler", "runtime"}
 
@@ -73,9 +78,14 @@ def encode_manifest(entries):
         if name in U32_TAGS:
             payload = struct.pack("<I", int(str(value), 0))
         elif name in U8_TAGS:
-            n = CLASSES.get(str(value).lower())
+            n = U8_NAMES.get(name, {}).get(str(value).lower())
             if n is None:
-                n = int(str(value), 0)
+                try:
+                    n = int(str(value), 0)
+                except ValueError:
+                    raise ValueError(f"{name}: {value!r} is not one of "
+                                     f"{sorted(U8_NAMES.get(name, {}))}") \
+                        from None
             payload = struct.pack("<B", n)
         elif name in STR_TAGS:
             payload = str(value).encode("utf-8")

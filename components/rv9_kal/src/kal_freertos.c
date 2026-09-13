@@ -51,6 +51,7 @@ const char *rv9_strerror(rv9_err_t err)
     case RV9_ERR_NOMEM:       return "out of memory";
     case RV9_ERR_TIMEOUT:     return "timed out";
     case RV9_ERR_UNSUPPORTED: return "unsupported";
+    case RV9_ERR_BUSY:        return "busy";
     default:                  return "unknown error";
     }
 }
@@ -131,6 +132,15 @@ bool rv9_task_alive(rv9_task_t task)
 void rv9_task_reap(rv9_task_t task)
 {
     (void)task;
+}
+
+/* FreeRTOS cannot say whether a task holds a lock, so it cannot say
+   whether stopping one is safe -- and guessing yes is how a system
+   deadlocks while recovering from something else. */
+rv9_err_t rv9_task_kill(rv9_task_t task)
+{
+    (void)task;
+    return RV9_ERR_UNSUPPORTED;
 }
 
 void rv9_task_delete(rv9_task_t task)

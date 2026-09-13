@@ -97,6 +97,7 @@ typedef struct rv9_proc {
        saying zero. */
     uint32_t          wcet_us;
     uint32_t          deadline_us;
+    uint8_t           on_deadline;      /* RV9_ON_DEADLINE_* */
 
     /* What its stack was actually created with. The KAL can measure how
        much of a stack is unused but cannot always say how big it was --
@@ -112,8 +113,9 @@ typedef struct rv9_proc {
     int               exit_status;
     uint32_t          signals;          /* pending, cleared when taken */
 
-    /* RV9_TASK_FAULT_*: why the scheduler stopped it, if it did. A process
-       that ended by returning has no fault, which is the usual case. */
+    /* RV9_FAULT_*: why it stopped, if not by returning. A process that
+       ended by returning has no fault, which is the usual case. Written
+       after its failsafes are applied, never before. */
     int               fault;
     bool              collecting;       /* somebody is holding its funeral */
 
@@ -178,6 +180,10 @@ typedef enum {
      */
     RV9_PROC_ERR_NODEV,      /* it needs a device this machine lacks     */
     RV9_PROC_ERR_BUSY,       /* it needs one alone, and somebody has it  */
+
+    /* Ways a process ended, reported as its exit status. */
+    RV9_PROC_ERR_KILLED,     /* stopped from outside                     */
+    RV9_PROC_ERR_DEADLINE,   /* missed a deadline it declared fatal      */
 } rv9_proc_err_t;
 
 const char *rv9_proc_strerror(rv9_proc_err_t err);
@@ -209,6 +215,28 @@ rv9_proc_err_t rv9_proc_wait(rv9_pid_t pid, int *out_status, uint32_t timeout_ms
 
 /* Post signals to a process. It sees them next time it asks. */
 rv9_proc_err_t rv9_proc_signal(rv9_pid_t pid, uint32_t signals);
+
+/*
+ * End a process without asking it.
+ *
+ * At the first point where doing so breaks nothing else, which depends on
+ * what kind of process it is:
+ *
+ *   ordinary     a thread parked at a switch point, holding no lock. The
+ *                kernel refuses while it holds one; this asks again.
+ *   real-time    between activations, which is the only place a host task
+ *                is known to hold nothing. If it is waiting for its
+ *                release it is woken to be stopped.
+ *
+ * Its paths are closed, its claims dropped and its failsafes applied, as
+ * for any exit. Its status reads -RV9_PROC_ERR_KILLED.
+ *
+ * Returns OK once it has ended. TIMEOUT when no such point came within a
+ * short wait -- the request stands for a real-time process, which stops at
+ * its next release, and has to be repeated for an ordinary one. INVAL for
+ * the caller itself, which should return instead.
+ */
+rv9_proc_err_t rv9_proc_kill(rv9_pid_t pid);
 
 /*
  * Ask the calling process to continue as a different module, keeping its

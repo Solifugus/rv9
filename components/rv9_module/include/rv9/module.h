@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     12
+#define RV9_MODULE_ABI     13
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -146,10 +146,28 @@ typedef struct __attribute__((packed)) {
 #define RV9_MTAG_CAPABILITY   0x000D  /* string: privilege wanted; repeats */
 #define RV9_MTAG_COMPILER     0x000E  /* string: what built it             */
 #define RV9_MTAG_RUNTIME      0x000F  /* string: language runtime version  */
+#define RV9_MTAG_ON_DEADLINE  0x0010  /* u8:  RV9_ON_DEADLINE_*            */
 
 /* The highest tag this build understands. Anything above it is unknown,
    and unknown plus mandatory is a refusal. */
-#define RV9_MTAG_MAX          0x000F
+#define RV9_MTAG_MAX          0x0010
+
+/*
+ * What a missed deadline means for this program.
+ *
+ * R9 §15.3 says a missed deadline is a fault: the component stops, its
+ * failsafe is applied, and it is not released again. That is the right
+ * answer for a control loop, whose late output is wrong output. It is not
+ * the right answer for everything that runs in the real-time class --
+ * `evlat` exists to measure lateness, and stopping it at the first late
+ * event would measure nothing -- so the program says which it is.
+ *
+ * Absent means REPORT, which is what RV-9 did before this existed: every
+ * miss is counted and visible, and nothing is stopped. A compiler for a
+ * language that makes the fault the rule should emit FAULT, mandatory.
+ */
+#define RV9_ON_DEADLINE_REPORT 0
+#define RV9_ON_DEADLINE_FAULT  1
 
 /*
  * What a device must be left at when its owner stops.
@@ -379,6 +397,29 @@ typedef struct {
      * pointer into the other.
      */
     int       (*rt_declare_event)(int event_id, uint32_t min_interval_us);
+
+    /* --- ABI 13: stopping a process from outside it --- */
+    /*
+     * signal posts bits a process sees next time it calls signals_take.
+     * RV9_SIG_STOP is a request: the process decides when, and cleans up.
+     *
+     * kill does not ask. It ends the process at the first point where
+     * ending it breaks nothing else -- an ordinary process when it holds no
+     * lock, a real-time one between activations -- and applies its
+     * failsafes as for any other exit. Its status reads -RV9_PE_KILLED.
+     *
+     * The polite sequence, which is what the `kill` command does:
+     *
+     *     env->signal(pid, RV9_SIG_STOP);
+     *     if (env->wait(pid, &status, 2000) < 0) env->kill(pid);
+     *
+     * Both return 0, or a negative RV9_PE_*. kill returns -RV9_PE_TIMEOUT
+     * when it could not find such a point in time; it has not given up,
+     * and a real-time process asked to stop still stops at its next
+     * release.
+     */
+    int       (*signal)(int pid, uint32_t signals);
+    int       (*kill)(int pid);
 } rv9_mod_env_t;
 
 /*
@@ -451,6 +492,24 @@ typedef struct {
 #define RV9_PE_UTILISATION   9   /* the CPU is already promised */
 #define RV9_PE_NODEV        10   /* it needs a device this machine lacks */
 #define RV9_PE_BUSY         11   /* it needs a device alone; somebody has it */
+
+/* How a process ended, when it did not end by returning. These arrive as
+   exit statuses, negated, which no module returns on its own account. */
+#define RV9_PE_KILLED       12   /* stopped from outside, by kill */
+#define RV9_PE_DEADLINE     13   /* missed a deadline it declared fatal */
+
+/*
+ * Why a process stopped, as the process table reports it.
+ *
+ * R9 §15.1 requires the reason to become ordinary published state, and
+ * requires it only after the failsafe: rv9_sys_proc_t.fault is written
+ * after the devices are parked, never before, so anything reading it and
+ * reacting finds the actuators already safe.
+ */
+#define RV9_FAULT_NONE      0    /* it returned, or it is still running */
+#define RV9_FAULT_STACK     1    /* ran off its stack */
+#define RV9_FAULT_KILLED    2    /* stopped from outside */
+#define RV9_FAULT_DEADLINE  3    /* R9's DEADLINE */
 
 /* Generic getstat/setstat codes a module may use. */
 #define RV9_SS_ECHO        1
@@ -779,7 +838,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  state;
     int8_t   base_priority;
     int8_t   effective_priority;
-    int8_t   reserved;
+    uint8_t  fault;            /* RV9_FAULT_*; was reserved, and zero */
     int32_t  status;
 } rv9_sys_proc_t;
 
@@ -805,6 +864,18 @@ typedef struct __attribute__((packed)) {
     uint32_t max_exec_us;
     uint32_t last_exec_us;
     uint32_t min_interval_us;  /* shortest gap actually seen */
+
+    /*
+     * Appended with deadline enforcement. Array records are stride-fragile
+     * (docs/design.md §24): every module reading these is rebuilt with it.
+     *
+     * max_response_us is release to finish, which is what a deadline is
+     * measured against; max_exec_us above is only the finish half.
+     */
+    uint32_t deadline_us;      /* 0 when none is checked */
+    uint32_t deadline_misses;
+    uint32_t max_response_us;
+    uint32_t floods;           /* events closer together than declared */
 } rv9_sys_rt_t;
 
 /*
@@ -967,6 +1038,8 @@ typedef struct {
     int (*fork_arg)(const char *module, int priority, const char *arg);
     int (*fork_rt)(const char *module, uint32_t period_us, const char *arg);
     int (*rt_load)(void *buf, uint32_t len); /* fills one rv9_sys_admit_t */
+    int (*signal)(int pid, uint32_t signals);
+    int (*kill)(int pid);
 } rv9_mod_proc_ops_t;
 
 void rv9_mod_set_proc_ops(const rv9_mod_proc_ops_t *ops);

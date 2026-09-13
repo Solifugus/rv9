@@ -92,6 +92,10 @@ struct rv9k_thread {
 
     void          *local;           /* one pointer belonging to this thread */
     int            fault;           /* RV9K_FAULT_*, why the kernel stopped it */
+
+    /* Locks this thread holds right now, of either kind. A thread holding
+       one cannot be stopped from outside: see rv9k_thread_stop. */
+    uint32_t       holds;
     bool           held;            /* corpse kept for whoever is watching */
 
     rv9k_thread_t *next;
@@ -221,8 +225,9 @@ void rv9k_set_idle_hook(void (*fn)(void));
 #define RV9K_STACK_PAD_WORDS 32
 
 /* Why a thread was stopped by the kernel rather than by itself. */
-#define RV9K_FAULT_NONE  0
-#define RV9K_FAULT_STACK 1
+#define RV9K_FAULT_NONE   0
+#define RV9K_FAULT_STACK  1
+#define RV9K_FAULT_KILLED 2   /* stopped from outside; see rv9k_thread_stop */
 
 size_t rv9k_stack_unused(const rv9k_thread_t *t);
 
@@ -271,6 +276,27 @@ void rv9k_sched_unlock(void);
 
 /* End a thread that is not the caller. */
 void rv9k_thread_kill(rv9k_thread_t *t);
+
+/*
+ * Stop another thread, and leave the corpse for whoever asked.
+ *
+ * Unlike rv9k_thread_kill, this refuses when stopping would break
+ * something else. A thread that is not running is parked at a switch
+ * point, and a switch point is a safe place to stop *unless the thread is
+ * holding a lock there*: that lock would then never be released, and the
+ * next thread to want it waits forever -- which on a machine running a
+ * control loop is a second failure caused by fixing the first.
+ *
+ * So a thread holding anything is not stopped. The caller is told, and
+ * asks again; the lock is normally held for microseconds.
+ *
+ * The corpse is held like a stack fault's, fault RV9K_FAULT_KILLED, so the
+ * layer that asked can read what happened before the slot is reused.
+ *
+ * Returns 0 when stopped, -1 for the caller itself or a thread already
+ * dead, -2 when it holds a lock.
+ */
+int rv9k_thread_stop(rv9k_thread_t *t);
 
 void rv9k_yield(void);
 void rv9k_sleep_ms(uint32_t ms);

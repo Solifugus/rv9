@@ -22,6 +22,12 @@ _Static_assert((int)RV9_PROC_ERR_CONTRACT == RV9_PE_CONTRACT, "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_UTILISATION == RV9_PE_UTILISATION, "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_NODEV    == RV9_PE_NODEV,    "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_BUSY     == RV9_PE_BUSY,     "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_KILLED   == RV9_PE_KILLED,   "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_DEADLINE == RV9_PE_DEADLINE, "ABI drift");
+
+/* The kernel's fault codes travel straight into the process table. */
+_Static_assert(RV9_TASK_FAULT_STACK  == RV9_FAULT_STACK,  "ABI drift");
+_Static_assert(RV9_TASK_FAULT_KILLED == RV9_FAULT_KILLED, "ABI drift");
 
 #include "esp_log.h"
 
@@ -87,6 +93,8 @@ const char *rv9_proc_strerror(rv9_proc_err_t err)
     case RV9_PROC_ERR_UTILISATION: return "the CPU is already promised";
     case RV9_PROC_ERR_NODEV:    return "it needs a device this machine lacks";
     case RV9_PROC_ERR_BUSY:     return "a device it needs alone is owned";
+    case RV9_PROC_ERR_KILLED:   return "killed";
+    case RV9_PROC_ERR_DEADLINE: return "missed its deadline";
     default:                    return "unknown error";
     }
 }
@@ -126,14 +134,49 @@ static rv9_proc_t *current_locked(void)
  * from what the caller asked for, or failing that from the manifest -- and
  * this is how the module reads it back rather than inventing its own.
  */
+/*
+ * Hold the declared task to its deadline, and say how seriously.
+ *
+ * With no deadline declared the period is the deadline, which is the usual
+ * meaning of a periodic task and costs nothing to check. A deadline longer
+ * than the interval actually declared -- possible when a module overrides
+ * the period it was admitted at -- is cut to the interval, because work
+ * still running when the next release arrives is late whatever was written
+ * down.
+ */
+static void hold_to_deadline(const char *name, uint32_t deadline,
+                             uint32_t interval, bool fatal)
+{
+    if (deadline == 0 || (interval != 0 && deadline > interval)) {
+        deadline = interval;
+    }
+    (void)rv9_rt_deadline(deadline, fatal);
+
+    if (fatal && deadline != 0) {
+        ESP_LOGI(TAG, "'%s' is held to %lu us: a miss stops it", name,
+                 (unsigned long)deadline);
+    } else if (fatal) {
+        ESP_LOGW(TAG, "'%s' asks that a missed deadline stop it, but "
+                      "declares none and has no bound on its releases",
+                 name);
+    }
+}
+
 static int env_rt_declare(uint32_t period_us)
 {
+    uint32_t deadline = 0;
+    bool fatal = false;
+    char name[32] = "";
+
     rv9_lock_acquire(s_lock);
     rv9_proc_t *p = current_locked();
     bool ok = (p != NULL && p->cls == RV9_CLASS_REALTIME);
     if (ok) {
         if (period_us == 0) period_us = p->period_us;
         else                p->period_us = period_us;
+        deadline = p->deadline_us;
+        fatal    = (p->on_deadline == RV9_ON_DEADLINE_FAULT);
+        memcpy(name, p->name, sizeof(name));
     }
     rv9_lock_release(s_lock);
 
@@ -143,7 +186,10 @@ static int env_rt_declare(uint32_t period_us)
        with no period is not a real-time process. */
     if (period_us == 0) return -4;
 
-    return rv9_rt_declare(period_us) == RV9_OK ? 0 : -2;
+    if (rv9_rt_declare(period_us) != RV9_OK) return -2;
+
+    hold_to_deadline(name, deadline, period_us, fatal);
+    return 0;
 }
 
 /*
@@ -156,10 +202,19 @@ static int env_rt_declare(uint32_t period_us)
  */
 static int env_rt_declare_event(int event_id, uint32_t min_interval_us)
 {
+    uint32_t deadline = 0;
+    bool fatal = false;
+    char name[32] = "";
+
     rv9_lock_acquire(s_lock);
     rv9_proc_t *p = current_locked();
     bool ok = (p != NULL && p->cls == RV9_CLASS_REALTIME);
-    if (ok) p->period_us = min_interval_us;
+    if (ok) {
+        p->period_us = min_interval_us;
+        deadline = p->deadline_us;
+        fatal    = (p->on_deadline == RV9_ON_DEADLINE_FAULT);
+        memcpy(name, p->name, sizeof(name));
+    }
     rv9_lock_release(s_lock);
 
     if (!ok) return -1;
@@ -167,12 +222,28 @@ static int env_rt_declare_event(int event_id, uint32_t min_interval_us)
     rv9_event_t ev = rv9_event_by_id(event_id);
     if (ev == NULL) return -3;      /* nothing armed, or a stale id */
 
-    return rv9_rt_declare_event(ev, min_interval_us) == RV9_OK ? 0 : -2;
+    if (rv9_rt_declare_event(ev, min_interval_us) != RV9_OK) return -2;
+
+    hold_to_deadline(name, deadline, min_interval_us, fatal);
+    return 0;
 }
 
+static void end_here(int why);
+
+/*
+ * Two answers from the KAL are not for the module.
+ *
+ * A missed deadline the program declared fatal, and a request from outside
+ * to stop, both mean the same thing here: there is no next activation.
+ * Returning either to the loop would hand the decision to the code that
+ * has just been judged, so the process ends inside this call and the
+ * module never sees it return.
+ */
 static RV9_RT_CODE int env_rt_wait(void)
 {
-    return rv9_rt_wait();
+    int r = rv9_rt_wait();
+    if (r == RV9_RT_DEADLINE || r == RV9_RT_STOPPED) end_here(r);
+    return r;
 }
 
 static int env_rt_stats(rv9_rt_report_t *out)
@@ -209,6 +280,92 @@ static uint32_t env_signals_take(void)
 /* ------------------------------------------------------------------ */
 /* Process body                                                        */
 /* ------------------------------------------------------------------ */
+
+/*
+ * The end of a process, on its own task, however it came to end.
+ *
+ * The order is R9 §15.1's and it is a requirement: the release source goes
+ * first, so nothing can run another activation; the exit hook second,
+ * which closes paths and applies failsafes; and only then does the process
+ * table say it has stopped and why. Anything watching the table and
+ * reacting to a fault must find the actuators already parked.
+ *
+ * Does not return.
+ */
+static void finish(rv9_proc_t *p, int rc, int fault,
+                   const rv9_rt_stats_t *timing)
+{
+    if (p->cls == RV9_CLASS_REALTIME) rv9_rt_release();
+
+    /* Let the I/O manager close whatever this process left open, before we
+       mark it dead and someone waiting on it wakes up. */
+    if (s_on_exit) s_on_exit(p->pid);
+
+    rv9_lock_acquire(s_lock);
+    p->exit_status = rc;
+    p->fault       = fault;
+    p->state       = RV9_PROC_EXITED;
+    rv9_lock_release(s_lock);
+
+    if (fault == RV9_FAULT_DEADLINE && timing != NULL) {
+        ESP_LOGE(TAG, "pid %u ('%s') missed its %lu us deadline: answered "
+                      "in %lu, %lu releases skipped; stopped and not "
+                      "released again", (unsigned)p->pid, p->name,
+                 (unsigned long)timing->deadline_us,
+                 (unsigned long)timing->last_response_us,
+                 (unsigned long)timing->overruns);
+    } else if (fault == RV9_FAULT_DEADLINE) {
+        ESP_LOGE(TAG, "pid %u ('%s') missed its deadline; stopped",
+                 (unsigned)p->pid, p->name);
+    } else if (fault == RV9_FAULT_KILLED) {
+        ESP_LOGW(TAG, "pid %u ('%s') killed between activations",
+                 (unsigned)p->pid, p->name);
+    } else {
+        ESP_LOGI(TAG, "pid %u ('%s') exited, status %d",
+                 (unsigned)p->pid, p->name, rc);
+    }
+
+    /* Release the module link and the private storage. The descriptor stays
+       so that a parent can still wait on it and see the status. */
+    rv9_mod_unlink(p->module);
+    rv9_free(p->statics);
+    p->statics = NULL;
+
+    rv9_task_delete(NULL);
+}
+
+/*
+ * A real-time process ending inside rt_wait.
+ *
+ * Deep in the module's call stack, which is fine: nothing returns into it.
+ * The stack goes with the task, and the module's code is not needed to
+ * leave -- the release, the paths and the failsafes are all RV-9's.
+ *
+ * R9 §15.4: this never runs the program's own cleanup. A component that
+ * missed a deadline is not trusted with more code, and one that was killed
+ * was asked first and did not stop.
+ */
+static void end_here(int why)
+{
+    rv9_lock_acquire(s_lock);
+    rv9_proc_t *p = current_locked();
+    rv9_lock_release(s_lock);
+
+    if (p == NULL) {                /* not a process; nothing to record */
+        rv9_rt_release();
+        rv9_task_delete(NULL);
+        return;
+    }
+
+    if (why == RV9_RT_DEADLINE) {
+        rv9_rt_stats_t st;
+        bool have = (rv9_rt_stats(&st) == RV9_OK);
+        finish(p, -RV9_PROC_ERR_DEADLINE, RV9_FAULT_DEADLINE,
+               have ? &st : NULL);
+    } else {
+        finish(p, -RV9_PROC_ERR_KILLED, RV9_FAULT_KILLED, NULL);
+    }
+}
 
 static void proc_trampoline(void *arg)
 {
@@ -316,30 +473,10 @@ static void proc_trampoline(void *arg)
     ESP_LOGI(TAG, "pid %u chained to '%s'", (unsigned)p->pid, next_name);
     }
 
-    /* A real-time process gives its period back, or the next one cannot
-       declare: the timer and its release semaphore belong to the slot, not
-       to the module that borrowed it. */
-    if (p->cls == RV9_CLASS_REALTIME) rv9_rt_release();
-
-    /* Let the I/O manager close whatever this process left open, before we
-       mark it dead and someone waiting on it wakes up. */
-    if (s_on_exit) s_on_exit(p->pid);
-
-    rv9_lock_acquire(s_lock);
-    p->exit_status = rc;
-    p->state       = RV9_PROC_EXITED;
-    rv9_lock_release(s_lock);
-
-    ESP_LOGI(TAG, "pid %u ('%s') exited, status %d",
-             (unsigned)p->pid, p->name, rc);
-
-    /* Release the module link and the private storage. The descriptor stays
-       so that a parent can still wait on it and see the status. */
-    rv9_mod_unlink(p->module);
-    rv9_free(p->statics);
-    p->statics = NULL;
-
-    rv9_task_delete(NULL);
+    /* A real-time process gives its period back in finish(), or the next
+       one cannot declare: the timer and its release semaphore belong to
+       the slot, not to the module that borrowed it. */
+    finish(p, rc, RV9_FAULT_NONE, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -370,15 +507,15 @@ static bool claim_faulted_locked(rv9_proc_t *p)
     if (p->state == RV9_PROC_EXITED || p->collecting) return false;
     if (p->task == NULL || rv9_task_alive(p->task))   return false;
 
-    p->fault      = rv9_task_fault(p->task);
+    /* Not p->fault yet: the reason is published after the failsafes, and
+       the corpse keeps it until then. */
     p->collecting = true;
     return true;
 }
 
 static void collect_faulted(rv9_proc_t *p)
 {
-    ESP_LOGE(TAG, "pid %u ('%s') killed: %s", (unsigned)p->pid, p->name,
-             p->fault == RV9_TASK_FAULT_STACK ? "stack overflow" : "faulted");
+    int fault = rv9_task_fault(p->task);
 
     if (p->cls == RV9_CLASS_REALTIME) rv9_rt_release();
     if (s_on_exit) s_on_exit(p->pid);
@@ -392,10 +529,19 @@ static void collect_faulted(rv9_proc_t *p)
     p->task    = NULL;
     /* Negative, and not a status any module returns, so a parent can tell
        "it failed" from "it succeeded and returned zero". */
-    p->exit_status = -RV9_PROC_ERR_FAULT;
+    p->exit_status = (fault == RV9_FAULT_KILLED) ? -RV9_PROC_ERR_KILLED
+                                                 : -RV9_PROC_ERR_FAULT;
+    p->fault       = fault ? fault : RV9_FAULT_STACK;
     p->state       = RV9_PROC_EXITED;
     p->collecting  = false;
     rv9_lock_release(s_lock);
+
+    if (fault == RV9_FAULT_KILLED) {
+        ESP_LOGW(TAG, "pid %u ('%s') killed", (unsigned)p->pid, p->name);
+    } else {
+        ESP_LOGE(TAG, "pid %u ('%s') killed: %s", (unsigned)p->pid, p->name,
+                 fault == RV9_FAULT_STACK ? "stack overflow" : "faulted");
+    }
 
     if (mod) rv9_mod_unlink(mod);
     rv9_free(st);
@@ -512,6 +658,7 @@ static int proc_list_op(void *buf, uint32_t len)
         out[n].base_priority      = (int8_t)p->base_priority;
         out[n].effective_priority = (int8_t)p->effective_priority;
         out[n].status             = p->exit_status;
+        out[n].fault              = (uint8_t)p->fault;
         n++;
     }
 
@@ -600,7 +747,23 @@ static int proc_rt_load_op(void *buf, uint32_t len)
     return 1;
 }
 
+static int proc_signal_op(int pid, uint32_t signals)
+{
+    if (pid <= 0) return -RV9_PE_INVAL;
+    return rv9_proc_signal((rv9_pid_t)pid, signals) == RV9_PROC_OK
+           ? 0 : -RV9_PE_NOTFOUND;
+}
+
+static int proc_kill_op(int pid)
+{
+    if (pid <= 0) return -RV9_PE_INVAL;
+    rv9_proc_err_t err = rv9_proc_kill((rv9_pid_t)pid);
+    return (err == RV9_PROC_OK) ? 0 : -(int)err;
+}
+
 static const rv9_mod_proc_ops_t s_mod_proc_ops = {
+    .signal = proc_signal_op,
+    .kill   = proc_kill_op,
     .fork  = proc_fork_op,
     .wait  = proc_wait_op,
     .procs = proc_list_op,
@@ -950,7 +1113,25 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
     }
 
     uint32_t wcet_us = 0, deadline_us = 0;
+    uint8_t on_deadline = RV9_ON_DEADLINE_REPORT;
     if (cls == RV9_CLASS_REALTIME) {
+        /*
+         * What a miss means, read once here and not trusted beyond what is
+         * understood. A value from the future is a policy RV-9 cannot
+         * apply, and running the program under a different one -- most
+         * likely the lenient one -- is agreeing to a contract nobody
+         * offered.
+         */
+        if (rv9_mod_manifest_u8(mod->image, RV9_MTAG_ON_DEADLINE,
+                                &on_deadline) &&
+            on_deadline > RV9_ON_DEADLINE_FAULT) {
+            ESP_LOGE(TAG, "admit '%s': on_deadline %u is not a policy this "
+                          "system knows", module_name, (unsigned)on_deadline);
+            if (s_on_exit) s_on_exit(pid);
+            rv9_mod_unlink(mod);
+            return RV9_PROC_ERR_CONTRACT;
+        }
+
         uint32_t interval = period_us;
         if (interval == 0) {
             (void)rv9_mod_manifest_u32(mod->image, RV9_MTAG_MIN_INTER_US,
@@ -999,6 +1180,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
     p->period_us          = period_us;
     p->wcet_us            = wcet_us;
     p->deadline_us        = deadline_us;
+    p->on_deadline        = on_deadline;
     p->stack_bytes        = (uint32_t)stack;
     strncpy(p->name, module_name, sizeof(p->name) - 1);
     if (arg != NULL) strncpy(p->arg, arg, sizeof(p->arg) - 1);
@@ -1107,12 +1289,104 @@ rv9_proc_err_t rv9_proc_signal(rv9_pid_t pid, uint32_t signals)
 {
     rv9_lock_acquire(s_lock);
     rv9_proc_t *p = find_locked(pid);
-    if (p != NULL && p->state != RV9_PROC_EXITED) {
-        p->signals |= signals;
-    }
+    bool live = (p != NULL && p->state != RV9_PROC_EXITED);
+    if (live) p->signals |= signals;
     rv9_lock_release(s_lock);
 
-    return p ? RV9_PROC_OK : RV9_PROC_ERR_NOTFOUND;
+    /* A signal to the dead is not delivered, and saying it was would let a
+       `kill` report stopping something that had already gone. */
+    return live ? RV9_PROC_OK : RV9_PROC_ERR_NOTFOUND;
+}
+
+/*
+ * How long kill looks for a moment it can act in.
+ *
+ * Long against a lock held for microseconds, short against a person
+ * waiting at a prompt. A real-time process is normally released within a
+ * period of being asked; one that is not has stopped waiting for releases,
+ * which is a different problem and should be reported rather than waited
+ * out.
+ */
+#define KILL_WAIT_MS 500
+
+rv9_proc_err_t rv9_proc_kill(rv9_pid_t pid)
+{
+    rv9_lock_acquire(s_lock);
+    rv9_proc_t *p  = find_locked(pid);
+    rv9_proc_t *me = current_locked();
+    bool live = (p != NULL && p->state != RV9_PROC_EXITED);
+    rv9_proc_class_t cls  = live ? p->cls  : RV9_CLASS_NORMAL;
+    rv9_task_t       task = live ? p->task : NULL;
+    rv9_lock_release(s_lock);
+
+    if (!live)   return RV9_PROC_ERR_NOTFOUND;
+    if (p == me) return RV9_PROC_ERR_INVAL;
+
+    uint64_t until = rv9_time_ms() + KILL_WAIT_MS;
+
+    /*
+     * A real-time process ends itself, in rt_wait, where it is known to
+     * hold nothing: see end_here. All that can be done from here is to ask
+     * the KAL to make its next wait the last, and to watch.
+     */
+    if (cls == RV9_CLASS_REALTIME) {
+        if (task == NULL || rv9_rt_stop(task) != RV9_OK) {
+            ESP_LOGW(TAG, "pid %u has declared no release, so there is no "
+                          "safe moment to stop it at", (unsigned)pid);
+            return RV9_PROC_ERR_INVAL;
+        }
+        while (p->state != RV9_PROC_EXITED) {
+            if (rv9_time_ms() >= until) return RV9_PROC_ERR_TIMEOUT;
+            rv9_task_delay_ms(WAIT_POLL_MS);
+        }
+        return RV9_PROC_OK;
+    }
+
+    /*
+     * An ordinary process is a thread parked at a switch point, and is
+     * stopped there unless it holds a lock. Checked and stopped under the
+     * process lock, so it cannot exit between the two and have its thread
+     * slot handed to somebody else, who would then be the one stopped.
+     */
+    for (;;) {
+        rv9_lock_acquire(s_lock);
+        bool ended = (p->state == RV9_PROC_EXITED || p->collecting ||
+                      p->task == NULL);
+        rv9_err_t err = ended ? RV9_OK : rv9_task_kill(p->task);
+        rv9_lock_release(s_lock);
+
+        if (ended || err == RV9_OK) break;
+        if (err != RV9_ERR_BUSY) {
+            ESP_LOGW(TAG, "pid %u cannot be stopped from outside here: %s",
+                     (unsigned)pid, rv9_strerror(err));
+            return RV9_PROC_ERR_INVAL;
+        }
+        if (rv9_time_ms() >= until) {
+            ESP_LOGW(TAG, "pid %u held a lock for %d ms; not stopped",
+                     (unsigned)pid, KILL_WAIT_MS);
+            return RV9_PROC_ERR_TIMEOUT;
+        }
+        rv9_task_delay_ms(1);
+    }
+
+    /*
+     * Hold the funeral now rather than leave it to a passer-by. Under
+     * RV-9's own kernel nothing walks the table on a timer, and a killed
+     * process nobody waits on would otherwise keep its devices -- which is
+     * the opposite of what killing it was for.
+     */
+    bool mine;
+    rv9_lock_acquire(s_lock);
+    mine = claim_faulted_locked(p);
+    rv9_lock_release(s_lock);
+    if (mine) collect_faulted(p);
+
+    /* Somebody else may be holding it; it is theirs to finish. */
+    while (p->state != RV9_PROC_EXITED) {
+        if (rv9_time_ms() >= until) return RV9_PROC_ERR_TIMEOUT;
+        rv9_task_delay_ms(WAIT_POLL_MS);
+    }
+    return RV9_PROC_OK;
 }
 
 const rv9_proc_t *rv9_proc_get(rv9_pid_t pid)

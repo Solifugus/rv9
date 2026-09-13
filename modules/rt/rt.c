@@ -139,5 +139,26 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         m_say(env, RV9_STDOUT, "rt: wait failed\n");
         return -6;
     }
+
+    /* In the order it happened: the devices were parked before the
+       reason was published, so saying so second is saying it true. */
+    if (status == -RV9_PE_DEADLINE) {
+        m_say(env, RV9_STDOUT, "rt: ");
+        m_say(env, RV9_STDOUT, name);
+        m_say(env, RV9_STDOUT, " missed its deadline: failsafes applied, "
+                               "stopped, not released again\n");
+    } else if (status == -RV9_PE_KILLED) {
+        m_say(env, RV9_STDOUT, "rt: ");
+        m_say(env, RV9_STDOUT, name);
+        m_say(env, RV9_STDOUT, " was killed between activations\n");
+    }
+
+    /*
+     * Said, so not passed on. Handing the child's -RV9_PE_DEADLINE up as
+     * this program's status made the shell report that `rt` had missed a
+     * deadline -- true of the child, false of rt, and printed right under
+     * the line that said which.
+     */
+    if (status == -RV9_PE_DEADLINE || status == -RV9_PE_KILLED) return 1;
     return status;
 }

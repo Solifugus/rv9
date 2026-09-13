@@ -527,6 +527,18 @@ static int env_wait(int pid, int *status, uint32_t timeout_ms)
            ? s_proc_ops->wait(pid, status, timeout_ms) : -1;
 }
 
+static int env_signal(int pid, uint32_t signals)
+{
+    return s_proc_ops && s_proc_ops->signal
+           ? s_proc_ops->signal(pid, signals) : -RV9_PE_INVAL;
+}
+
+static int env_kill(int pid)
+{
+    return s_proc_ops && s_proc_ops->kill
+           ? s_proc_ops->kill(pid) : -RV9_PE_INVAL;
+}
+
 static int env_open(const char *name, uint32_t mode)
 {
     return s_io_ops && s_io_ops->open ? s_io_ops->open(name, mode) : -1;
@@ -645,6 +657,10 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
             out[n].max_exec_us     = st.max_exec_us;
             out[n].last_exec_us    = st.last_exec_us;
             out[n].min_interval_us = st.min_interval_us;
+            out[n].deadline_us     = st.deadline_us;
+            out[n].deadline_misses = (uint32_t)st.deadline_misses;
+            out[n].max_response_us = st.max_response_us;
+            out[n].floods          = (uint32_t)st.floods;
             n++;
         }
         return (int)n;
@@ -799,6 +815,8 @@ void rv9_mod_env_init(rv9_mod_env_t *env, void *statics,
     env->rt_stats     = NULL;
     env->fork_rt      = env_fork_rt;
     env->time_us      = env_time_us;
+    env->signal       = env_signal;
+    env->kill         = env_kill;
 }
 
 rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result)

@@ -3099,6 +3099,285 @@ so by convention. Declaring published cells in the manifest, the way
 devices are declared, would let admission catch a watcher naming a
 component that will never publish. That is the next thing here.
 
+## 29. Stopping what will not stop
+
+§27 ended on two gaps that turned out to be one. A failsafe was applied when
+a process *ended*, but nothing could end a process that did not end itself:
+`RV9_SIG_STOP` existed and nothing could send it. And R9 §15.3 calls a
+missed deadline a fault, which RV-9 counted and did nothing about — because
+doing something means stopping a component from outside, which was the
+first gap again.
+
+Both are closed. `kill` asks and then insists, and a real-time program that
+declares a missed deadline fatal is stopped at the late activation, with its
+failsafe applied and the reason in the process table, in R9's order.
+
+### Asking, then insisting
+
+ABI 13 adds two calls:
+
+```c
+int (*signal)(int pid, uint32_t signals);   /* a request; the process decides */
+int (*kill)(int pid);                       /* not a request */
+```
+
+The `kill` command uses them in the only order worth using:
+
+```
+rv9> deaf &
+[13] deaf
+rv9> kill 13
+pid 13 did not stop when asked; stopping it
+pid 13 killed
+```
+
+It sends `RV9_SIG_STOP` and waits two seconds, because a process that stops
+when asked cleans up after itself — puts its terminal back, closes what it
+opened, says goodbye. Only then `kill`. `kill -f` skips the asking. `deaf`
+is a module that reads its signals and ignores them, which is the case the
+whole thing exists for.
+
+A killed process's paths are still closed, its claims still dropped and its
+failsafes still applied: those are RV-9's to do however a process ends
+(§27). What it loses is its own cleanup, and R9 §15.4 says that is correct —
+orderly stop runs `on stop`, failure applies `failsafe`, nothing runs both.
+
+### Not wherever it is
+
+"Stop it now" cannot mean "stop it wherever it is". A process stopped while
+holding a lock takes the lock with it, and the next thing to want that lock
+waits forever. Killing a diagnostic would hang the control loop — a second
+failure caused by recovering from the first.
+
+So each kind of process is stopped where it is known to hold nothing.
+
+**An ordinary process** is an RV-9 thread, and the kernel is cooperative: a
+thread that is not running is parked at a switch point. That is a safe place
+to stop it *unless it holds a lock there*. Both lock kinds now count on the
+thread — `rv9_lock` in the KAL, `rv9k_mutex` in the kernel — and
+`rv9k_thread_stop` refuses a thread whose count is not zero. The process
+manager asks again every millisecond for half a second. A lock is normally
+held for microseconds; one held for half a second is reported rather than
+waited out.
+
+The kernel already had `rv9k_thread_kill`, which does not ask. It is still
+there for the one caller that wants it — a thread ending itself — and the
+new call leaves the corpse held, fault `RV9K_FAULT_KILLED`, exactly as a
+stack fault does (§22), so the process manager can read what happened before
+the slot is reused. The funeral is then held on the spot by whoever called
+`kill`: under RV-9's own kernel nothing sweeps the table on a timer, and a
+killed process nobody waits on would otherwise keep its devices, which is
+the opposite of the point.
+
+**A real-time process** is a host task, and nothing above the KAL can see
+where a host task is parked or what it holds. There is exactly one place it
+is known to hold nothing: between activations. So `rv9_rt_stop` sets a flag
+and gives the task's release semaphore, which wakes it at once if it is
+waiting. Its `rt_wait` returns `RV9_RT_STOPPED` — and the process manager's
+wrapper never hands that to the module. The process ends *inside* the call:
+releases stopped, paths closed, failsafes applied, table updated, task
+deleted, deep in the module's stack, which nothing returns into.
+
+The same wrapper is how a deadline fault ends a process, and it is why the
+loop never gets a vote: returning a fault to the code that has just been
+judged would hand it the decision.
+
+### Two races worth closing
+
+Both are the kind that never shows in a test and would eventually show in a
+machine.
+
+A thread slot is reused as soon as its thread ends. `kill` reads a process's
+task handle and stops it; if the process exits between those two steps, its
+slot can be handed to a new thread, and the new thread is the one stopped.
+So the check and the stop happen under the process lock, which a process
+exiting has to take.
+
+`rv9_rt_stop` gives a semaphore that a real-time task deletes when it
+releases its slot. The task runs above everything, so it can preempt the
+giver between the lookup and the give. The stop and the release both hold
+off the scheduler across the lines that matter — giving with no wait is
+permitted while it is held off, and the switch it earns happens on resume.
+
+### A deadline, measured as one
+
+Execution time — what RV-9 has always recorded — is not what a deadline is
+about. It starts when the task gets the CPU. A loop released 800 µs late
+that works for 300 µs has executed for 300 and *answered* in 1100, and only
+the second is late. So every activation now records its **response**: its
+lateness at release plus its execution. A miss is detected in two places:
+
+- at **completion**, when the response exceeds the deadline — the earliest
+  moment it is known, and the moment nothing about it can change;
+- at **release**, when whole periods went by with no activation at all.
+  Those releases missed their deadlines outright, and that is known before
+  the next activation starts rather than after it ends.
+
+The deadline is the declared `deadline_us`, or the period when none is
+declared, cut to the actual interval if a module overrides its period. The
+time from `rt_declare` to the first `rt_wait` is initialisation, not an
+activation, and is not held to anything: nothing released it.
+
+### Lateness had been measured from the wrong place
+
+Lateness used to be the gap since the *previous wakeup*, minus a period.
+That forgives lateness that accumulates: a loop late by 500 µs and then by
+600 reports 100 for the second, because it only counts what got worse. As a
+statistic that was tolerable. As the thing that decides whether a process is
+stopped, it would have let a loop drift arbitrarily far behind its schedule
+one forgivable step at a time.
+
+Each task now keeps `due_us`, the time its next release *should* happen,
+stamped before the timer is started and advanced by whole periods. Lateness
+is measured against that. Stamping before the start makes the schedule, if
+anything, a microsecond early — so lateness errs towards "late", which is
+the direction an instrument deciding faults has to err in.
+
+`control` against the new measure, four runs: worst jitter 17–46 µs, worst
+execution 23–33 µs, no overruns. Its response is under a tenth of its
+1000 µs deadline.
+
+### What a miss means is the program's decision
+
+A new manifest tag, `RV9_MTAG_ON_DEADLINE`, says whether a miss is a fault:
+
+```
+on_deadline=fault          # report is the default
+mandatory="heap_max on_deadline"
+```
+
+Absent means `report`: every miss is counted, in `RV9_SYS_RT` alongside the
+worst response, and nothing is stopped. That is what RV-9 did before, and it
+is the right answer for programs whose job is to *measure* lateness —
+`evlat` stopped at its first late event would measure nothing. `control` is
+left on `report` for the same reason: it is the loop that reports honest
+jitter, and a flash write stalling the machine is exactly what it exists to
+show rather than be stopped by.
+
+A program whose late output is wrong output says `fault`, and should say it
+mandatorily: a system that does not understand the tag would otherwise run
+it under the lenient policy, which is the contract it was written to refuse.
+A value above `fault` is refused at admission rather than guessed at.
+
+### In R9's order
+
+R9 §15.1 requires three things in a fixed order — actuators safe, then the
+fault published, then never released again — and says the order is a
+requirement, because an observer reacting to a fault may command something.
+
+`finish()` is the one place a process ends on its own task, and it is that
+order: the release source goes first, so there is no next activation; the
+exit hook second, which parks the devices; and only then are the status,
+the fault and the state written. The process table's `fault` field — what
+was `reserved` in `rv9_sys_proc_t`, same size — cannot be read before the
+pin is parked, because it has not been written. The log shows it in order:
+
+```
+W (2768) rv9-io: failsafe: /gpio/2 left at 0
+E (2769) rv9-proc: pid 3 ('lateloop') missed its 2000 us deadline: answered
+             in 5014, 0 releases skipped; stopped and not released again
+```
+
+Collecting a killed thread follows the same rule, which meant moving its
+fault code: it used to be written when the corpse was claimed, before the
+failsafes ran.
+
+### Demonstrated
+
+`lateloop` drives `/gpio/2` high, declares `on_deadline=fault` with a 2 ms
+deadline, and on its 50th period does 5 ms of work:
+
+```
+rv9> rt lateloop
+rt: started lateloop as pid 13
+rt: lateloop missed its deadline: failsafes applied, stopped, not released again
+rt returned 1
+rv9> pin 2
+/gpio/2 = 0
+rv9> procs
+pid par name        state   base eff ended
+...
+13  12  lateloop    exited  15   15  DEADLINE
+12  11  rt          exited  8    8   status 1
+...
+2   0   lateloop    exited  15   15  killed
+1   0   deaf        exited  8    8   killed
+```
+
+And a real-time loop killed from the shell while it owns the pin — `ontime`
+makes `lateloop` never late, so something else has to stop it:
+
+```
+rv9> rt lateloop ontime &
+[12] rt
+rt: started lateloop as pid 13
+rv9> pin 2
+/gpio/2: owned by another process (see 'owns')
+rv9> kill -f 13
+pid 13 killed
+rt: lateloop was killed between activations
+rv9> pin 2
+/gpio/2 = 0
+rv9> kill 13
+kill: no process 13
+```
+
+The line after `lateloop`'s loop — which says RV-9 let a late loop carry on
+— never printed. `procs` has a new column for how a process *ended*, which
+on a machine that moves is the one that matters: returning, being killed and
+missing a deadline are three different stories about the same actuator.
+
+The first draft of `rt` passed its child's `-RV9_PE_DEADLINE` up as its own
+status, and the shell dutifully printed `rt: missed its deadline and was
+stopped` under the line saying which program had. `rt` now reports and
+returns 1.
+
+### Tested
+
+`fault-test`, 28 checks at boot, on real modules judged from outside:
+
+- a thread holding an `rv9_lock` and asleep is **not** stopped, is still
+  alive, and is stopped once it lets go; the lock is then free (had the
+  refusal been wrong, the boot would stop at that line);
+- `deaf` is asked to stop and does not, is killed, reads
+  `-RV9_PROC_ERR_KILLED` and `killed` in the table, and a second kill or a
+  signal to it finds nothing;
+- `lateloop` killed between activations ends within 50 ms of being asked,
+  gives its release slot back, and has its pin parked;
+- `lateloop` late on period 20 ends by itself with `DEADLINE`, pin 0, slot
+  gone.
+
+The pin is driven to 1 by the test before each, and read back as 1, so 0
+afterwards is RV-9's doing and not the pin's resting state.
+
+### What this does not do
+
+**A real-time loop that never reaches `rt_wait` is not stopped.** Deadlines
+are detected at completion and at release, and a loop spinning in its body
+does neither. On a single core it also starves everything below it,
+including the shell that would type `kill`. That needs a budget enforced
+by a timer — the loop's declared WCET used as a limit rather than a
+promise — and it is the natural next piece.
+
+**The fault is published in the process table, not in the component's
+cell.** R9's `watch MOTOR_CONTROL.faulted` expects it where the component's
+values are. PFM already knows which cells a process was writing (§28), so
+marking them faulted when it dies is small; it is not done.
+
+**A process killed partway through an open** — `/n0` waiting for a
+connection, say — is not leaked: `rv9_io_open` puts the path in the
+process's table *before* it lets go of the lock to wait, so the exit hook
+finds and releases it. But releasing it asks the file manager to close a
+path whose open never finished, and no file manager has been checked for
+what it does with one. That is a question for each of them, not yet asked.
+
+**Anyone may kill anyone.** `RV9_MTAG_CAPABILITY` still has no consumer.
+
+**Only under RV-9's own kernel.** The FreeRTOS backend answers
+`RV9_ERR_UNSUPPORTED` for stopping a thread: it cannot say whether a task
+holds a lock, and guessing yes is how a system deadlocks while recovering
+from something else. Real-time processes stop on either.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

@@ -140,7 +140,7 @@ gives them meaning. Neither side should duplicate the other's job.
 
 ## Where RV-9 stands today
 
-Measured or checked against the running system, 2026-09-12.
+Measured or checked against the running system, 2026-09-13.
 
 | | status |
 |---|---|
@@ -152,10 +152,10 @@ Measured or checked against the running system, 2026-09-12.
 | 6. device ownership | **done** — a claim table above the drivers, keyed by the full path (`/gpio/2`, not `/gpio`), one record per owner. `exclusive` in the manifest is claimed at fork and released at exit however the process ends; `RV9_MODE_EXCL` does the same at runtime; `device` is checked for existence. `owns` lists who has what, and what each device is to be parked at |
 | 7. RT-safe marked machine-readably | documented in prose, `RV9_RT_CODE` in source; not readable |
 | 8. init separate from execution | **already exactly this**, and it earns its keep: publishing from a control loop cost 30 us of first-call warm-up until one throwaway write was moved before `rt_declare` |
-| 9. failsafe below the process | **done for process failure** — `RV9_MTAG_FAILSAFE` is a constant and a device path, repeated per actuator, applied by RV-9 after the process is gone and validated at admission against what the program claimed to own. `hold crash` drives a pin high, dies of a stack overflow, and the pin reads 0 afterwards. Not yet applied for a *deadline* miss, which R9 §15.3 also calls a fault: RV-9 counts overruns but does not stop a component for them |
-| 10. timing as state | **done**, `RV9_SYS_RT` |
+| 9. failsafe below the process | **done for process failure** — `RV9_MTAG_FAILSAFE` is a constant and a device path, repeated per actuator, applied by RV-9 after the process is gone and validated at admission against what the program claimed to own. `hold crash` drives a pin high, dies of a stack overflow, and the pin reads 0 afterwards. **Also done for a missed deadline** (R9 §15.3 `DEADLINE`) where the program declares `on_deadline=fault`: the late activation is the last, the failsafe is applied, and only then does the process table say why. And a process can be stopped from outside — `kill` asks, then insists — at a moment it holds no lock (design.md §29) |
+| 10. timing as state | **done**, `RV9_SYS_RT`, now with response time (release to finish, not only execution) and deadline misses; how a process *ended* — returned, killed, `STACK`, `DEADLINE` — is a field of `RV9_SYS_PROCS`, shown by `procs` |
 | 11. no POSIX assumptions | **already true** and worth defending. The unified path model has now paid for itself twice over: publication between processes (R9 §18) needed no new mechanism, only a fourth file manager |
-| 12. extensible manifest | **done** — `rv9_mod_header_t.manifest_offset` points at a TLV list; sixteen tags registered, `build.conf` emits them, `tools/modinfo.py` reads them back |
+| 12. extensible manifest | **done** — `rv9_mod_header_t.manifest_offset` points at a TLV list; seventeen tags registered (`on_deadline` the latest), `build.conf` emits them, `tools/modinfo.py` reads them back |
 | 13. resource certificate | **begun** — admission checks the declaration against itself (deadline within period, WCET within deadline) and against the machine. `control` declares 50 us and reports 26-30 us observed, which is a claim RV-9 can check rather than believe |
 | 14. measurement | **established practice**: `free`, `stacks`, `procs`, `rt`, `owns`, `pubs`, `docs/memory.md`. It earns its keep: `stacks` reporting a 34 MB stack is what exposed the KAL casting host task handles to kernel threads |
 | 15. no language semantics in the OS | held so far |

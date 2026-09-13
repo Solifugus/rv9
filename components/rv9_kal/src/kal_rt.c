@@ -93,6 +93,31 @@ typedef struct {
     uint64_t           floods;           /* arrivals inside the declared gap */
     bool               flood_reported;
     uint64_t           released_at_us;   /* when this activation began */
+
+    /*
+     * The schedule, and how late against it.
+     *
+     * due_us is when the next periodic release *should* happen, advanced
+     * by whole periods rather than restarted from each wakeup. Measuring
+     * lateness from the previous wakeup instead -- which this did until
+     * deadlines were enforced -- forgives lateness that accumulates: a
+     * loop late by 500 us and then by 600 reports 100 for the second,
+     * because it only counts what got worse. That was tolerable as a
+     * statistic. It is not tolerable as the thing that decides whether a
+     * process is stopped.
+     */
+    uint64_t           due_us;
+    uint32_t           late_us;          /* this activation's lateness */
+
+    uint32_t           deadline_us;      /* 0: not checked */
+    bool               fault_on_miss;
+    uint64_t           deadline_misses;
+    uint32_t           max_response_us;
+    uint32_t           last_response_us;
+
+    /* Set by rv9_rt_stop from another task; read here between activations. */
+    volatile bool      stop;
+
     bool               in_use;
 } rt_task_t;
 
@@ -177,6 +202,9 @@ void rv9_lock_acquire(rv9_lock_t lock)
     if (xSemaphoreTake(l->mux, 0) == pdTRUE) {
         portENTER_CRITICAL(&s_lock_guard);
         l->holder = rv9_kal_self_thread();
+        /* Counted on the thread, so nothing stops it while it holds this:
+           see rv9_task_kill. */
+        if (l->holder) l->holder->holds++;
         portEXIT_CRITICAL(&s_lock_guard);
         return;
     }
@@ -232,6 +260,7 @@ void rv9_lock_acquire(rv9_lock_t lock)
 
     portENTER_CRITICAL(&s_lock_guard);
     l->holder = rv9_kal_self_thread();
+    if (l->holder) l->holder->holds++;
     portEXIT_CRITICAL(&s_lock_guard);
 }
 
@@ -245,6 +274,7 @@ void rv9_lock_release(rv9_lock_t lock)
     bool boosted = l->boosted;
     l->holder  = NULL;
     l->boosted = false;
+    if (holder && holder->holds > 0) holder->holds--;
     portEXIT_CRITICAL(&s_lock_guard);
 
     /* Give the borrowed priority back before letting go, so the thread
@@ -465,12 +495,18 @@ rv9_err_t rv9_rt_declare(uint32_t period_us)
 
     rt->in_use = true;
 
+    /* Read before starting, so the schedule is if anything a microsecond
+       early. Lateness measured against it then errs towards "late", which
+       is the direction an instrument deciding faults must err in. */
+    uint64_t t0 = rv9_time_us();
+
     if (esp_timer_start_periodic(rt->timer, period_us) != ESP_OK) {
         rt->in_use = false;
         return RV9_ERR_NOMEM;
     }
 
-    rt->released_at_us = rv9_time_us();
+    rt->released_at_us = t0;
+    rt->due_us         = t0 + period_us;
 
     ESP_LOGI(TAG, "real-time task declared: %lu us period (%lu Hz)",
              (unsigned long)period_us,
@@ -495,26 +531,45 @@ rv9_err_t rv9_rt_declare(uint32_t period_us)
 static RV9_RT_CODE int rt_wait_event(rt_task_t *rt)
 {
     event_impl_t *e = rt->event;
+    uint64_t at, prev;
+    uint32_t pending;
 
-    if (xSemaphoreTake(e->sem, portMAX_DELAY) != pdTRUE) return -1;
+    for (;;) {
+        if (xSemaphoreTake(e->sem, portMAX_DELAY) != pdTRUE) return -1;
 
-    /* Drain the rest: they are signals about a world that has since changed
-       again, and the handler is about to look at the world as it is now. */
-    while (uxSemaphoreGetCount(e->sem) > 0) xSemaphoreTake(e->sem, 0);
+        /* Drain the rest: they are signals about a world that has since
+           changed again, and the handler is about to look at the world as
+           it is now. */
+        while (uxSemaphoreGetCount(e->sem) > 0) xSemaphoreTake(e->sem, 0);
 
-    portENTER_CRITICAL(&s_event_guard);
-    uint64_t at      = e->at_us;
-    uint64_t prev    = e->last_us;
-    uint32_t pending = e->pending;
-    e->last_us = at;
-    e->pending = 0;
-    portEXIT_CRITICAL(&s_event_guard);
+        if (rt->stop) return RV9_RT_STOPPED;
+
+        portENTER_CRITICAL(&s_event_guard);
+        pending = e->pending;
+        at      = e->at_us;
+        prev    = e->last_us;
+        if (pending > 0) {
+            e->last_us = at;
+            e->pending = 0;
+        }
+        portEXIT_CRITICAL(&s_event_guard);
+
+        /* A wakeup with no event behind it is rv9_rt_stop's, left in the
+           semaphore by a task that stopped before it came to wait. It is
+           nothing to respond to, and measuring it would stamp a latency
+           from an event that happened some time last week. */
+        if (pending > 0) break;
+    }
 
     uint64_t woken = rv9_time_us();
 
     /* Pin to process. */
     uint32_t latency = (woken > at) ? (uint32_t)(woken - at) : 0;
     if (latency > rt->max_jitter_us) rt->max_jitter_us = latency;
+
+    /* An event's deadline runs from the event, so this activation starts
+       already that far into it. */
+    rt->late_us = latency;
 
     /* How fast is this source really going? Worth knowing whether or not a
        bound was declared -- a bound nobody measured is a guess. */
@@ -563,6 +618,33 @@ RV9_RT_CODE int rv9_rt_wait(void)
     rt->last_exec_us = exec;
     if (exec > rt->max_exec_us) rt->max_exec_us = exec;
 
+    /* Asked to stop while working. Between activations is the one place a
+       task is known to hold nothing, and this is it. */
+    if (rt->stop) return RV9_RT_STOPPED;
+
+    /*
+     * Did the activation that just finished meet its deadline?
+     *
+     * Checked here because this is when it is known: the work is done, and
+     * nothing about it can change. Response is how late the activation
+     * started plus how long it ran. Skipped for the first call, which ends
+     * initialisation rather than an activation -- nothing released it.
+     */
+    if (rt->activations > 0) {
+        uint64_t r = (uint64_t)exec + rt->late_us;
+        uint32_t response = (r > UINT32_MAX) ? UINT32_MAX : (uint32_t)r;
+        rt->last_response_us = response;
+        if (response > rt->max_response_us) rt->max_response_us = response;
+
+        if (rt->deadline_us != 0 && response > rt->deadline_us) {
+            rt->deadline_misses++;
+            /* The late activation is the last one. Waiting for the next
+               release first would hand the actuators one more period of
+               output from a loop already known to be wrong. */
+            if (rt->fault_on_miss) return RV9_RT_DEADLINE;
+        }
+    }
+
     if (rt->event != NULL) return rt_wait_event(rt);
 
     if (xSemaphoreTake(rt->release, portMAX_DELAY) != pdTRUE) return -1;
@@ -571,6 +653,9 @@ RV9_RT_CODE int rv9_rt_wait(void)
        while this task was elsewhere, and working through a backlog of stale
        deadlines is not what a control loop wants. */
     while (uxSemaphoreGetCount(rt->release) > 0) xSemaphoreTake(rt->release, 0);
+
+    /* Woken to be told to stop, not to work. */
+    if (rt->stop) return RV9_RT_STOPPED;
 
     uint64_t woken = rv9_time_us();
 
@@ -582,27 +667,76 @@ RV9_RT_CODE int rv9_rt_wait(void)
      * loop reported seven missed periods instead of a hundred and ninety
      * nine. An instrument that saturates just where it matters is worse than
      * none: it says "slightly late" about a loop that stopped.
-     */
-    uint64_t gap = (woken > rt->released_at_us)
-                   ? (woken - rt->released_at_us) : 0;
-
-    /*
+     *
+     * And from the schedule, not from the last wakeup: see due_us.
+     *
      * Lateness is the whole overshoot, not the remainder after whole
      * periods are taken out of it. Reporting the remainder was the same
      * mistake in a different place: a loop stalled for 200 ms and one
      * stalled for 200 us both came back "late by a little".
      */
-    uint32_t jitter = (gap > rt->period_us)
-                      ? (uint32_t)(gap - rt->period_us) : 0;
+    uint64_t over = (woken > rt->due_us) ? (woken - rt->due_us) : 0;
+    uint32_t jitter = (over > UINT32_MAX) ? UINT32_MAX : (uint32_t)over;
     if (jitter > rt->max_jitter_us) rt->max_jitter_us = jitter;
 
-    int missed = (int)(jitter / rt->period_us);
+    uint32_t missed = jitter / rt->period_us;
 
+    /* The activation now starting serves the most recent release; the
+       ones before it got no activation at all. */
+    rt->late_us  = jitter - missed * rt->period_us;
+    rt->due_us  += (uint64_t)(missed + 1) * rt->period_us;
+
+    bool first = (rt->activations == 0);
     rt->released_at_us = woken;
     rt->activations++;
     rt->overruns += (uint64_t)missed;
 
-    return missed;
+    /*
+     * A release that got no activation missed its deadline outright, and
+     * that is known now rather than at the end of the next activation. The
+     * first wakeup is forgiven for the same reason the first completion
+     * is: periods consumed by initialisation were never promised.
+     */
+    if (missed > 0 && !first && rt->deadline_us != 0) {
+        rt->deadline_misses += missed;
+        if (rt->fault_on_miss) return RV9_RT_DEADLINE;
+    }
+
+    return (int)missed;
+}
+
+rv9_err_t rv9_rt_deadline(uint32_t deadline_us, bool fault)
+{
+    rt_task_t *rt = slot_for(xTaskGetCurrentTaskHandle());
+    if (rt == NULL) return RV9_ERR_INVAL;
+
+    rt->deadline_us   = deadline_us;
+    rt->fault_on_miss = fault && deadline_us != 0;
+    return RV9_OK;
+}
+
+/*
+ * The scheduler is held off rather than interrupts: what this races is the
+ * task releasing its own slot and deleting the semaphore about to be given,
+ * and that happens in task context. Giving with no wait is permitted while
+ * the scheduler is suspended; the switch it earns happens on resume.
+ */
+rv9_err_t rv9_rt_stop(rv9_task_t task)
+{
+    if (task == NULL) return RV9_ERR_INVAL;
+
+    rv9_err_t err = RV9_ERR_INVAL;
+
+    vTaskSuspendAll();
+    rt_task_t *rt = slot_for((TaskHandle_t)task);
+    if (rt != NULL) {
+        rt->stop = true;
+        xSemaphoreGive(rt->event != NULL ? rt->event->sem : rt->release);
+        err = RV9_OK;
+    }
+    xTaskResumeAll();
+
+    return err;
 }
 
 void rv9_rt_release(void)
@@ -610,18 +744,25 @@ void rv9_rt_release(void)
     rt_task_t *rt = slot_for(xTaskGetCurrentTaskHandle());
     if (rt == NULL) return;
 
+    /* Releases stop first, while the slot is still visibly ours. */
+    bool borrowed = (rt->event != NULL);
+    if (!borrowed) esp_timer_stop(rt->timer);
+
+    /* Out of the table before anything it points at is freed, and with the
+       scheduler held so rv9_rt_stop cannot be halfway through giving the
+       semaphore about to be deleted. */
+    vTaskSuspendAll();
+    rt->in_use = false;
+    rt->task   = NULL;
+    rt->event  = NULL;
+    xTaskResumeAll();
+
     /* An event-driven task borrowed its release source; it did not make it,
        and the device it belongs to is still there. Only let go of it. */
-    if (rt->event != NULL) {
-        rt->event = NULL;
-    } else {
-        esp_timer_stop(rt->timer);
+    if (!borrowed) {
         esp_timer_delete(rt->timer);
         vSemaphoreDelete(rt->release);
     }
-
-    rt->in_use = false;
-    rt->task   = NULL;
 }
 
 static void fill_stats(const rt_task_t *rt, rv9_rt_stats_t *out)
@@ -637,6 +778,10 @@ static void fill_stats(const rt_task_t *rt, rv9_rt_stats_t *out)
     /* Nothing seen yet reads as zero, not as four billion. */
     out->min_interval_us = (rt->min_interval_us == UINT32_MAX)
                            ? 0 : rt->min_interval_us;
+    out->deadline_us      = rt->deadline_us;
+    out->deadline_misses  = rt->deadline_misses;
+    out->max_response_us  = rt->max_response_us;
+    out->last_response_us = rt->last_response_us;
 }
 
 rv9_err_t rv9_rt_stats(rv9_rt_stats_t *out)

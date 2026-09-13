@@ -102,6 +102,7 @@ const char *rv9_strerror(rv9_err_t err)
     case RV9_ERR_NOMEM:       return "out of memory";
     case RV9_ERR_TIMEOUT:     return "timed out";
     case RV9_ERR_UNSUPPORTED: return "unsupported";
+    case RV9_ERR_BUSY:        return "busy";
     default:                  return "unknown error";
     }
 }
@@ -248,6 +249,21 @@ bool rv9_task_alive(rv9_task_t task)
        known here, and claiming otherwise would bury the living. */
     if (!rv9k_is_thread(task)) return true;
     return rv9k_thread_alive((const rv9k_thread_t *)task);
+}
+
+rv9_err_t rv9_task_kill(rv9_task_t task)
+{
+    /* Both ends must be threads. The thread table belongs to the host task
+       the kernel runs in, and touching it from any other is a race. */
+    if (!rv9k_is_thread(task) || rv9_kal_self_thread() == NULL) {
+        return RV9_ERR_UNSUPPORTED;
+    }
+
+    switch (rv9k_thread_stop((rv9k_thread_t *)task)) {
+    case 0:  return RV9_OK;
+    case -2: return RV9_ERR_BUSY;
+    default: return RV9_ERR_INVAL;
+    }
 }
 
 void rv9_task_reap(rv9_task_t task)

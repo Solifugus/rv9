@@ -204,6 +204,7 @@ rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
     t->stack_words = words;
     t->fault       = RV9K_FAULT_NONE;
     t->held        = false;
+    t->holds       = 0;
 
     /* Stacks grow down. RISC-V wants the pointer 16-byte aligned. */
     uint32_t *top = stack + words;
@@ -535,6 +536,21 @@ void rv9k_thread_kill(rv9k_thread_t *t)
         t->blocked_on = NULL;
     }
     t->state = RV9K_DEAD;
+}
+
+int rv9k_thread_stop(rv9k_thread_t *t)
+{
+    if (t == NULL || t == s_current || t->state == RV9K_DEAD) return -1;
+    if (t->holds > 0) return -2;
+
+    if (t->blocked_on) {
+        waitq_remove((rv9k_waitq_t *)t->blocked_on, t);
+        t->blocked_on = NULL;
+    }
+    t->fault = RV9K_FAULT_KILLED;
+    t->held  = true;
+    t->state = RV9K_DEAD;
+    return 0;
 }
 
 /*
@@ -870,6 +886,7 @@ bool rv9k_mutex_lock(rv9k_mutex_t *m, uint32_t timeout_ms)
 
     m->owner = s_current;
     m->depth = 1;
+    if (s_current) s_current->holds++;
     return true;
 }
 
@@ -879,6 +896,7 @@ void rv9k_mutex_unlock(rv9k_mutex_t *m)
 
     if (--m->depth > 0) return;
 
+    if (m->owner && m->owner->holds > 0) m->owner->holds--;
     m->owner = NULL;
     rv9k_sem_give(&m->sem);
 }

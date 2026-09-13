@@ -98,6 +98,7 @@ static void help(const rv9_mod_env_t *env)
           "  exit              leave the shell\n"
           "  <module> [arg] [> dev]  fork it, optionally redirected\n"
           "  <module> &        run it without waiting; see it in 'procs'\n"
+          "  kill [-f] <pid>   stop one: ask, then insist\n"
           "\n"
           "try: mdir, procs, owns, pubs, free, dir, filetest, netstat\n"
           "     dir /r0        echo > /term\n"
@@ -186,6 +187,17 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         m_say(env, RV9_STDOUT, "] ");
         m_say(env, RV9_STDOUT, name);
         m_say(env, RV9_STDOUT, "\n");
+    } else if (status == -RV9_PE_KILLED) {
+        /* Ended, not returned: these statuses are RV-9's, never the
+           program's, and "returned -12" would say otherwise. */
+        m_say(env, RV9_STDOUT, name);
+        m_say(env, RV9_STDOUT, ": killed\n");
+    } else if (status == -RV9_PE_DEADLINE) {
+        m_say(env, RV9_STDOUT, name);
+        m_say(env, RV9_STDOUT, ": missed its deadline and was stopped\n");
+    } else if (status == -RV9_PE_FAULT) {
+        m_say(env, RV9_STDOUT, name);
+        m_say(env, RV9_STDOUT, ": stopped by the scheduler (see the log)\n");
     } else if (status != 0) {
         m_say(env, RV9_STDOUT, name);
         m_say(env, RV9_STDOUT, " returned ");

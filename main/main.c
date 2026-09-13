@@ -18,6 +18,7 @@
 #include "module_test.h"
 #include "io_test.h"
 #include "pub_test.h"
+#include "fault_test.h"
 #include "conformance.h"
 
 #define RV9_RUN_KERNEL_TEST 1
@@ -711,6 +712,10 @@ static void rv9_init_task(void *arg)
        publication, which needs /pub0 attached. */
     rv9_io_selftest();
     rv9_pub_selftest();
+
+    /* Needs the module store, the claim table and /gpio: it forks real
+       modules and judges them by the pin they leave behind. */
+    rv9_fault_selftest();
 
     run_module("hello");
 

@@ -63,6 +63,7 @@ typedef enum {
     RV9_ERR_NOMEM,        /* allocation failed */
     RV9_ERR_TIMEOUT,      /* wait expired */
     RV9_ERR_UNSUPPORTED,  /* not implemented by this backend */
+    RV9_ERR_BUSY,         /* not now; it is in a state that cannot be touched */
 } rv9_err_t;
 
 const char *rv9_strerror(rv9_err_t err);
@@ -143,8 +144,26 @@ rv9_err_t rv9_task_stack(rv9_task_t task, size_t *size, size_t *unused);
  */
 #define RV9_TASK_FAULT_NONE   0
 #define RV9_TASK_FAULT_STACK  1
+#define RV9_TASK_FAULT_KILLED 2
 
 int  rv9_task_fault(rv9_task_t task);
+
+/*
+ * Stop another task, if that can be done without breaking anything else.
+ *
+ * Not the same as rv9_task_delete, which stops a task wherever it is. A
+ * task stopped while holding a lock takes the lock with it, and whatever
+ * wants it next waits forever -- so this refuses with RV9_ERR_BUSY while
+ * the task holds one, and the caller asks again.
+ *
+ * The corpse is kept, fault RV9_TASK_FAULT_KILLED, until rv9_task_reap.
+ *
+ * Only RV-9's own threads can be stopped this way, and only by another
+ * RV-9 thread: a host task has no switch point this layer can see, and
+ * RV9_ERR_UNSUPPORTED says so. Real-time tasks are stopped at their next
+ * release instead -- see rv9_rt_stop.
+ */
+rv9_err_t rv9_task_kill(rv9_task_t task);
 
 /*
  * Is this task still able to run?
@@ -336,6 +355,18 @@ typedef struct {
     bool     event_driven;
     uint32_t min_interval_us; /* shortest gap between events actually seen */
     uint64_t floods;          /* events closer together than declared */
+
+    /*
+     * Response: from when the release should have happened to when the
+     * work finished. Not execution time, which starts when the task got
+     * the CPU -- a loop released 800 us late that works for 300 us has
+     * executed for 300 and answered in 1100, and only the second is what
+     * a deadline is about.
+     */
+    uint32_t deadline_us;     /* 0 when none is being checked */
+    uint64_t deadline_misses;
+    uint32_t max_response_us;
+    uint32_t last_response_us;
 } rv9_rt_stats_t;
 
 rv9_err_t rv9_task_create_rt(rv9_task_fn fn, const char *name,
@@ -370,6 +401,44 @@ rv9_err_t rv9_rt_declare_event(rv9_event_t ev, uint32_t min_interval_us);
  * something.
  */
 int rv9_rt_wait(void);
+
+/*
+ * What rv9_rt_wait returns instead of a count when this task must not run
+ * another activation. Neither is ever handed to the module: the process
+ * manager ends the process on the spot. They are distinct so the reason
+ * survives to the process table.
+ */
+#define RV9_RT_DEADLINE  (-2)   /* the activation just finished was late */
+#define RV9_RT_STOPPED   (-3)   /* someone asked it to stop; see rv9_rt_stop */
+
+/*
+ * The deadline this task's activations are held to, and what a miss means.
+ *
+ * Called by the task itself, after declaring. A miss is always counted.
+ * With `fault` set it also ends the task: rv9_rt_wait returns
+ * RV9_RT_DEADLINE instead of waiting, so the late activation is the last.
+ *
+ * It is checked when an activation finishes, which is the earliest moment
+ * it is known and, for the same reason, not before: a loop that never
+ * finishes an activation is not detected here. The time from declaring to
+ * the first wait is initialisation, not an activation, and is not held to
+ * a deadline.
+ */
+rv9_err_t rv9_rt_deadline(uint32_t deadline_us, bool fault);
+
+/*
+ * Ask a real-time task to stop, from outside it.
+ *
+ * A real-time task is a host task and cannot be stopped at an arbitrary
+ * point -- there is no telling what it holds. It can be stopped where it
+ * is known to hold nothing, which is between activations: its next
+ * rv9_rt_wait returns RV9_RT_STOPPED. If it is waiting already it is woken
+ * at once rather than at its next release.
+ *
+ * RV9_ERR_INVAL if the task has not declared a release source, in which
+ * case there is no such point to stop it at.
+ */
+rv9_err_t rv9_rt_stop(rv9_task_t task);
 
 /* Give up the period and the timer. A real-time process that ends without
    this leaves its slot occupied, and the next one cannot declare. */

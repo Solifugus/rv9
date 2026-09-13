@@ -26,13 +26,16 @@ TAGS = {0x0000: "end", 0x0001: "desc", 0x0002: "stack", 0x0003: "static",
         0x0004: "heap_max", 0x0005: "class", 0x0006: "period_us",
         0x0007: "deadline_us", 0x0008: "min_inter_us", 0x0009: "wcet_us",
         0x000A: "device", 0x000B: "exclusive", 0x000C: "failsafe",
-        0x000D: "capability", 0x000E: "compiler", 0x000F: "runtime"}
+        0x000D: "capability", 0x000E: "compiler", 0x000F: "runtime",
+        0x0010: "on_deadline"}
 
 CLASSES = {0: "unspecified", 1: "proaction", 2: "reaction", 3: "realtime"}
+ON_DEADLINE = {0: "report", 1: "fault"}
+U8_NAMES = {"class": CLASSES, "on_deadline": ON_DEADLINE}
 
 U32 = {"stack", "static", "heap_max", "period_us", "deadline_us",
        "min_inter_us", "wcet_us"}
-U8 = {"class"}
+U8 = {"class", "on_deadline"}
 FS = {"failsafe"}
 
 
@@ -48,7 +51,7 @@ def show_value(name, raw):
             return "0 (no heap at all)"
         return str(n)
     if name in U8 and len(raw) == 1:
-        return CLASSES.get(raw[0], str(raw[0]))
+        return U8_NAMES[name].get(raw[0], str(raw[0]))
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
