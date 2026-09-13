@@ -6,6 +6,7 @@
  */
 #include "rv9/proc.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* Modules learn about fork failures as these, negated; the values are ABI
@@ -26,6 +27,8 @@ _Static_assert((int)RV9_PROC_ERR_KILLED   == RV9_PE_KILLED,   "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_DEADLINE == RV9_PE_DEADLINE, "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_RUNAWAY  == RV9_PE_RUNAWAY,  "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_NOPUB    == RV9_PE_NOPUB,    "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_UNSCHEDULABLE == RV9_PE_UNSCHEDULABLE,
+               "ABI drift");
 
 /* The kernel's fault codes travel straight into the process table. */
 _Static_assert(RV9_TASK_FAULT_STACK  == RV9_FAULT_STACK,  "ABI drift");
@@ -114,6 +117,8 @@ const char *rv9_proc_strerror(rv9_proc_err_t err)
     case RV9_PROC_ERR_DEADLINE: return "missed its deadline";
     case RV9_PROC_ERR_RUNAWAY:  return "stopped waiting for its releases";
     case RV9_PROC_ERR_NOPUB:    return "it watches something nothing publishes";
+    case RV9_PROC_ERR_UNSCHEDULABLE:
+        return "no placement meets every real-time deadline";
     default:                    return "unknown error";
     }
 }
@@ -292,6 +297,8 @@ static int env_rt_declare(uint32_t period_us)
     uint32_t deadline = 0;
     bool fatal = false;
     char name[32] = "";
+    bool urgent = true;
+    uint32_t bound = 0;
 
     rv9_lock_acquire(s_lock);
     rv9_proc_t *p = current_locked();
@@ -302,6 +309,8 @@ static int env_rt_declare(uint32_t period_us)
         deadline = p->deadline_us;
         fatal    = (p->on_deadline == RV9_ON_DEADLINE_FAULT);
         memcpy(name, p->name, sizeof(name));
+        urgent   = p->rt_urgent;
+        bound    = p->rt_bound_us;
     }
     rv9_lock_release(s_lock);
 
@@ -314,6 +323,10 @@ static int env_rt_declare(uint32_t period_us)
     if (rv9_rt_declare(period_us) != RV9_OK) return -2;
 
     hold_to_deadline(name, deadline, period_us, fatal);
+
+    /* Record the placement admission made, now there is a slot to hold
+       it; the priority was already set when the task was made. */
+    rv9_rt_set_class(rv9_task_self(), urgent, bound);
     return 0;
 }
 
@@ -330,6 +343,8 @@ static int env_rt_declare_event(int event_id, uint32_t min_interval_us)
     uint32_t deadline = 0;
     bool fatal = false;
     char name[32] = "";
+    bool urgent = true;
+    uint32_t bound = 0;
 
     rv9_lock_acquire(s_lock);
     rv9_proc_t *p = current_locked();
@@ -339,6 +354,8 @@ static int env_rt_declare_event(int event_id, uint32_t min_interval_us)
         deadline = p->deadline_us;
         fatal    = (p->on_deadline == RV9_ON_DEADLINE_FAULT);
         memcpy(name, p->name, sizeof(name));
+        urgent   = p->rt_urgent;
+        bound    = p->rt_bound_us;
     }
     rv9_lock_release(s_lock);
 
@@ -350,6 +367,7 @@ static int env_rt_declare_event(int event_id, uint32_t min_interval_us)
     if (rv9_rt_declare_event(ev, min_interval_us) != RV9_OK) return -2;
 
     hold_to_deadline(name, deadline, min_interval_us, fatal);
+    rv9_rt_set_class(rv9_task_self(), urgent, bound);
     return 0;
 }
 
@@ -1098,11 +1116,11 @@ rv9_pid_t rv9_proc_current_pid(void)
 /*
  * How much of the CPU real-time work may promise itself.
  *
- * This is not a schedulability theorem, and saying so matters. RV-9's
- * real-time tasks all run at one host priority, so the classic
- * rate-monotonic bound does not describe them. What the headroom is for
- * is everything that is not in the sum at all: WiFi, the panel, the SPI
- * driver, RV-9's own kernel and every ordinary process. Admitting
+ * This is not a schedulability theorem, and saying so matters: whether
+ * every loop meets its deadline is decided by the response-time analysis
+ * below, which a set using 8% of the CPU can fail. What this headroom is
+ * for is everything that is not in either sum at all: WiFi, the panel, the
+ * SPI driver, RV-9's own kernel and every ordinary process. Admitting
  * real-time work up to the last percent starves the system the real-time
  * work depends on.
  */
@@ -1168,6 +1186,124 @@ static void rt_load(uint32_t *out_permille, uint32_t *out_declared,
     if (out_unknown)  *out_unknown  = unknown;
 }
 
+/* ------------------------------------------------------------------ */
+/* Priority, derived                                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Which real-time task outranks which.
+ *
+ * R9 §13 asks that nobody choose these numbers: RV-9 should derive them
+ * from the periods, deadlines and execution bounds of everything admitted.
+ * Until this existed every real-time task ran at one host priority and
+ * time-sliced with the others, which was harmless while a late loop was
+ * only counted and is not now that a late loop can be stopped. A 1 kHz
+ * loop with a tight deadline, released while a slow loop was in the middle
+ * of 20 ms of work, waited for the next tick to share the CPU -- and was
+ * stopped for a deadline the scheduler had missed on its behalf.
+ *
+ * The host offers two useful priorities (see rv9_task_create_rt), so the
+ * derivation is a placement, not a ranking:
+ *
+ *   everything starts urgent. A workload whose urgent tasks all meet their
+ *   deadlines together stays there, which is every workload of one loop.
+ *
+ *   while some urgent task cannot, the least urgent of them -- the longest
+ *   deadline -- moves to routine, where the urgent ones no longer wait on
+ *   it.
+ *
+ *   then everything routine must meet its deadline too, with every urgent
+ *   task and every other routine one counted against it. Tasks sharing a
+ *   priority time-slice, so each is charged for all of its peers: the
+ *   analysis is pessimistic there on purpose.
+ *
+ * Meeting a deadline is decided by response-time analysis:
+ *
+ *     R = C + sum over tasks j that can run ahead of it of ceil(R/T_j) C_j
+ *
+ * iterated to a fixed point or until it passes the deadline. C is the
+ * declared worst-case execution, or the worst yet measured when nothing
+ * was declared -- a floor, as rt_load says. Tasks with no release bound
+ * (an event source with no minimum interval) cannot be analysed: they stay
+ * urgent, count against nobody, and are reported as unaccounted.
+ *
+ * What the analysis does not see is the host's own work. Routine tasks run
+ * under the radio, and their bounds are bounds on RV-9's workload only.
+ */
+#define RT_MAX_ANALYSED 8
+
+typedef struct {
+    rv9_proc_t *p;          /* NULL for the task being admitted */
+    uint32_t    c, t, d;
+    bool        bounded;    /* has a release interval, so can be analysed */
+    bool        urgent;
+    uint32_t    bound;
+} rt_item_t;
+
+static bool s_rt_derive = true;
+
+void rv9_proc_rt_derive(bool on) { s_rt_derive = on; }
+
+static uint32_t response_bound(const rt_item_t *items, int n, int i)
+{
+    const rt_item_t *me = &items[i];
+    uint64_t r = me->c;
+
+    for (int iter = 0; iter < 64; iter++) {
+        uint64_t next = me->c;
+        for (int j = 0; j < n; j++) {
+            const rt_item_t *o = &items[j];
+            if (j == i || !o->bounded) continue;
+            if (me->urgent && !o->urgent) continue;   /* below it: no wait */
+            uint64_t window = (r == 0) ? 1 : r;
+            next += ((window + o->t - 1) / o->t) * o->c;
+        }
+        if (next == r) break;
+        r = next;
+        if (r > me->d) break;
+    }
+    return (r > UINT32_MAX) ? UINT32_MAX : (uint32_t)r;
+}
+
+/* Every bounded task at this level meets its deadline. Fills bounds; on
+   failure leaves the first that does not in *bad. */
+static bool level_meets(rt_item_t *items, int n, bool urgent, int *bad)
+{
+    for (int i = 0; i < n; i++) {
+        if (!items[i].bounded || items[i].urgent != urgent) continue;
+        items[i].bound = response_bound(items, n, i);
+        if (items[i].bound > items[i].d) {
+            if (bad) *bad = i;
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Place every task. Returns the index of one that cannot meet its
+   deadline under any placement this makes, or -1. */
+static int place_rt(rt_item_t *items, int n)
+{
+    for (int i = 0; i < n; i++) items[i].urgent = true;
+
+    int bad = -1;
+    while (!level_meets(items, n, true, &bad)) {
+        int victim = -1, urgent_bounded = 0;
+        for (int i = 0; i < n; i++) {
+            if (!items[i].bounded || !items[i].urgent) continue;
+            urgent_bounded++;
+            if (victim < 0 || items[i].d > items[victim].d) victim = i;
+        }
+        /* One task alone that cannot meet its deadline will not meet it
+           anywhere else either. */
+        if (victim < 0 || urgent_bounded <= 1) return bad;
+        items[victim].urgent = false;
+    }
+
+    if (!level_meets(items, n, false, &bad)) return bad;
+    return -1;
+}
+
 /*
  * Decide whether the machine can honour what this program says it needs,
  * before anything is allocated on its behalf.
@@ -1185,8 +1321,12 @@ static void rt_load(uint32_t *out_permille, uint32_t *out_declared,
  */
 static rv9_proc_err_t admit_rt(const void *image, const char *name,
                                uint32_t interval_us, size_t stack,
-                               uint32_t *out_wcet, uint32_t *out_deadline)
+                               uint32_t *out_wcet, uint32_t *out_deadline,
+                               bool *out_urgent, uint32_t *out_bound)
 {
+    if (out_urgent) *out_urgent = true;
+    if (out_bound)  *out_bound  = 0;
+
     if (rv9_rt_slots_used() >= rv9_rt_slot_count()) {
         ESP_LOGE(TAG, "admit '%s': all %d real-time slots are taken",
                  name, rv9_rt_slot_count());
@@ -1260,6 +1400,90 @@ static rv9_proc_err_t admit_rt(const void *image, const char *name,
                       "%lu measured, %lu unaccounted",
                  (unsigned long)(used + mine), (unsigned long)declared,
                  (unsigned long)measured, (unsigned long)unknown);
+    }
+
+    /*
+     * Where it goes, and whether everything already admitted still meets
+     * its deadlines with it there. Moving tasks that are already running
+     * is part of admitting this one: the placement is of the whole set.
+     */
+    if (s_rt_derive && interval_us != 0) {
+        rt_item_t items[RT_MAX_ANALYSED];
+        int n = 0;
+
+        rv9_lock_acquire(s_lock);
+        for (rv9_proc_t *q = s_procs; q && n < RT_MAX_ANALYSED - 1; q = q->next) {
+            if (q->state == RV9_PROC_EXITED || q->cls != RV9_CLASS_REALTIME) {
+                continue;
+            }
+            rt_item_t *it = &items[n++];
+            memset(it, 0, sizeof(*it));
+            it->p       = q;
+            it->t       = q->period_us;
+            it->bounded = (it->t != 0);
+            it->d       = (q->deadline_us != 0 && q->deadline_us < it->t)
+                          ? q->deadline_us : it->t;
+            it->c       = q->wcet_us;
+            if (it->c == 0 && q->task != NULL) {
+                rv9_rt_stats_t st;
+                if (rv9_rt_stats_for(q->task, &st) == RV9_OK) {
+                    it->c = st.max_exec_us;
+                }
+            }
+        }
+
+        rt_item_t *me = &items[n++];
+        memset(me, 0, sizeof(*me));
+        me->t       = interval_us;
+        me->bounded = true;
+        me->d       = (has_deadline && deadline < interval_us) ? deadline
+                                                               : interval_us;
+        me->c       = has_wcet ? wcet : 0;
+
+        int bad = place_rt(items, n);
+        if (bad >= 0) {
+            const rt_item_t *b = &items[bad];
+            char who[48];
+            if (b->p == NULL) {
+                snprintf(who, sizeof(who), "it");
+            } else {
+                snprintf(who, sizeof(who), "pid %u ('%s')",
+                         (unsigned)b->p->pid, b->p->name);
+            }
+            rv9_lock_release(s_lock);
+
+            ESP_LOGE(TAG, "admit '%s': with it admitted, %s would answer in "
+                          "%lu us against a %lu us deadline, however the "
+                          "real-time work is placed", name, who,
+                     (unsigned long)b->bound, (unsigned long)b->d);
+            return RV9_PROC_ERR_UNSCHEDULABLE;
+        }
+
+        for (int i = 0; i < n - 1; i++) {
+            rt_item_t *it = &items[i];
+            bool moved = (it->p->rt_urgent != it->urgent);
+            if (!moved && it->p->rt_bound_us == it->bound) continue;
+
+            it->p->rt_urgent   = it->urgent;
+            it->p->rt_bound_us = it->bound;
+            if (it->p->task != NULL) {
+                rv9_rt_set_class(it->p->task, it->urgent, it->bound);
+            }
+            if (moved) {
+                ESP_LOGI(TAG, "pid %u ('%s') now runs %s, bound %lu us",
+                         (unsigned)it->p->pid, it->p->name,
+                         it->urgent ? "urgent" : "routine",
+                         (unsigned long)it->bound);
+            }
+        }
+
+        if (out_urgent) *out_urgent = me->urgent;
+        if (out_bound)  *out_bound  = me->bound;
+        rv9_lock_release(s_lock);
+
+        ESP_LOGI(TAG, "admit '%s': %s, response bound %lu us against %lu",
+                 name, me->urgent ? "urgent" : "routine",
+                 (unsigned long)me->bound, (unsigned long)me->d);
     }
 
     ESP_LOGI(TAG, "admit '%s': %lu us interval, %lu permille, %lu of %d "
@@ -1396,6 +1620,8 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
 
     uint32_t wcet_us = 0, deadline_us = 0;
     uint8_t on_deadline = RV9_ON_DEADLINE_REPORT;
+    bool rt_urgent = true;
+    uint32_t rt_bound = 0;
     if (cls == RV9_CLASS_REALTIME) {
         /*
          * What a miss means, read once here and not trusted beyond what is
@@ -1421,7 +1647,8 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
         }
 
         rv9_proc_err_t adm = admit_rt(mod->image, module_name, interval,
-                                      stack, &wcet_us, &deadline_us);
+                                      stack, &wcet_us, &deadline_us,
+                                      &rt_urgent, &rt_bound);
         if (adm != RV9_PROC_OK) {
             undo_fork(pid);
             rv9_mod_unlink(mod);
@@ -1463,6 +1690,8 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
     p->wcet_us            = wcet_us;
     p->deadline_us        = deadline_us;
     p->on_deadline        = on_deadline;
+    p->rt_urgent          = (cls == RV9_CLASS_REALTIME) ? rt_urgent : false;
+    p->rt_bound_us        = rt_bound;
     p->stack_bytes        = (uint32_t)stack;
     p->refs               = 1;      /* the task's, dropped at the end of finish() */
     strncpy(p->name, module_name, sizeof(p->name) - 1);
@@ -1480,7 +1709,8 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
        above everything, because its latency must not depend on anyone
        else's manners. See rv9/kal.h. */
     rv9_err_t err = (cls == RV9_CLASS_REALTIME)
-        ? rv9_task_create_rt(proc_trampoline, p->name, stack, p, &p->task)
+        ? rv9_task_create_rt(proc_trampoline, p->name, stack, p, p->rt_urgent,
+                             &p->task)
         : rv9_task_create(proc_trampoline, p->name, stack, p, priority,
                           &p->task);
     if (err != RV9_OK) {
@@ -1721,6 +1951,8 @@ bool rv9_proc_info(rv9_pid_t pid, rv9_proc_info_t *out)
         out->exit_status = p->exit_status;
         out->fault       = p->fault;
         out->waited      = p->waited;
+        out->rt_urgent   = p->rt_urgent;
+        out->rt_bound_us = p->rt_bound_us;
     }
     rv9_lock_release(s_lock);
     return p != NULL;

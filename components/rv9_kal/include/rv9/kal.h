@@ -388,11 +388,38 @@ typedef struct {
     uint64_t deadline_misses;
     uint32_t max_response_us;
     uint32_t last_response_us;
+
+    bool     urgent;          /* which of the two priorities it runs at */
+    uint32_t bound_us;        /* admission's response bound, 0 if none */
 } rv9_rt_stats_t;
 
+/*
+ * Real-time tasks run at one of two host priorities.
+ *
+ * Urgent is above everything the host runs, the radio included. Routine is
+ * above RV-9's own kernel -- every ordinary process -- and below the radio
+ * and the host's timer task. There are two and not one per task because
+ * only one host priority is above the radio on this platform: a scale of
+ * urgency finer than that would put all but the top of it underneath WiFi
+ * anyway, and saying so is better than pretending.
+ *
+ * Which of the two a task gets is decided above the KAL, from the admitted
+ * workload -- see rv9_rt_set_class. `urgent` is where it starts.
+ */
 rv9_err_t rv9_task_create_rt(rv9_task_fn fn, const char *name,
-                             size_t stack_bytes, void *arg,
+                             size_t stack_bytes, void *arg, bool urgent,
                              rv9_task_t *out_task);
+
+/*
+ * Move a real-time task between the two priorities, and record what
+ * admission worked out about it: `bound_us` is its response-time bound, 0
+ * when none could be computed. The task may be running, or created and not
+ * yet declared. A task the watchdog has flagged is not moved -- it has been
+ * lowered on purpose and is about to be stopped.
+ *
+ * The caller must know the task still exists.
+ */
+void rv9_rt_set_class(rv9_task_t task, bool urgent, uint32_t bound_us);
 
 /* Called by the task itself, once, before its loop. */
 rv9_err_t rv9_rt_declare(uint32_t period_us);

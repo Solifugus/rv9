@@ -132,8 +132,24 @@ typedef struct {
     volatile uint32_t  samples;     /* watchdog ticks that found it running */
     volatile int       flagged;     /* 0, or the RV9_RT_* it must not pass */
 
+    /* Recorded for reporting; decided by admission. */
+    bool               urgent;
+    uint32_t           bound_us;
+
     bool               in_use;
 } rt_task_t;
+
+/*
+ * The two host priorities real-time work runs at. See rv9_task_create_rt.
+ *
+ * Read off the board rather than assumed (report_host_priorities): the
+ * radio is at 23 and the host's timer task at 22, so urgent is the one
+ * level above them both. Routine is 21: under those two, over the host's
+ * event task at 20 and over RV-9's kernel, which is at 19 so that it can
+ * be.
+ */
+#define RT_PRIO_URGENT   (configMAX_PRIORITIES - 1)
+#define RT_PRIO_ROUTINE  (configMAX_PRIORITIES - 4)
 
 static rt_task_t s_rt[MAX_RT_TASKS];
 
@@ -551,6 +567,32 @@ static void watch_task(void *arg)
     }
 }
 
+/*
+ * What the host runs around real-time work, read rather than assumed.
+ *
+ * Where a real-time task can sit relative to the radio decides what it can
+ * be promised, and the radio's priority is set inside a binary library, not
+ * in anything this build can read. So it is asked, once, when the first
+ * real-time task exists -- by which time every one of these has started.
+ */
+static void report_host_priorities(void)
+{
+    static const char *const names[] = {
+        "wifi", "esp_timer", "sys_evt", "tiT", "rv9-kernel", "rv9-rtwatch",
+        "IDLE",
+    };
+
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        TaskHandle_t h = xTaskGetHandle(names[i]);
+        if (h != NULL) {
+            ESP_LOGI(TAG, "host task %-12s priority %u", names[i],
+                     (unsigned)uxTaskPriorityGet(h));
+        } else {
+            ESP_LOGI(TAG, "host task %-12s not running", names[i]);
+        }
+    }
+}
+
 /* Once, at the first declaration: nothing to watch before that. */
 static void watch_start(void)
 {
@@ -582,6 +624,8 @@ static void watch_start(void)
 
     ESP_LOGI(TAG, "watchdog every %d us: runaway after %d ms", WATCH_US,
              RV9_RT_RUNAWAY_MS);
+
+    report_host_priorities();
 }
 
 rv9_err_t rv9_rt_seize(rv9_task_t task, const void *code, size_t len,
@@ -998,6 +1042,28 @@ void rv9_rt_release(void)
     if (rt != NULL) release_slot(rt);
 }
 
+void rv9_rt_set_class(rv9_task_t task, bool urgent, uint32_t bound_us)
+{
+    TaskHandle_t t = (TaskHandle_t)task;
+    if (t == NULL) return;
+
+    /* The record under the scheduler hold, so it cannot race the slot being
+       given back; the priority outside it, because a task may be moving
+       itself, and a task lowering itself yields. */
+    vTaskSuspendAll();
+    rt_task_t *rt = slot_for(t);
+    bool flagged = (rt != NULL && rt->flagged != 0);
+    if (rt != NULL) {
+        rt->urgent   = urgent;
+        rt->bound_us = bound_us;
+    }
+    xTaskResumeAll();
+
+    if (!flagged) {
+        vTaskPrioritySet(t, urgent ? RT_PRIO_URGENT : RT_PRIO_ROUTINE);
+    }
+}
+
 void rv9_rt_release_task(rv9_task_t task)
 {
     rt_task_t *rt = (task != NULL) ? slot_for((TaskHandle_t)task) : NULL;
@@ -1021,6 +1087,8 @@ static void fill_stats(const rt_task_t *rt, rv9_rt_stats_t *out)
     out->deadline_misses  = rt->deadline_misses;
     out->max_response_us  = rt->max_response_us;
     out->last_response_us = rt->last_response_us;
+    out->urgent           = rt->urgent;
+    out->bound_us         = rt->bound_us;
 }
 
 rv9_err_t rv9_rt_stats(rv9_rt_stats_t *out)
@@ -1066,7 +1134,7 @@ rv9_err_t rv9_rt_stats_by_index(int index, rv9_rt_stats_t *out, bool *valid)
 }
 
 rv9_err_t rv9_task_create_rt(rv9_task_fn fn, const char *name,
-                             size_t stack_bytes, void *arg,
+                             size_t stack_bytes, void *arg, bool urgent,
                              rv9_task_t *out_task)
 {
     if (fn == NULL) return RV9_ERR_INVAL;
@@ -1075,13 +1143,14 @@ rv9_err_t rv9_task_create_rt(rv9_task_fn fn, const char *name,
     TaskHandle_t h = NULL;
 
     /*
-     * Above everything: above ordinary RV-9 processes, above the task
-     * RV-9's kernel runs in, above the drivers. The whole point of a
-     * real-time class is that nothing in the system outranks it.
+     * Above ordinary RV-9 processes and the task RV-9's kernel runs in,
+     * always. Above the radio too, when urgent: the whole point of a
+     * real-time class is that nothing irrelevant to it outranks it, and
+     * admission decides which of its tasks the radio is irrelevant to.
      */
     if (xTaskCreate((TaskFunction_t)fn, name ? name : "rv9-rt",
                     (uint32_t)stack_bytes, arg,
-                    configMAX_PRIORITIES - 1, &h) != pdPASS) {
+                    urgent ? RT_PRIO_URGENT : RT_PRIO_ROUTINE, &h) != pdPASS) {
         return RV9_ERR_NOMEM;
     }
 

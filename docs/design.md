@@ -3900,6 +3900,166 @@ and `stacks` is where to look.
 **One login in one test run showed no prompt** and the next two did. It did
 not recur in any later run; it is recorded rather than explained.
 
+## 33. Which loop goes first
+
+§29 made a missed deadline able to stop a loop. That made an old
+simplification dangerous: every real-time task ran at one host priority,
+and tasks sharing a priority take turns a scheduler tick at a time. So a
+loop that was late because another loop was using the CPU was stopped as
+though the lateness were its own.
+
+R9 §13 had already said what should decide it: *RV-9 should derive
+scheduling priority from the complete admitted workload and its periods,
+deadlines, minimum intervals, and execution bounds. A faster period alone
+is not always enough.* This does that.
+
+### The false fault, reproduced
+
+`fastloop` has 500 µs to answer each 5 ms release, and declares a miss
+fatal. `heavyloop` spends 20 ms of every 100 working. Neither is wrong on
+its own. Together, at one priority:
+
+```
+E rv9-proc: pid 5 ('fastloop') missed its 500 us deadline: answered in 1072,
+            0 releases skipped; stopped and not released again
+```
+
+Released in the middle of the heavy loop's work, it waited for the next
+tick to get the CPU. On a machine that moves, that is actuators parked
+because of a scheduling decision nobody made on purpose.
+
+### Two priorities, because that is what there is
+
+The first thing was to find out how many priorities there are to give.
+The radio's priority is set inside a binary library, so the board was
+asked:
+
+```
+I rv9-rt: host task wifi         priority 23
+I rv9-rt: host task esp_timer    priority 22
+I rv9-rt: host task sys_evt      priority 20
+I rv9-rt: host task rv9-kernel   priority 22
+I rv9-rt: host task rv9-rtwatch  priority 24
+```
+
+Exactly one host priority is above the radio. A ranking of real-time tasks
+finer than that would put all but the top of it underneath WiFi anyway,
+which is not a ranking worth pretending to have. So there are two:
+
+- **urgent**, 24: above everything the host runs;
+- **routine**, 21: above RV-9's kernel and every ordinary process, below the
+  radio and the host's timer task.
+
+RV-9's kernel host task had been at 22, above where routine now sits; a
+shell that outranks a control loop is not a real-time system. It moved to
+19 — still above the network stack, now below the host's event task,
+whose callbacks are short. Measured afterwards over SSH, with the heavy
+loop using a fifth of the CPU: every shell command answered in under a
+tenth of a second.
+
+### Placement, from response-time analysis
+
+Admission now places the whole real-time workload, not only the task
+being admitted:
+
+1. everything starts urgent. A set whose urgent tasks all meet their
+   deadlines together stays there — every workload of one loop does;
+2. while some urgent task cannot, the least urgent (the longest deadline)
+   moves to routine, where the urgent tasks no longer wait for it;
+3. then every routine task must meet its deadline too, charged for all the
+   urgent tasks and all its routine peers.
+
+"Meets its deadline" is response-time analysis: R = C + Σ ⌈R/Tⱼ⌉·Cⱼ over the
+tasks that can run ahead of it, iterated until it stops moving or passes
+the deadline. C is the declared worst-case execution, or the worst measured
+when nothing was declared — a floor, as the load report has always said.
+Tasks sharing a priority are each charged for all of the others, because
+that is what time slicing does to them. A task with no release bound (an
+event source with no minimum interval) cannot be analysed: it stays urgent
+and is counted as unaccounted, as before.
+
+If a running loop's placement changes, it is moved while it runs:
+
+```
+I rv9-proc: admit 'heavyloop': urgent, response bound 25000 us against 100000
+I rv9-proc: pid 2 ('heavyloop') now runs routine, bound 26200 us
+I rv9-proc: admit 'fastloop': urgent, response bound 200 us against 500
+fastloop: 400 on time, worst jitter 14 us
+```
+
+A task the watchdog has flagged is not moved: it was lowered on purpose
+and is about to be stopped (§30).
+
+### A refusal utilisation could not make
+
+If no placement meets every deadline, the fork is refused with
+`RV9_PE_UNSCHEDULABLE`, naming who would be late. The 70% ceiling is still
+there, for the host's work that is in neither sum, but it no longer stands
+in for a schedulability test, which it never was:
+
+```
+E rv9-proc: admit 'st-rt-tight': with it admitted, pid 6 ('fastloop') would
+            answer in 550 us against a 500 us deadline, however the
+            real-time work is placed
+I rv9-proc: admit 'st-rt-fits': routine, response bound 550 us against 2000
+```
+
+Both of those use 3.5% of the CPU. One has a 400 µs deadline beside a loop
+with 500, and whichever goes first makes the other wait 350 or 200 µs too
+long. The other has 2 ms and fits underneath, with a bound computed exactly
+as by hand.
+
+### Seen from the shell
+
+`rt` with no arguments now lists each loop with its placement, the bound
+admission worked out, and what it has actually done:
+
+```
+rv9> rt
+real-time promised  29.0% of 70.0%
+slots               2 of 4
+
+slot  period  deadline  runs     bound  worst  misses
+0     100000  100000    routine  26200  20015  0
+1     5000    500       urgent   200    117    0
+```
+
+The bound and the worst side by side is the point: a declaration that
+measurement keeps approaching is a declaration to look at.
+
+### Tested
+
+`sched-test`, 11 checks. The pair with priority derived: the heavy loop is
+moved below the fast one when the fast one is admitted, and the fast loop
+meets every deadline. The same pair with the derivation switched off, as a
+control: the fast loop is stopped with `DEADLINE`. Without the control the
+first result would prove nothing. Then admission, with modules built in
+memory: the tight candidate refused, the loose one admitted at routine with
+a bound of 550 µs, and the running fast loop undisturbed.
+
+### What this does not do
+
+**Routine bounds exclude the host.** The radio and the timer task run above
+routine work and declare nothing, so a routine loop's bound is a bound on
+RV-9's workload only. Deadlines long enough to be placed routine are
+normally long enough not to notice; nothing proves it.
+
+**Blocking is not in the analysis.** A loop waiting on a lock held by a
+lower-priority task is covered by the lock's priority inheritance, not by
+the arithmetic.
+
+**Placement is revised on admission, not on exit.** A loop moved to routine
+stays there after the loop that caused it has gone. That is always safe —
+nothing becomes less schedulable — but not always as good as it could be.
+
+**Admission is not atomic across simultaneous forks.** Two real-time
+programs admitted at the same instant are each checked against the other's
+absence, as the utilisation check always was.
+
+**The explicit `priority` escape hatch in R9 §13 is not implemented.** With
+two levels, it could only mean "urgent" or "routine", and whether that is
+worth offering is a question for the language.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

@@ -20,6 +20,7 @@
 #include "pub_test.h"
 #include "fault_test.h"
 #include "proc_test.h"
+#include "sched_test.h"
 #include "conformance.h"
 
 #define RV9_RUN_KERNEL_TEST 1
@@ -375,7 +376,7 @@ static uint32_t inversion_round(bool inherit)
     for (int i = 0; i < 200 && !s_inv_go; i++) rv9_task_delay_ms(5);
 
     rv9_task_create(inv_medium, "inv-med", 8192, NULL, RV9_PRIO_HIGH, NULL);
-    rv9_task_create_rt(inv_urgent, "inv-urgent", 4096, NULL, NULL);
+    rv9_task_create_rt(inv_urgent, "inv-urgent", 4096, NULL, true, NULL);
 
     for (int i = 0; i < 200 && s_inv_wait_ms == 0; i++) rv9_task_delay_ms(5);
 
@@ -772,6 +773,9 @@ static void rv9_init_task(void *arg)
     /* Last of the tests, because it forks the most: what it checks is
        that forking a lot leaves the machine as it found it. */
     rv9_proc_selftest();
+
+    /* Real-time scheduling: several loops at once, each for seconds. */
+    rv9_sched_selftest();
 
     run_module("hello");
 

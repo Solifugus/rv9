@@ -727,6 +727,8 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
             out[n].deadline_misses = (uint32_t)st.deadline_misses;
             out[n].max_response_us = st.max_response_us;
             out[n].floods          = (uint32_t)st.floods;
+            out[n].bound_us        = st.bound_us;
+            out[n].urgent          = st.urgent ? 1 : 0;
             n++;
         }
         return (int)n;

@@ -172,6 +172,9 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         } else if (pid == -RV9_PE_NOPUB) {
             m_say(env, RV9_STDOUT, ": it watches a publication nothing on "
                                    "this machine provides (see the log)\n");
+        } else if (pid == -RV9_PE_UNSCHEDULABLE) {
+            m_say(env, RV9_STDOUT, ": with it running, some real-time loop "
+                                   "would miss its deadline (see the log)\n");
         } else if (pid == -RV9_PE_CONTRACT) {
             /* Reachable by an ordinary fork now, not only by 'rt': a
                failsafe naming a device the program never claimed is a

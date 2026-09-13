@@ -530,6 +530,11 @@ typedef struct {
    refusal like NODEV, and next to it for the same reason. */
 #define RV9_PE_NOPUB        15
 
+/* The CPU is not over-promised, but no placement of the real-time work lets
+   every loop meet its deadline with this one added: response-time
+   analysis, not utilisation. */
+#define RV9_PE_UNSCHEDULABLE 16
+
 /*
  * Why a process stopped, as the process table reports it.
  *
@@ -944,6 +949,17 @@ typedef struct __attribute__((packed)) {
     uint32_t deadline_misses;
     uint32_t max_response_us;
     uint32_t floods;           /* events closer together than declared */
+
+    /*
+     * Where admission placed it (docs/design.md §33). `urgent` is above the
+     * radio; routine is above every ordinary process and below the radio.
+     * `bound_us` is its worst response according to response-time analysis
+     * of the declared workload -- 0 when it could not be computed -- and
+     * does not include the host's own tasks, which declare nothing.
+     */
+    uint32_t bound_us;
+    uint8_t  urgent;
+    uint8_t  rt_pad[3];
 } rv9_sys_rt_t;
 
 /*

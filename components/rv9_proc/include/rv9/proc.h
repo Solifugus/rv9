@@ -99,6 +99,11 @@ typedef struct rv9_proc {
     uint32_t          deadline_us;
     uint8_t           on_deadline;      /* RV9_ON_DEADLINE_* */
 
+    /* Where admission placed it among real-time work, and the response
+       bound that placement gives it (0: none computed). */
+    bool              rt_urgent;
+    uint32_t          rt_bound_us;
+
     /* What its stack was actually created with. The KAL can measure how
        much of a stack is unused but cannot always say how big it was --
        a real-time process is a host task, and FreeRTOS keeps only the
@@ -204,6 +209,9 @@ typedef enum {
 
     /* Admission, again: it watches a publication nothing here provides. */
     RV9_PROC_ERR_NOPUB,
+
+    /* Admission: no placement of the real-time work meets every deadline. */
+    RV9_PROC_ERR_UNSCHEDULABLE,
 } rv9_proc_err_t;
 
 const char *rv9_proc_strerror(rv9_proc_err_t err);
@@ -281,7 +289,18 @@ typedef struct {
     int              exit_status;
     int              fault;          /* RV9_FAULT_* */
     bool             waited;         /* its status has been collected */
+    bool             rt_urgent;      /* real-time only: placed above the radio */
+    uint32_t         rt_bound_us;    /* real-time only: analysed response bound */
 } rv9_proc_info_t;
+
+/*
+ * Derive real-time priority from the admitted workload (the default), or
+ * run every real-time task at the top priority and admit on utilisation
+ * alone, as RV-9 did before. Off exists for one thing: showing what the
+ * derivation prevents, the way aging can be switched off to show
+ * starvation.
+ */
+void rv9_proc_rt_derive(bool on);
 
 bool rv9_proc_info(rv9_pid_t pid, rv9_proc_info_t *out);
 

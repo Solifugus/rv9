@@ -57,6 +57,34 @@ static void report(const rv9_mod_env_t *env)
               "\nthat total is a floor: some work has not said what it "
               "costs\n");
     }
+
+    /*
+     * Each loop: where it was placed, what the analysis promises, and what
+     * it has actually done. The last two side by side are the point -- a
+     * bound that measurement keeps approaching is a declaration to look at.
+     */
+    rv9_sys_rt_t recs[4];
+    int n = env->sysinfo(RV9_SYS_RT, recs, sizeof(recs));
+    if (n <= 0) return;
+    if (n > 4) n = 4;
+
+    m_say(env, RV9_STDOUT,
+          "\nslot  period  deadline  runs     bound  worst  misses\n");
+    for (int i = 0; i < n; i++) {
+        const rv9_sys_rt_t *r = &recs[i];
+        m_numpad(env, RV9_STDOUT, r->index, 6);
+        m_numpad(env, RV9_STDOUT, (int32_t)r->period_us, 8);
+        m_numpad(env, RV9_STDOUT, (int32_t)r->deadline_us, 10);
+        m_pad(env, RV9_STDOUT, r->urgent ? "urgent" : "routine", 9);
+        if (r->bound_us) {
+            m_numpad(env, RV9_STDOUT, (int32_t)r->bound_us, 7);
+        } else {
+            m_pad(env, RV9_STDOUT, "-", 7);
+        }
+        m_numpad(env, RV9_STDOUT, (int32_t)r->max_response_us, 7);
+        m_num(env, RV9_STDOUT, (int32_t)r->deadline_misses);
+        m_say(env, RV9_STDOUT, "\n");
+    }
 }
 
 /* Why the machine said no. Each of these is actionable, which is why
@@ -85,6 +113,12 @@ static void refusal(const rv9_mod_env_t *env, const char *name, int pid)
     } else if (pid == -RV9_PE_NOPUB) {
         m_say(env, RV9_STDOUT, ": it watches a publication nothing on this "
                                "machine provides\n");
+    } else if (pid == -RV9_PE_UNSCHEDULABLE) {
+        /* Not the utilisation refusal: the CPU has room, the deadlines do
+           not. The log names which loop would be late, and by how much. */
+        m_say(env, RV9_STDOUT, ": with it running, some loop would miss its "
+                               "deadline (see the log)\n");
+        report(env);
     } else {
         m_say(env, RV9_STDOUT, ": cannot start as real-time\n");
     }

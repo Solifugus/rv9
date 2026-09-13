@@ -179,10 +179,18 @@ rv9_err_t rv9_kal_start(rv9_task_fn fn, const char *name, size_t stack_bytes,
     /*
      * The kernel needs a stack to run its scheduler on and a CPU to be
      * scheduled onto. Its host task takes a high priority so RV-9's
-     * threads are not starved by the host's own work.
+     * threads are not starved by the host's own work -- above the network
+     * stack, which is what they mostly wait on.
+     *
+     * But not above real-time work of either kind. It was at 22 and every
+     * real-time task at 24, which was fine while there was one real-time
+     * priority. Routine real-time work is now at 21, and a kernel above it
+     * would let the shell outrank a control loop. So it is at 19: over the
+     * network stack at 18, under the host's event task at 20, whose
+     * callbacks are short and are not RV-9's to delay.
      */
     if (xTaskCreate(kernel_host_task, "rv9-kernel", 8192, NULL,
-                    configMAX_PRIORITIES - 3, NULL) != pdPASS) {
+                    configMAX_PRIORITIES - 6, NULL) != pdPASS) {
         return RV9_ERR_NOMEM;
     }
 
