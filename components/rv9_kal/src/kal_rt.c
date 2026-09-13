@@ -53,6 +53,8 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include "riscv/rvruntime-frames.h"
+
 static const char *TAG = "rv9-rt";
 
 #define MAX_RT_TASKS 4
@@ -117,6 +119,18 @@ typedef struct {
 
     /* Set by rv9_rt_stop from another task; read here between activations. */
     volatile bool      stop;
+
+    /*
+     * What the watchdog looks at.
+     *
+     * `active` is true from a release until the task comes back to wait,
+     * and is false whenever released_at_us is being rewritten -- a 64-bit
+     * store is two on this CPU, and an interrupt reading between them would
+     * see a release from somewhere else in time.
+     */
+    volatile bool      active;
+    volatile uint32_t  samples;     /* watchdog ticks that found it running */
+    volatile int       flagged;     /* 0, or the RV9_RT_* it must not pass */
 
     bool               in_use;
 } rt_task_t;
@@ -421,10 +435,204 @@ static void IRAM_ATTR release_isr(void *arg)
     if (woken) portYIELD_FROM_ISR();
 }
 
+/* ------------------------------------------------------------------ */
+/* The watchdog                                                        */
+/*                                                                     */
+/* Everything else here acts when a task comes to wait. This is for the */
+/* task that does not come.                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Every 2 ms. The resolution a deadline is enforced to while a task is
+ * still running, and a sample rate for deciding whether it is running at
+ * all. Four slots and a comparison each; the cost is the interrupt.
+ */
+#define WATCH_US   2000
+
+static esp_timer_handle_t s_watch_timer;
+static SemaphoreHandle_t  s_watch_wake;
+static TaskHandle_t       s_watch_task;
+static rv9_rt_overrun_fn  s_overrun;
+static volatile int       s_watch_started;
+
+void rv9_rt_set_overrun_handler(rv9_rt_overrun_fn fn) { s_overrun = fn; }
+
+/*
+ * The running task, read directly rather than asked for.
+ *
+ * xTaskGetCurrentTaskHandle is linked into flash, and this is read from an
+ * interrupt that runs while the flash cache is off -- the first boot with
+ * the watchdog in it panicked with a cache error the moment WiFi wrote its
+ * calibration to NVS during a test. Every other call in watch_isr was
+ * checked against the linked image and is resident; this is the one that
+ * was not. The variable is what the port's own interrupt entry reads, and
+ * it is in RAM. Single core, so element zero.
+ */
+extern TaskHandle_t volatile pxCurrentTCBs[];
+
+/*
+ * Resident: see release_isr. It decides and flags, nothing more -- stopping
+ * a task means clearing up after it, and none of that belongs in an
+ * interrupt.
+ */
+static void IRAM_ATTR watch_isr(void *arg)
+{
+    (void)arg;
+
+    /* The task this interrupt interrupted. Single core, so there is one. */
+    TaskHandle_t cur = pxCurrentTCBs[0];
+    uint64_t now = rv9_time_us();
+    bool wake = false;
+
+    for (int i = 0; i < MAX_RT_TASKS; i++) {
+        rt_task_t *rt = &s_rt[i];
+        if (!rt->in_use || !rt->active || rt->flagged) continue;
+
+        if (rt->task == cur) rt->samples++;
+
+        uint64_t ran = (now > rt->released_at_us)
+                       ? now - rt->released_at_us : 0;
+
+        /*
+         * A deadline that has passed with the work unfinished is a miss
+         * now, not when the work eventually finishes -- which, for a loop
+         * that has stopped, is never.
+         */
+        if (rt->fault_on_miss && rt->deadline_us != 0 &&
+            rt->activations > 0 && ran + rt->late_us > rt->deadline_us) {
+            rt->flagged = RV9_RT_DEADLINE;
+        }
+        /*
+         * Runaway: in one activation for longer than the limit, and on the
+         * CPU for at least half of it. The second half of the test is what
+         * tells a loop spinning from one blocked in a slow write.
+         */
+        else if (ran > (uint64_t)RV9_RT_RUNAWAY_MS * 1000u &&
+                 (uint64_t)rt->samples * WATCH_US * 2u >= ran) {
+            rt->flagged = RV9_RT_RUNAWAY;
+        }
+
+        if (rt->flagged) wake = true;
+    }
+
+    if (wake) {
+        BaseType_t woken = pdFALSE;
+        xSemaphoreGiveFromISR(s_watch_wake, &woken);
+        if (woken) portYIELD_FROM_ISR();
+    }
+}
+
+/*
+ * At the real-time priority, so that a runaway at that priority shares
+ * the CPU with it -- time slicing hands it a tick -- rather than starving
+ * it. Anything lower would be waiting for the very task it exists to stop.
+ */
+static void watch_task(void *arg)
+{
+    (void)arg;
+    bool again = false;
+
+    for (;;) {
+        xSemaphoreTake(s_watch_wake, again ? 1 : portMAX_DELAY);
+        again = false;
+
+        for (int i = 0; i < MAX_RT_TASKS; i++) {
+            rt_task_t *rt = &s_rt[i];
+            int why = rt->flagged;
+            TaskHandle_t t = rt->task;
+            if (!rt->in_use || why == 0 || t == NULL) continue;
+
+            /* With nobody to hand it to, the flag still ends the task if it
+               ever waits. Asking again every tick would change nothing. */
+            if (s_overrun != NULL && !s_overrun((rv9_task_t)t, why)) {
+                again = true;
+            }
+        }
+    }
+}
+
+/* Once, at the first declaration: nothing to watch before that. */
+static void watch_start(void)
+{
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&s_watch_started, &expected, 1, false,
+                                     __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+        return;
+    }
+
+    s_watch_wake = xSemaphoreCreateBinary();
+    if (s_watch_wake == NULL ||
+        xTaskCreate(watch_task, "rv9-rtwatch", 6144, NULL,
+                    configMAX_PRIORITIES - 1, &s_watch_task) != pdPASS) {
+        ESP_LOGE(TAG, "no watchdog: a real-time task that stops waiting "
+                      "will not be stopped");
+        return;
+    }
+
+    const esp_timer_create_args_t args = {
+        .callback        = watch_isr,
+        .dispatch_method = ESP_TIMER_ISR,
+        .name            = "rv9-rtwatch",
+    };
+    if (esp_timer_create(&args, &s_watch_timer) != ESP_OK ||
+        esp_timer_start_periodic(s_watch_timer, WATCH_US) != ESP_OK) {
+        ESP_LOGE(TAG, "no watchdog timer");
+        return;
+    }
+
+    ESP_LOGI(TAG, "watchdog every %d us: runaway after %d ms", WATCH_US,
+             RV9_RT_RUNAWAY_MS);
+}
+
+rv9_err_t rv9_rt_seize(rv9_task_t task, const void *code, size_t len,
+                       bool lower)
+{
+    TaskHandle_t t = (TaskHandle_t)task;
+    if (t == NULL || t == xTaskGetCurrentTaskHandle()) return RV9_ERR_INVAL;
+
+    rv9_err_t err;
+
+    /*
+     * With the scheduler held the task cannot run, and it is not running
+     * now -- this is -- so its context is saved and stays saved while it is
+     * read. On this port every switch, voluntary or not, goes through the
+     * interrupt entry, which leaves a full frame at pxTopOfStack (the first
+     * word of the TCB) with the program counter first.
+     */
+    vTaskSuspendAll();
+
+    rt_task_t *rt = slot_for(t);
+    if (rt == NULL) {
+        err = RV9_ERR_INVAL;
+    } else {
+        const RvExcFrame *frame = *(RvExcFrame **)t;
+        uintptr_t pc = (uintptr_t)frame->mepc;
+        uintptr_t lo = (uintptr_t)code;
+
+        if (code != NULL && pc >= lo && pc < lo + len) {
+            /* In its own code, so not blocked -- a module has no way to
+               block except by calling out -- and holding nothing. */
+            vTaskSuspend(t);
+            rt->active = false;
+            err = RV9_OK;
+        } else {
+            /* Lowering is not suspending: it leaves the task able to finish
+               what it is in and let go, and lets everything else run. */
+            if (lower) vTaskPrioritySet(t, tskIDLE_PRIORITY + 1);
+            err = RV9_ERR_BUSY;
+        }
+    }
+
+    xTaskResumeAll();
+    return err;
+}
+
 /* A slot belongs to a task, not to a release source: the accounting is the
    same either way, and only the thing that wakes it differs. */
 static rt_task_t *claim_slot(TaskHandle_t self)
 {
+    watch_start();
+
     if (slot_for(self) != NULL) return NULL;            /* already declared */
 
     for (int i = 0; i < MAX_RT_TASKS; i++) {
@@ -459,6 +667,7 @@ rv9_err_t rv9_rt_declare_event(rv9_event_t ev, uint32_t min_interval_us)
      */
     rt->released_at_us = rv9_time_us();
     rt->in_use = true;
+    rt->active = true;       /* initialisation is watched for running away */
 
     ESP_LOGI(TAG, "real-time task declared: event %d, min interval %lu us",
              rv9_event_id(ev), (unsigned long)min_interval_us);
@@ -507,6 +716,7 @@ rv9_err_t rv9_rt_declare(uint32_t period_us)
 
     rt->released_at_us = t0;
     rt->due_us         = t0 + period_us;
+    rt->active         = true;   /* initialisation is watched for running away */
 
     ESP_LOGI(TAG, "real-time task declared: %lu us period (%lu Hz)",
              (unsigned long)period_us,
@@ -602,6 +812,9 @@ static RV9_RT_CODE int rt_wait_event(rt_task_t *rt)
      */
     int coalesced = (pending > 1) ? (int)(pending - 1) : 0;
     rt->overruns += (uint64_t)coalesced;
+
+    rt->samples = 0;
+    rt->active  = true;
     return coalesced;
 }
 
@@ -609,6 +822,9 @@ RV9_RT_CODE int rv9_rt_wait(void)
 {
     rt_task_t *rt = slot_for(xTaskGetCurrentTaskHandle());
     if (rt == NULL) return -1;
+
+    /* Out of the activation before anything about it is rewritten. */
+    rt->active = false;
 
     /* Charge this activation before sleeping, so execution time is the
        work itself and not the work plus the wait. Both release sources owe
@@ -644,6 +860,16 @@ RV9_RT_CODE int rv9_rt_wait(void)
             if (rt->fault_on_miss) return RV9_RT_DEADLINE;
         }
     }
+
+    /*
+     * The watchdog got here first. Coming to wait is the clean way to be
+     * stopped for it, and the task has just done that -- but only after the
+     * activation above is on the record. Returning before it left the
+     * previous activation's response in the report of this one's fault:
+     * "answered in 13 us", about a loop that had just spent five
+     * milliseconds.
+     */
+    if (rt->flagged) return rt->flagged;
 
     if (rt->event != NULL) return rt_wait_event(rt);
 
@@ -702,6 +928,8 @@ RV9_RT_CODE int rv9_rt_wait(void)
         if (rt->fault_on_miss) return RV9_RT_DEADLINE;
     }
 
+    rt->samples = 0;
+    rt->active  = true;
     return (int)missed;
 }
 
@@ -739,10 +967,9 @@ rv9_err_t rv9_rt_stop(rv9_task_t task)
     return err;
 }
 
-void rv9_rt_release(void)
+static void release_slot(rt_task_t *rt)
 {
-    rt_task_t *rt = slot_for(xTaskGetCurrentTaskHandle());
-    if (rt == NULL) return;
+    rt->active = false;
 
     /* Releases stop first, while the slot is still visibly ours. */
     bool borrowed = (rt->event != NULL);
@@ -763,6 +990,18 @@ void rv9_rt_release(void)
         esp_timer_delete(rt->timer);
         vSemaphoreDelete(rt->release);
     }
+}
+
+void rv9_rt_release(void)
+{
+    rt_task_t *rt = slot_for(xTaskGetCurrentTaskHandle());
+    if (rt != NULL) release_slot(rt);
+}
+
+void rv9_rt_release_task(rv9_task_t task)
+{
+    rt_task_t *rt = (task != NULL) ? slot_for((TaskHandle_t)task) : NULL;
+    if (rt != NULL) release_slot(rt);
 }
 
 static void fill_stats(const rt_task_t *rt, rv9_rt_stats_t *out)

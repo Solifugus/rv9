@@ -29,6 +29,7 @@ static const char *fault_name(uint8_t f)
     if (f == RV9_FAULT_STACK)    return "STACK";
     if (f == RV9_FAULT_KILLED)   return "killed";
     if (f == RV9_FAULT_DEADLINE) return "DEADLINE";
+    if (f == RV9_FAULT_RUNAWAY)  return "RUNAWAY";
     return "fault ?";
 }
 

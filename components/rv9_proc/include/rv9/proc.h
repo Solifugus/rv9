@@ -118,6 +118,8 @@ typedef struct rv9_proc {
        after its failsafes are applied, never before. */
     int               fault;
     bool              collecting;       /* somebody is holding its funeral */
+    bool              overrun_noted;    /* the watchdog's wait has been logged */
+    uint64_t          overrun_since_ms; /* first asked to stop it, or 0 */
 
     uint64_t          started_ms;
 
@@ -184,6 +186,7 @@ typedef enum {
     /* Ways a process ended, reported as its exit status. */
     RV9_PROC_ERR_KILLED,     /* stopped from outside                     */
     RV9_PROC_ERR_DEADLINE,   /* missed a deadline it declared fatal      */
+    RV9_PROC_ERR_RUNAWAY,    /* a real-time loop stopped waiting         */
 } rv9_proc_err_t;
 
 const char *rv9_proc_strerror(rv9_proc_err_t err);

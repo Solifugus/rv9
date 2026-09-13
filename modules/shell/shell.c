@@ -195,6 +195,10 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
     } else if (status == -RV9_PE_DEADLINE) {
         m_say(env, RV9_STDOUT, name);
         m_say(env, RV9_STDOUT, ": missed its deadline and was stopped\n");
+    } else if (status == -RV9_PE_RUNAWAY) {
+        m_say(env, RV9_STDOUT, name);
+        m_say(env, RV9_STDOUT, ": stopped waiting for its releases, and "
+                               "was stopped\n");
     } else if (status == -RV9_PE_FAULT) {
         m_say(env, RV9_STDOUT, name);
         m_say(env, RV9_STDOUT, ": stopped by the scheduler (see the log)\n");

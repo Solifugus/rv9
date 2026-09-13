@@ -3352,12 +3352,10 @@ afterwards is RV-9's doing and not the pin's resting state.
 
 ### What this does not do
 
-**A real-time loop that never reaches `rt_wait` is not stopped.** Deadlines
-are detected at completion and at release, and a loop spinning in its body
-does neither. On a single core it also starves everything below it,
-including the shell that would type `kill`. That needs a budget enforced
-by a timer — the loop's declared WCET used as a limit rather than a
-promise — and it is the natural next piece.
+**A real-time loop that never reaches `rt_wait`** is not stopped by
+anything in this section. Deadlines here are detected at completion and at
+release, and a loop spinning in its body does neither — while starving,
+on one core, the shell that would type `kill`. §30 is about that loop.
 
 **The fault is published in the process table, not in the component's
 cell.** R9's `watch MOTOR_CONTROL.faulted` expects it where the component's
@@ -3377,6 +3375,190 @@ what it does with one. That is a question for each of them, not yet asked.
 `RV9_ERR_UNSUPPORTED` for stopping a thread: it cannot say whether a task
 holds a lock, and guessing yes is how a system deadlocks while recovering
 from something else. Real-time processes stop on either.
+
+## 30. The loop that never comes back
+
+Everything in §29 acts when a real-time task comes back to `rt_wait`. The
+worst way a control loop can fail is to not come back: stuck in a loop in
+its body, with the one call where RV-9 could stop it never reached. At the
+real-time priority on a single core that loop also takes the machine —
+the radio, the shell, and the `kill` somebody would type into it.
+
+So a task that does not come back is now found from outside, and stopped
+from outside.
+
+### Found by a watchdog
+
+A timer interrupt every 2 ms looks at each task that is inside an
+activation — released, and not yet back to wait — and flags it for one of
+two things:
+
+- **past its deadline**, when it declared a miss fatal. A deadline that has
+  passed with the work unfinished is a miss *now*, not when the work
+  finishes, which for a loop that has stopped is never;
+- **runaway**: in one activation for more than 250 ms, *and* found on the
+  CPU in at least half the watchdog's samples over that time. The second
+  condition is what tells a loop that spins from one blocked in a slow
+  write — which is slow, not broken, and is left alone.
+
+Runaway applies to every real-time task, whatever it declared. `report`
+means a late period is counted and the loop carries on. It is not leave to
+stop waiting and take the machine.
+
+A flagged task that does come back to wait ends there, as in §29. One that
+does not is handed to a supervisor task, which runs at the real-time
+priority so that time slicing gives it a tick beside the runaway rather
+than leaving it waiting behind the very thing it exists to stop.
+
+### Stopped only where it holds nothing
+
+§29's whole difficulty was that a task stopped while holding a lock takes
+the lock with it. A real-time task is a host task, and nothing above the
+KAL can see what a host task holds — which is why §29 only ever stopped
+one between activations.
+
+But an RV-9 module has no libc, no globals, and no callbacks from the
+system: everything it can reach arrives through `env`, and every one of
+those calls returns before the module's next instruction. So **a task whose
+program counter is inside its own module's image is running only its own
+code, and holds nothing at all.** Not a lock, not a mutex, not the heap, not
+half of a publication. That is a property of what a module is, and it is
+checkable from outside.
+
+The program counter of a task that is not running is on its stack. On this
+port every switch, voluntary or not, goes through the interrupt entry, which
+leaves a full frame at `pxTopOfStack` — the first word of the task's
+control block — with `mepc` first. `rv9_rt_seize` holds off the scheduler,
+reads it, and if it is inside the module's image suspends the task. The
+caller then owns it, and the process manager runs §29's `finish()` from
+outside, in R9's order: releases gone, failsafes applied, then the table.
+The task is deleted before its module is unlinked, since its program
+counter is in that module.
+
+A task anywhere else — the I/O manager, a driver, the allocator — may be
+holding something, and is not suspended. The supervisor asks again every
+tick. A loop spinning through system calls is inside the system most of the
+time and in its own code some of it, and is caught at one of those
+instants; on the board it took about 8 ms.
+
+### Lowered, but not always
+
+A runaway that cannot be seized has to be lowered, or it keeps the machine
+while the supervisor waits for an instant to catch it. The first version
+lowered every flagged task it could not seize, and the boot log showed what
+that costs:
+
+```
+W rv9-proc: pid 3 ('lateloop') is past its deadline and still running, inside a
+            system call: lowered, and stopped when it is back in its own code
+W rv9-io: failsafe: /gpio/2 left at 0
+```
+
+`lateloop`, 3 ms past a 2 ms deadline, caught in the middle of reading the
+clock, dropped to idle priority — and finished its last milliseconds, and
+reached its failsafe, whenever nothing else wanted the CPU. A loop flagged
+for its deadline is usually a few instructions from coming to wait and
+ending itself there. Lowering it delays exactly that, and the safe state
+with it.
+
+So only a runaway is lowered — or a loop flagged for its deadline that is
+*still* not caught a runaway's worth of time later, which is a runaway
+whatever it was flagged for.
+
+### The panic that was the point about IRAM
+
+The first boot with the watchdog in it passed four of its tests and
+panicked in the fifth:
+
+```
+Guru Meditation Error: Core  0 panic'ed (Cache error).
+MEPC    : 0x420cdfca  RA      : 0x408047a8
+0x420cdfca: xTaskGetCurrentTaskHandle at tasks.c:4987
+0x408047a8: watch_isr at kal_rt.c:470
+```
+
+The watchdog interrupt runs while the flash cache is off — that is what an
+interrupt marked resident is for — and WiFi wrote its calibration to NVS
+during the test. `xTaskGetCurrentTaskHandle` is linked into flash. Every
+other call in `watch_isr` was then checked against the linked image, and
+it was the only one; the handler now reads `pxCurrentTCBs[0]`, which is what
+the port's own interrupt entry reads, and which is in RAM.
+
+It passed on the boot after the panic, which is the unsettling part. A
+failure that needs a flash write to land inside a 2 ms window during a
+half-second test shows up on some boots and not others. Two consecutive
+clean boots were required before calling it fixed, and the symbol check is
+the actual evidence.
+
+### A number that was wrong on the way
+
+With the watchdog flagging first, `rt_wait` returned the flag before
+recording the activation that had just ended — so the fault report carried
+the *previous* activation's response: `answered in 13`, about a loop that
+had just spent five milliseconds. The flag is now returned after the record
+is made, and the same case reads `answered in 5013`.
+
+### Demonstrated
+
+`runaway` runs on time for 20 periods and then never waits again, holding
+`/gpio/2` high with a failsafe of 0. It declares nothing about deadlines.
+
+```
+rv9> rt runaway
+rt: started runaway as pid 16
+rt: runaway stopped waiting for its releases: stopped from outside, failsafes applied
+rv9> pin 2
+/gpio/2 = 0
+rv9> rt runaway syscalls
+rt: started runaway as pid 19
+rt: runaway stopped waiting for its releases: stopped from outside, failsafes applied
+rv9> procs
+pid par name        state   base eff ended
+19  18  runaway     exited  15   15  RUNAWAY
+16  15  runaway     exited  15   15  RUNAWAY
+```
+
+Each took about half a second from the command: 200 ms on time, 250 ms
+running away, the rest the shell. The session they were typed into is an
+ordinary process at priority 8, running over WiFi, and survived both.
+
+### Tested
+
+Three more cases in `fault-test`, each judged on the pin, the status, the
+table, the release slot, and the time from fork to stopped:
+
+| case | reason | stopped after fork |
+|---|---|---|
+| `lateloop spin` — never finishes period 50 | `DEADLINE` | 503–505 ms (500 on time) |
+| `runaway` — spins in its own code | `RUNAWAY` | 453 ms (200 + 250) |
+| `runaway syscalls` — spins through `getstat` | `RUNAWAY` | 458–463 ms |
+
+49 checks in all, on two consecutive boots.
+
+### What this does not do
+
+**A task stuck in firmware for good is lowered, never stopped.** A driver
+that never returns holds the task outside its own code indefinitely, and
+nothing here will suspend it there. Its failsafe waits with it.
+
+**`kill` does not use this.** It stops a real-time process at its next wait
+(§29). One blocked in a system call — not past a fatal deadline and not
+using the CPU — is not stoppable by `kill` until the call returns.
+
+**A declared WCET is still a claim, not a budget.** What is enforced is the
+deadline, and the runaway limit. An activation that runs past its WCET but
+finishes in time is not even counted. Counting it would be cheap; stopping
+for it would need a reason beyond the one number.
+
+**The runaway limit is one figure for every task,** 250 ms, not derived
+from anything the task declared.
+
+**The seizure depends on the port's frame layout.** It is confined to one
+function in the KAL and commented as such, but a change to how ESP-IDF's
+RISC-V port saves context would need it checked again.
+
+**The watchdog costs a 500 Hz interrupt** from the first real-time
+declaration onward, whether or not anything is running.
 
 ## 9. Migration to a native kernel
 

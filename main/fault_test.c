@@ -217,6 +217,52 @@ static void a_loop_that_misses_its_deadline(void)
     check(rv9_rt_slots_used() == slots, "it will not be released again");
 }
 
+/* ------------------------------------------------------------------ */
+
+/*
+ * The loops that never come to wait.
+ *
+ * Nothing above could stop these: every other path acts when a task comes
+ * back to rt_wait. The watchdog has to notice from outside, and the
+ * process has to be stopped from outside, where it is -- which is only
+ * safe when where it is holds nothing.
+ *
+ * Each is judged on the same three things as a loop that does wait: it
+ * ends, with the right reason, and its pin is parked. And on a fourth: it
+ * ends in something like the time the watchdog promises, rather than
+ * whenever it happens to stop by itself, which is never.
+ */
+static void stopped_from_outside(const char *module, const char *arg,
+                                 int want_status, int want_fault,
+                                 const char *what)
+{
+    ESP_LOGI(TAG, "--- %s ---", what);
+
+    check(pin_write(1) && pin_read() == 1, "the pin is 1");
+
+    int slots = rv9_rt_slots_used();
+    rv9_pid_t pid = 0;
+    if (rv9_proc_fork_rt(module, 0, arg, &pid) != RV9_PROC_OK) {
+        check(false, "admit it");
+        return;
+    }
+
+    uint64_t t0 = rv9_time_ms();
+    int status = 0;
+    bool ended = (rv9_proc_wait(pid, &status, 5000) == RV9_PROC_OK);
+    uint32_t took = (uint32_t)(rv9_time_ms() - t0);
+
+    check(ended, "it is stopped, though it never waits again");
+    check(status == want_status, "its status says why");
+
+    const rv9_proc_t *p = rv9_proc_get(pid);
+    check(p != NULL && p->fault == want_fault, "and so does the table");
+    check(pin_read() == 0, "its pin was parked");
+    check(rv9_rt_slots_used() == slots, "its release slot is free");
+    check(took < 2000, "promptly, not eventually");
+    ESP_LOGI(TAG, "  (%lu ms from fork to stopped)", (unsigned long)took);
+}
+
 bool rv9_fault_selftest(void)
 {
     s_passed = s_failed = 0;
@@ -236,6 +282,16 @@ bool rv9_fault_selftest(void)
     a_loop_killed_between_activations();
     ESP_LOGI(TAG, "--- a loop that misses its deadline ---");
     a_loop_that_misses_its_deadline();
+
+    stopped_from_outside("lateloop", "spin", -RV9_PROC_ERR_DEADLINE,
+                         RV9_FAULT_DEADLINE,
+                         "a loop that never finishes its activation");
+    stopped_from_outside("runaway", NULL, -RV9_PROC_ERR_RUNAWAY,
+                         RV9_FAULT_RUNAWAY,
+                         "a loop that stops waiting, in its own code");
+    stopped_from_outside("runaway", "syscalls", -RV9_PROC_ERR_RUNAWAY,
+                         RV9_FAULT_RUNAWAY,
+                         "a loop that stops waiting, through system calls");
 
     if (s_failed == 0) {
         ESP_LOGI(TAG, "fault: %d/%d passed", s_passed, s_passed);

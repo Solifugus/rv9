@@ -3,6 +3,12 @@
  *
  *   rt lateloop          on time for 50 periods, then late once
  *   rt lateloop ontime   never late; runs a minute, for `kill` to stop
+ *   rt lateloop spin     on period 50, never finishes at all
+ *
+ * `spin` is the case the rest of this cannot catch by itself: a deadline
+ * checked when an activation finishes is never checked for one that does
+ * not. RV-9's watchdog notices the deadline passing instead, and stops the
+ * loop from outside.
  *
  * Through `rt` a number is a period, not an argument -- `rt lateloop 1000`
  * asks for a 1 ms period, which admission refuses against a 2 ms deadline.
@@ -41,9 +47,11 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     }
 
     uint32_t late_at = LATE_AT;
-    bool never = false;
+    bool never = false, spin = false;
     if (env->arg && m_eq(env->arg, "ontime")) {
         never = true;
+    } else if (env->arg && m_eq(env->arg, "spin")) {
+        spin = true;
     } else if (env->arg && env->arg[0] >= '1' && env->arg[0] <= '9') {
         late_at = m_num_parse(env->arg, NULL);
     }
@@ -68,6 +76,9 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     }
 
     for (uint32_t n = 0; n < periods; n++) {
+        if (spin && n == late_at) {
+            for (;;) { }
+        }
         if (!never && n == late_at) {
             uint64_t t0 = env->time_us();
             while (env->time_us() - t0 < LATE_BY_US) { }

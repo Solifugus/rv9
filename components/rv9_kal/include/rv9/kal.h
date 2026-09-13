@@ -410,6 +410,21 @@ int rv9_rt_wait(void);
  */
 #define RV9_RT_DEADLINE  (-2)   /* the activation just finished was late */
 #define RV9_RT_STOPPED   (-3)   /* someone asked it to stop; see rv9_rt_stop */
+#define RV9_RT_RUNAWAY   (-4)   /* it stopped waiting for releases at all */
+
+/*
+ * How long an activation may hold the CPU before it is not late but gone.
+ *
+ * Applies to every real-time task, whatever it declared about deadlines:
+ * `report` means a late loop is counted and allowed to carry on, not that
+ * a loop may stop waiting and take the machine with it. A quarter of a
+ * second is long past any period this class exists for and short enough
+ * that the radio and the shell survive it.
+ *
+ * "Hold the CPU" is measured, not assumed: an activation blocked in a
+ * system call for a second is slow, not runaway, and is left alone.
+ */
+#define RV9_RT_RUNAWAY_MS 250
 
 /*
  * The deadline this task's activations are held to, and what a miss means.
@@ -439,6 +454,56 @@ rv9_err_t rv9_rt_deadline(uint32_t deadline_us, bool fault);
  * case there is no such point to stop it at.
  */
 rv9_err_t rv9_rt_stop(rv9_task_t task);
+
+/*
+ * A real-time task that has to be stopped while it is running.
+ *
+ * Everything above stops a task when it next comes to wait. A task that
+ * never comes to wait -- spinning in its body, or blocked somewhere past
+ * its deadline -- is found by a watchdog instead: a timer interrupt that
+ * looks at every task in an activation and flags one whose deadline has
+ * passed (when a miss is fatal to it) or which has held the CPU for
+ * RV9_RT_RUNAWAY_MS. A flagged task that does come to wait ends there, as
+ * usual. One that does not is handed to the handler below, from a task at
+ * the real-time priority, with `why` one of the RV9_RT_* codes.
+ *
+ * The handler returns true when it has dealt with the task, false to be
+ * asked again on the next tick.
+ */
+typedef bool (*rv9_rt_overrun_fn)(rv9_task_t task, int why);
+
+void rv9_rt_set_overrun_handler(rv9_rt_overrun_fn fn);
+
+/*
+ * Stop a flagged task where it is -- only if where it is holds nothing.
+ *
+ * `code` and `len` are the task's own program: for an RV-9 module, its
+ * image. Module code has no libc, no globals and no callbacks from the
+ * system, so a task whose saved program counter is inside it is running
+ * only its own instructions and holds no lock of any kind. Such a task is
+ * suspended, and RV9_OK means the caller now owns it: release its slot,
+ * clear up, and delete it.
+ *
+ * A task anywhere else -- in the I/O manager, a driver, the allocator --
+ * may be holding something, and suspending it there could hang whatever
+ * wants that next. It is not touched, except that with `lower` its
+ * priority drops below everything that matters, so the rest of the machine
+ * runs while it finishes what it is in the middle of: RV9_ERR_BUSY, and
+ * ask again.
+ *
+ * Lowering is the caller's choice because it cuts both ways. A runaway has
+ * to be lowered or it takes the machine. A loop that is merely late is
+ * usually a few instructions from coming to wait and ending itself there,
+ * and lowering it delays exactly that -- and the failsafe with it.
+ *
+ * RV9_ERR_INVAL when the task has already given its slot back, which
+ * means it ended itself in the meantime.
+ */
+rv9_err_t rv9_rt_seize(rv9_task_t task, const void *code, size_t len,
+                       bool lower);
+
+/* rv9_rt_release, for a task that is not the caller: one seized above. */
+void rv9_rt_release_task(rv9_task_t task);
 
 /* Give up the period and the timer. A real-time process that ends without
    this leaves its slot occupied, and the next one cannot declare. */

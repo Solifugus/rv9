@@ -24,6 +24,7 @@ _Static_assert((int)RV9_PROC_ERR_NODEV    == RV9_PE_NODEV,    "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_BUSY     == RV9_PE_BUSY,     "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_KILLED   == RV9_PE_KILLED,   "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_DEADLINE == RV9_PE_DEADLINE, "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_RUNAWAY  == RV9_PE_RUNAWAY,  "ABI drift");
 
 /* The kernel's fault codes travel straight into the process table. */
 _Static_assert(RV9_TASK_FAULT_STACK  == RV9_FAULT_STACK,  "ABI drift");
@@ -95,6 +96,7 @@ const char *rv9_proc_strerror(rv9_proc_err_t err)
     case RV9_PROC_ERR_BUSY:     return "a device it needs alone is owned";
     case RV9_PROC_ERR_KILLED:   return "killed";
     case RV9_PROC_ERR_DEADLINE: return "missed its deadline";
+    case RV9_PROC_ERR_RUNAWAY:  return "stopped waiting for its releases";
     default:                    return "unknown error";
     }
 }
@@ -242,7 +244,9 @@ static void end_here(int why);
 static RV9_RT_CODE int env_rt_wait(void)
 {
     int r = rv9_rt_wait();
-    if (r == RV9_RT_DEADLINE || r == RV9_RT_STOPPED) end_here(r);
+    if (r == RV9_RT_DEADLINE || r == RV9_RT_STOPPED || r == RV9_RT_RUNAWAY) {
+        end_here(r);
+    }
     return r;
 }
 
@@ -317,6 +321,10 @@ static void finish(rv9_proc_t *p, int rc, int fault,
     } else if (fault == RV9_FAULT_DEADLINE) {
         ESP_LOGE(TAG, "pid %u ('%s') missed its deadline; stopped",
                  (unsigned)p->pid, p->name);
+    } else if (fault == RV9_FAULT_RUNAWAY) {
+        ESP_LOGE(TAG, "pid %u ('%s') came back to wait only after the "
+                      "watchdog had flagged it; stopped",
+                 (unsigned)p->pid, p->name);
     } else if (fault == RV9_FAULT_KILLED) {
         ESP_LOGW(TAG, "pid %u ('%s') killed between activations",
                  (unsigned)p->pid, p->name);
@@ -362,6 +370,8 @@ static void end_here(int why)
         bool have = (rv9_rt_stats(&st) == RV9_OK);
         finish(p, -RV9_PROC_ERR_DEADLINE, RV9_FAULT_DEADLINE,
                have ? &st : NULL);
+    } else if (why == RV9_RT_RUNAWAY) {
+        finish(p, -RV9_PROC_ERR_RUNAWAY, RV9_FAULT_RUNAWAY, NULL);
     } else {
         finish(p, -RV9_PROC_ERR_KILLED, RV9_FAULT_KILLED, NULL);
     }
@@ -563,6 +573,125 @@ static void collect_faulted_all(void)
         if (victim == NULL) return;
         collect_faulted(victim);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* A real-time process that will not come to wait                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Called by the KAL's watchdog, on its own task, for a real-time process
+ * flagged while still inside an activation: past a deadline it declared
+ * fatal, or holding the CPU without waiting at all.
+ *
+ * The KAL decides *whether it can be touched* -- only when it is in its
+ * own module's code, and so holding nothing. The process manager decides
+ * what follows, and it is finish() from outside: releases gone, the exit
+ * hook's failsafes, then the table. The task is deleted before its module
+ * is unlinked, since its program counter is in that module.
+ *
+ * Returns false to be asked again, which is what happens while the process
+ * is in the middle of a system call: it has been lowered below everything
+ * that matters, and will be stopped as soon as it is back in its own code,
+ * or will end itself at rt_wait if that is where it goes instead.
+ */
+static bool rt_overrun(rv9_task_t task, int why)
+{
+    rv9_proc_t *p = NULL;
+    const void *code = NULL;
+    size_t len = 0;
+    bool noted = false;
+    uint64_t since = 0;
+
+    rv9_lock_acquire(s_lock);
+    for (rv9_proc_t *q = s_procs; q; q = q->next) {
+        if (q->task == task && q->cls == RV9_CLASS_REALTIME &&
+            q->state != RV9_PROC_EXITED) {
+            p = q;
+            break;
+        }
+    }
+    if (p != NULL && p->module != NULL) {
+        code  = p->module->image;
+        len   = p->module->size;
+        noted = p->overrun_noted;
+        if (p->overrun_since_ms == 0) p->overrun_since_ms = rv9_time_ms();
+        since = p->overrun_since_ms;
+    }
+    rv9_lock_release(s_lock);
+
+    if (p == NULL) return true;     /* not a process; nothing of ours to do */
+
+    /*
+     * Lowered only once being late has become something worse.
+     *
+     * The first version lowered every flagged loop it could not seize, and
+     * the boot log showed what that costs: `lateloop`, 3 ms past its
+     * deadline in the middle of reading the clock, dropped to idle priority
+     * and finished its last milliseconds -- and reached its failsafe --
+     * whenever nothing else wanted the CPU. A loop flagged for its deadline
+     * is usually about to come to wait and end itself. One still going a
+     * runaway's worth of time later is a runaway, whatever it was flagged
+     * for.
+     */
+    bool lower = (why == RV9_RT_RUNAWAY) ||
+                 (rv9_time_ms() - since >= RV9_RT_RUNAWAY_MS);
+
+    rv9_err_t err = rv9_rt_seize(task, code, len, lower);
+    if (err == RV9_ERR_BUSY) {
+        if (lower && !noted) {
+            rv9_lock_acquire(s_lock);
+            p->overrun_noted = true;
+            rv9_lock_release(s_lock);
+            ESP_LOGW(TAG, "pid %u ('%s') %s, inside a system call: lowered, "
+                          "and stopped when it is back in its own code",
+                     (unsigned)p->pid, p->name,
+                     (why == RV9_RT_DEADLINE)
+                         ? "is far past its deadline and still running"
+                         : "has held the CPU without waiting");
+        }
+        return false;
+    }
+    if (err != RV9_OK) return true;     /* it ended itself meanwhile */
+
+    rv9_rt_stats_t st;
+    bool have = (rv9_rt_stats_for(task, &st) == RV9_OK);
+
+    rv9_rt_release_task(task);
+    if (s_on_exit) s_on_exit(p->pid);
+
+    int fault  = (why == RV9_RT_DEADLINE) ? RV9_FAULT_DEADLINE
+               : (why == RV9_RT_RUNAWAY)  ? RV9_FAULT_RUNAWAY
+               :                            RV9_FAULT_KILLED;
+    int status = (why == RV9_RT_DEADLINE) ? -RV9_PROC_ERR_DEADLINE
+               : (why == RV9_RT_RUNAWAY)  ? -RV9_PROC_ERR_RUNAWAY
+               :                            -RV9_PROC_ERR_KILLED;
+
+    rv9_lock_acquire(s_lock);
+    rv9_mod_entry_t *mod = p->module;
+    void *statics        = p->statics;
+    p->statics     = NULL;
+    p->task        = NULL;
+    p->exit_status = status;
+    p->fault       = fault;
+    p->state       = RV9_PROC_EXITED;
+    rv9_lock_release(s_lock);
+
+    if (why == RV9_RT_DEADLINE) {
+        ESP_LOGE(TAG, "pid %u ('%s') %s %lu us deadline: stopped from "
+                      "outside, not released again", (unsigned)p->pid,
+                 p->name, "was still running past its",
+                 (unsigned long)(have ? st.deadline_us : 0));
+    } else {
+        ESP_LOGE(TAG, "pid %u ('%s') held the CPU for %d ms without "
+                      "waiting: stopped from outside, not released again",
+                 (unsigned)p->pid, p->name, RV9_RT_RUNAWAY_MS);
+    }
+
+    rv9_task_delete(task);
+    if (mod) rv9_mod_unlink(mod);
+    rv9_free(statics);
+    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -797,6 +926,7 @@ rv9_proc_err_t rv9_proc_init(void)
     }
 
     rv9_mod_set_proc_ops(&s_mod_proc_ops);
+    rv9_rt_set_overrun_handler(rt_overrun);
 
     s_running = true;
     ESP_LOGI(TAG, "process manager up (aging every %d ms, max boost %d)",

@@ -497,6 +497,7 @@ typedef struct {
    exit statuses, negated, which no module returns on its own account. */
 #define RV9_PE_KILLED       12   /* stopped from outside, by kill */
 #define RV9_PE_DEADLINE     13   /* missed a deadline it declared fatal */
+#define RV9_PE_RUNAWAY      14   /* a real-time loop stopped waiting */
 
 /*
  * Why a process stopped, as the process table reports it.
@@ -510,6 +511,10 @@ typedef struct {
 #define RV9_FAULT_STACK     1    /* ran off its stack */
 #define RV9_FAULT_KILLED    2    /* stopped from outside */
 #define RV9_FAULT_DEADLINE  3    /* R9's DEADLINE */
+#define RV9_FAULT_RUNAWAY   4    /* held the CPU without waiting; see
+                                    RV9_RT_RUNAWAY_MS. Whatever it declared
+                                    about deadlines: `report` is not leave
+                                    to take the machine */
 
 /* Generic getstat/setstat codes a module may use. */
 #define RV9_SS_ECHO        1
