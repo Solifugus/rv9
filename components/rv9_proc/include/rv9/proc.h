@@ -169,6 +169,15 @@ typedef enum {
     RV9_PROC_ERR_NOSLOT,     /* every real-time slot is taken            */
     RV9_PROC_ERR_CONTRACT,   /* the declaration contradicts itself       */
     RV9_PROC_ERR_UTILISATION,/* the CPU is already promised elsewhere    */
+
+    /*
+     * Device refusals. Unlike the three above, these apply to ordinary
+     * processes too: a device that does not exist and a device somebody
+     * else owns are facts about the machine, not about timing, and a
+     * program that needs one is as wrong at priority 4 as at real time.
+     */
+    RV9_PROC_ERR_NODEV,      /* it needs a device this machine lacks     */
+    RV9_PROC_ERR_BUSY,       /* it needs one alone, and somebody has it  */
 } rv9_proc_err_t;
 
 const char *rv9_proc_strerror(rv9_proc_err_t err);
@@ -241,6 +250,24 @@ typedef void (*rv9_proc_exit_hook_t)(rv9_pid_t pid);
 
 void rv9_proc_set_hooks(rv9_proc_fork_hook_t on_fork,
                         rv9_proc_exit_hook_t on_exit);
+
+/*
+ * Admission for what a program says it must own.
+ *
+ * Devices belong to the I/O manager and admission belongs here, so the two
+ * meet through a hook rather than a dependency. Called with a pid that has
+ * been allocated but does not yet name a running process, and the module
+ * image so the hook can read the manifest itself -- the process manager
+ * has no business knowing what a device name looks like.
+ *
+ * Returns RV9_PROC_OK to admit, or the rv9_proc_err_t to refuse with.
+ * Whatever it claimed is released through the exit hook, on every path out
+ * of a process including the ones nobody planned.
+ */
+typedef int (*rv9_proc_claim_hook_t)(rv9_pid_t pid, const void *image,
+                                     const char *name);
+
+void rv9_proc_set_claim_hook(rv9_proc_claim_hook_t hook);
 
 #ifdef __cplusplus
 }

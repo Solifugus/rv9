@@ -662,6 +662,12 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
         }
         return -1;
 
+    case RV9_SYS_CLAIM:
+        if (s_io_ops && s_io_ops->claims) {
+            return s_io_ops->claims(buf, len);
+        }
+        return -1;
+
     default:
         return -1;
     }

@@ -49,6 +49,7 @@ typedef enum {
     RV9_IO_ERR_EXISTS,
     RV9_IO_ERR_TIMEOUT,      /* appended: existing values are ABI, they
                                 travel to modules as negative returns */
+    RV9_IO_ERR_BUSY,         /* somebody else owns it -- see claims, below */
 } rv9_io_err_t;
 
 const char *rv9_io_strerror(rv9_io_err_t err);
@@ -199,7 +200,55 @@ typedef struct rv9_path {
     int64_t    pos;
     void      *fm_state;     /* the file manager's own */
     uint32_t   refs;         /* shared when a child inherits it */
+
+    /* The ownership record this path holds a reference on, released when
+       the last reference to the path goes. NULL for a path opened before
+       the claim table existed. */
+    struct rv9_claim *claim;
 } rv9_path_t;
+
+/* ------------------------------------------------------------------ */
+/* Ownership                                                           */
+/*                                                                     */
+/* Above the drivers, because a driver is about hardware and this is a  */
+/* question about programs. Below the programs, because the answer must */
+/* be the same for all of them. See claim.c for the reasoning.          */
+/* ------------------------------------------------------------------ */
+
+/* Long enough for a device name and the longest thing a file manager will
+   accept after it: 16 + '/' + 28, rounded up. */
+#define RV9_CLAIM_NAME_MAX 48
+
+struct rv9_claim;
+
+rv9_io_err_t rv9_claim_init(void);
+
+/* Build "/gpio" + "2" into "/gpio/2", the form everything else compares. */
+void rv9_claim_resource(char *out, size_t cap, const char *dev,
+                        const char *rest);
+
+/*
+ * Claim a resource for the duration of an open. RV9_IO_ERR_BUSY when
+ * somebody else has it and either party wants it alone. `owner` may be
+ * RV9_PID_NONE, which means a driver holds it on the system's behalf and
+ * no process exit will take it away.
+ */
+rv9_io_err_t rv9_claim_take(const char *resource, rv9_pid_t owner,
+                            bool exclusive, struct rv9_claim **out);
+void         rv9_claim_drop(struct rv9_claim *c);
+
+/*
+ * Claim a resource for a process's whole life, from its manifest, before
+ * it starts. Released by rv9_claim_release_pid however the process ends.
+ */
+rv9_io_err_t rv9_claim_reserve(const char *resource, rv9_pid_t owner,
+                               bool exclusive);
+void         rv9_claim_release_pid(rv9_pid_t owner);
+
+/* Fill records, or count them when out is NULL. */
+int  rv9_claim_list(rv9_sys_claim_t *out, int max);
+bool rv9_claim_owner(const char *resource, rv9_pid_t *out_owner,
+                     bool *out_exclusive);
 
 /* ------------------------------------------------------------------ */
 /* Console settings as escape sequences                                */

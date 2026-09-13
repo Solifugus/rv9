@@ -77,6 +77,11 @@ static void refusal(const rv9_mod_env_t *env, const char *name, int pid)
         m_say(env, RV9_STDOUT, ": not enough memory can be guaranteed it\n");
     } else if (pid == -RV9_PE_NOTFOUND) {
         m_say(env, RV9_STDOUT, ": no such module\n");
+    } else if (pid == -RV9_PE_BUSY) {
+        m_say(env, RV9_STDOUT, ": a device it needs alone is owned "
+                               "(see 'owns')\n");
+    } else if (pid == -RV9_PE_NODEV) {
+        m_say(env, RV9_STDOUT, ": this machine has no such device\n");
     } else {
         m_say(env, RV9_STDOUT, ": cannot start as real-time\n");
     }

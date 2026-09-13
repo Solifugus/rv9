@@ -37,7 +37,14 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     int p = env->open(path, RV9_MODE_WRITE);
     if (p < 0) {
         m_say(env, RV9_STDOUT, path);
-        m_say(env, RV9_STDOUT, ": cannot open\n");
+        if (p == -RV9_IOE_BUSY) {
+            /* Not a failure of the hardware. Some program has declared
+               responsibility for this output, and two programs driving one
+               actuator is not something to resolve by racing. */
+            m_say(env, RV9_STDOUT, ": owned by another process (see 'owns')\n");
+        } else {
+            m_say(env, RV9_STDOUT, ": cannot open\n");
+        }
         return -3;
     }
 

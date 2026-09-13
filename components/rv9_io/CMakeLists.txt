@@ -1,4 +1,4 @@
-idf_component_register(SRCS "src/io.c" "src/scf.c" "src/drv_uart.c"
+idf_component_register(SRCS "src/io.c" "src/claim.c" "src/scf.c" "src/drv_uart.c"
                             "src/drv_lcdcon.c" "src/font.c"
                             "src/rbf.c" "src/drv_ramdisk.c"
                             "src/nfm.c" "src/drv_net.c" "src/drv_flashdisk.c"

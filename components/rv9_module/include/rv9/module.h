@@ -389,6 +389,7 @@ typedef struct {
 #define RV9_IOE_INVAL        9
 #define RV9_IOE_EXISTS      10   /* already there, or already in use */
 #define RV9_IOE_TIMEOUT     11
+#define RV9_IOE_BUSY        12   /* somebody else owns it */
 
 /*
  * And the same for fork, negated. Distinguishing these matters more than
@@ -404,10 +405,17 @@ typedef struct {
 #define RV9_PE_FAULT         6   /* the scheduler stopped it */
 
 /* Admission refusals. A real-time program is asked for rather than
-   started, and these are the ways the machine says no. */
+   started, and these are the ways the machine says no.
+
+   The last two are not about timing and so apply to every program, not
+   only real-time ones: a device that does not exist and a device somebody
+   else owns are both answerable before the program starts, and neither
+   becomes more answerable by letting it start first. */
 #define RV9_PE_NOSLOT        7   /* every real-time slot is taken */
 #define RV9_PE_CONTRACT      8   /* the declaration contradicts itself */
 #define RV9_PE_UTILISATION   9   /* the CPU is already promised */
+#define RV9_PE_NODEV        10   /* it needs a device this machine lacks */
+#define RV9_PE_BUSY         11   /* it needs a device alone; somebody has it */
 
 /* Generic getstat/setstat codes a module may use. */
 #define RV9_SS_ECHO        1
@@ -544,6 +552,28 @@ typedef struct {
 #define RV9_SYS_RT       4     /* rv9_sys_rt_t, one per real-time task */
 #define RV9_SYS_STACK    5     /* rv9_sys_stack_t, one per live process */
 #define RV9_SYS_ADMIT    6     /* rv9_sys_admit_t, one record            */
+#define RV9_SYS_CLAIM    7     /* rv9_sys_claim_t, one per device claim  */
+
+/*
+ * Who owns what.
+ *
+ * One record per resource per owner, which is why the same device may
+ * appear more than once: five processes sharing /term are five records,
+ * and that is the answer to "who has it open" rather than a count.
+ *
+ * `reserved` marks a claim taken at fork from the module's manifest rather
+ * than by an open. Such a claim exists before the program runs and outlives
+ * every path it opens, which is the whole point: a declared exclusive
+ * device is the program's for its lifetime, not for the duration of one
+ * open.
+ */
+typedef struct __attribute__((packed)) {
+    char     name[48];         /* the resource, as opened: "/gpio/2"     */
+    uint16_t owner;            /* pid, or 0 for a driver's own hold      */
+    uint8_t  exclusive;
+    uint8_t  reserved_at_fork;
+    uint32_t refs;             /* opens outstanding, plus the reservation */
+} rv9_sys_claim_t;
 
 /*
  * What real-time work the machine has promised, and how sure it is.
@@ -673,6 +703,22 @@ typedef int (*rv9_mod_entry_fn)(const rv9_mod_env_t *env);
 #define RV9_MODE_CREATE (1u << 2)   /* make it if absent, truncate if not */
 
 /*
+ * Open it alone, or not at all.
+ *
+ * Two programs driving one actuator is not a race to be won, it is two
+ * answers to a question with one physical outcome. So a program that must
+ * be the only one on a device says so, and the open is refused rather than
+ * shared -- RV9_IO_ERR_BUSY, before any hardware is touched.
+ *
+ * A program that knows this at compile time should declare it in its
+ * manifest instead (RV9_MTAG_EXCLUSIVE), which claims the device at fork:
+ * refused before the program starts rather than partway through it. This
+ * bit is for the case the compiler could not know, where the device is
+ * chosen at runtime.
+ */
+#define RV9_MODE_EXCL   (1u << 3)
+
+/*
  * A directory is just a file whose records are these. Open a block device
  * with no filename -- "/r0" rather than "/r0/notes" -- and reads return
  * directory entries. This is ABI: modules read them.
@@ -763,6 +809,7 @@ typedef struct {
     int (*seek)(int path, int32_t offset, int whence);
     int (*getstat)(int path, uint32_t code, void *arg);
     int (*setstat)(int path, uint32_t code, void *arg);
+    int (*claims)(void *buf, uint32_t len);  /* fills rv9_sys_claim_t records */
 } rv9_mod_io_ops_t;
 
 void rv9_mod_set_io_ops(const rv9_mod_io_ops_t *ops);

@@ -1,7 +1,9 @@
-# RV-9 / autonomous language compiler — alignment notes
+# RV-9 / Rachis9 — alignment notes
 
-These notes come from the language side. They are kept verbatim below,
-followed by RV-9's reading of where it actually stands against each point.
+The language and its compiler are **Rachis9**, R9 for short; the project
+sits beside this one and is still in design. These notes come from that
+side. They are kept verbatim below, followed by RV-9's reading of where it
+actually stands against each point.
 
 The governing constraint, which RV-9 should hold to: *this does not mean
 changing RV-9 around an unfinished language. It means avoiding ABI and
@@ -144,18 +146,18 @@ Measured or checked against the running system, 2026-09-12.
 |---|---|
 | 1. resource contract in the header | **done as a mechanism** — an optional TLV manifest the header points at; unknown advisory tags skipped, unknown mandatory tags refused. Most tags have no consumer yet, which is the point |
 | 2. per-program stack | **done**, `stack_size` in `build.conf`; overflow **detected** (guard word, thread killed), not prevented — PMP is phase 7 |
-| 3. RT admission | **done for what can be checked** — `fork_rt` refuses before allocating: self-contradictory declaration, no slot free, stack+heap not guaranteeable, or the 70% utilisation ceiling. Devices are not checked, because ownership does not exist yet |
+| 3. RT admission | **done for what can be checked** — `fork_rt` refuses before allocating: self-contradictory declaration, no slot free, stack+heap not guaranteeable, the 70% utilisation ceiling, a device this machine lacks, or a device somebody else owns. The last two apply to ordinary processes too |
 | 4. protected reserves | **partial** — a 12 KB floor RV-9 will not allocate into, so exhaustion is a refusal it reports rather than an abort inside ESP-IDF; no per-process limit, no RT-specific reserve |
 | 5. heap policy by class | see below — the situation is the reverse of what is assumed |
-| 6. device ownership | reference counts only; no owner identity, no exclusivity. The manifest carries `device` and `exclusive` and admission cannot yet act on them — the next real gap |
+| 6. device ownership | **done** — a claim table above the drivers, keyed by the full path (`/gpio/2`, not `/gpio`), one record per owner. `exclusive` in the manifest is claimed at fork and released at exit however the process ends; `RV9_MODE_EXCL` does the same at runtime; `device` is checked for existence. `owns` lists who has what |
 | 7. RT-safe marked machine-readably | documented in prose, `RV9_RT_CODE` in source; not readable |
 | 8. init separate from execution | **already exactly this** |
-| 9. failsafe below the process | release-on-exit works; declared safe states do not exist |
+| 9. failsafe below the process | release-on-exit now includes *ownership*, proven by `hold crash`: a process that dies of a stack overflow while holding `/pwm0/3` does not keep it. Declared safe states still do not exist — nothing puts the output anywhere in particular on the way out |
 | 10. timing as state | **done**, `RV9_SYS_RT` |
 | 11. no POSIX assumptions | **already true** and worth defending |
 | 12. extensible manifest | **done** — `rv9_mod_header_t.manifest_offset` points at a TLV list; sixteen tags registered, `build.conf` emits them, `tools/modinfo.py` reads them back |
 | 13. resource certificate | **begun** — admission checks the declaration against itself (deadline within period, WCET within deadline) and against the machine. `control` declares 50 us and reports 26-30 us observed, which is a claim RV-9 can check rather than believe |
-| 14. measurement | **established practice**: `free`, `stacks`, `procs`, `rt`, `docs/memory.md`. It earns its keep: `stacks` reporting a 34 MB stack is what exposed the KAL casting host task handles to kernel threads |
+| 14. measurement | **established practice**: `free`, `stacks`, `procs`, `rt`, `owns`, `docs/memory.md`. It earns its keep: `stacks` reporting a 34 MB stack is what exposed the KAL casting host task handles to kernel threads |
 | 15. no language semantics in the OS | held so far |
 
 ### Three corrections

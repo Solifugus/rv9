@@ -16,6 +16,7 @@
 #include "kal_selftest.h"
 #include "kernel_test.h"
 #include "module_test.h"
+#include "io_test.h"
 #include "conformance.h"
 
 #define RV9_RUN_KERNEL_TEST 1
@@ -701,6 +702,11 @@ static void rv9_init_task(void *arg)
     rv9_mod_dir_init();
     mdir();
     io_bringup();
+
+    /* After bringup: the claim table comes up with the I/O manager, and
+       testing it before then would test nothing. */
+    rv9_io_selftest();
+
     run_module("hello");
 
     phase2_demo();

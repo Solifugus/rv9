@@ -30,6 +30,7 @@ _Static_assert((int)RV9_IO_ERR_IO          == RV9_IOE_IO,          "ABI drift");
 _Static_assert((int)RV9_IO_ERR_INVAL       == RV9_IOE_INVAL,       "ABI drift");
 _Static_assert((int)RV9_IO_ERR_EXISTS      == RV9_IOE_EXISTS,      "ABI drift");
 _Static_assert((int)RV9_IO_ERR_TIMEOUT     == RV9_IOE_TIMEOUT,     "ABI drift");
+_Static_assert((int)RV9_IO_ERR_BUSY        == RV9_IOE_BUSY,        "ABI drift");
 
 static const char *TAG = "rv9-io";
 
@@ -75,6 +76,7 @@ const char *rv9_io_strerror(rv9_io_err_t err)
     case RV9_IO_ERR_INVAL:       return "invalid argument";
     case RV9_IO_ERR_EXISTS:      return "already exists";
     case RV9_IO_ERR_TIMEOUT:     return "timed out";
+    case RV9_IO_ERR_BUSY:        return "owned by another process";
     default:                     return "unknown error";
     }
 }
@@ -336,15 +338,38 @@ static void split_path(const char *full, char *dev_out, size_t dev_len,
  * Holding the global I/O lock across a blocking open freezes every other
  * process's I/O, including the shell that is waiting to see what happens.
  */
-static rv9_path_t *path_new(rv9_dev_t *dev, uint32_t mode)
+/*
+ * Ownership is settled here, before the file manager or the driver hears
+ * about the open at all. That order is deliberate: a refusal must cost
+ * nothing, and by the time a driver has configured an LEDC channel it has
+ * already begun driving the pin the second opener was going to be told it
+ * could not have.
+ */
+static rv9_path_t *path_new(rv9_dev_t *dev, const char *rest, uint32_t mode,
+                            rv9_pid_t owner, rv9_io_err_t *err)
 {
-    rv9_path_t *p = rv9_calloc(1, sizeof(*p));
-    if (p == NULL) return NULL;
+    char resource[RV9_CLAIM_NAME_MAX];
+    rv9_claim_resource(resource, sizeof(resource), dev->name, rest);
 
-    p->dev  = dev;
-    p->mode = mode;
-    p->pos  = 0;
-    p->refs = 1;
+    struct rv9_claim *claim = NULL;
+    rv9_io_err_t e = rv9_claim_take(resource, owner,
+                                    (mode & RV9_MODE_EXCL) != 0, &claim);
+    if (e != RV9_IO_OK) { *err = e; return NULL; }
+
+    rv9_path_t *p = rv9_calloc(1, sizeof(*p));
+    if (p == NULL) {
+        rv9_claim_drop(claim);
+        *err = RV9_IO_ERR_NOMEM;
+        return NULL;
+    }
+
+    p->dev   = dev;
+    p->mode  = mode;
+    p->pos   = 0;
+    p->refs  = 1;
+    p->claim = claim;
+
+    *err = RV9_IO_OK;
     return p;
 }
 
@@ -397,13 +422,21 @@ static void dev_last_close(rv9_dev_t *dev)
     if (dev->drv->close) dev->drv->close(dev);
 }
 
+/* Let go of a path that never became one, or has finished being one. */
+static void path_free(rv9_path_t *p)
+{
+    if (p == NULL) return;
+    rv9_claim_drop(p->claim);
+    rv9_free(p);
+}
+
 static rv9_path_t *path_alloc(rv9_dev_t *dev, const char *rest, uint32_t mode,
-                              rv9_io_err_t *err)
+                              rv9_pid_t owner, rv9_io_err_t *err)
 {
     if (dev_open_refused(dev)) { *err = RV9_IO_ERR_EXISTS; return NULL; }
 
-    rv9_path_t *p = path_new(dev, mode);
-    if (p == NULL) { *err = RV9_IO_ERR_NOMEM; return NULL; }
+    rv9_path_t *p = path_new(dev, rest, mode, owner, err);
+    if (p == NULL) return NULL;
 
     bool first = (dev->open_count == 0);
 
@@ -412,7 +445,7 @@ static rv9_path_t *path_alloc(rv9_dev_t *dev, const char *rest, uint32_t mode,
 
     if (e != RV9_IO_OK) {
         if (first) dev_last_close(dev);
-        rv9_free(p);
+        path_free(p);
         *err = e;
         return NULL;
     }
@@ -442,7 +475,7 @@ static void path_release(rv9_path_t *p, rv9_dev_t **idle)
     if (dev->open_count) dev->open_count--;
     if (dev->open_count == 0 && idle) *idle = dev;
 
-    rv9_free(p);
+    path_free(p);
 }
 
 int rv9_io_open(const char *name, uint32_t mode)
@@ -486,10 +519,11 @@ int rv9_io_open(const char *name, uint32_t mode)
         return -RV9_IO_ERR_NOPATHS;
     }
 
-    rv9_path_t *p = path_new(dev, mode);
+    rv9_io_err_t cerr = RV9_IO_OK;
+    rv9_path_t *p = path_new(dev, rest, mode, pid, &cerr);
     if (p == NULL) {
         rv9_lock_release(s_lock);
-        return -RV9_IO_ERR_NOMEM;
+        return -(int)cerr;
     }
 
     /* Reserve the slot so a concurrent open in this process cannot take it,
@@ -508,7 +542,7 @@ int rv9_io_open(const char *name, uint32_t mode)
         t->paths[num] = NULL;
         if (dev->open_count) dev->open_count--;
         rv9_lock_release(s_lock);
-        rv9_free(p);
+        path_free(p);
         return -err;
     }
 
@@ -687,10 +721,17 @@ rv9_io_err_t rv9_io_open_detached(const char *name, uint32_t mode,
         return RV9_IO_ERR_EXISTS;
     }
 
-    rv9_path_t *p = path_new(dev, mode);
+    /*
+     * A detached path is the system's, not any process's. Owning it under
+     * whichever pid happened to call would be wrong twice: the hold has to
+     * outlive that process, and no process exit should be able to take a
+     * driver's connection away from it.
+     */
+    rv9_io_err_t cerr = RV9_IO_OK;
+    rv9_path_t *p = path_new(dev, rest, mode, RV9_PID_NONE, &cerr);
     if (p == NULL) {
         rv9_lock_release(s_lock);
-        return RV9_IO_ERR_NOMEM;
+        return cerr;
     }
 
     bool first = (dev->open_count == 0);
@@ -707,7 +748,7 @@ rv9_io_err_t rv9_io_open_detached(const char *name, uint32_t mode,
         rv9_lock_acquire(s_lock);
         if (dev->open_count) dev->open_count--;
         rv9_lock_release(s_lock);
-        rv9_free(p);
+        path_free(p);
         return err;
     }
 
@@ -795,9 +836,11 @@ static void io_on_fork(rv9_pid_t parent, rv9_pid_t child)
     rv9_dev_t *out = s_sys_out[0] ? find_dev(s_sys_out) : NULL;
     rv9_io_err_t err;
 
-    if (in)  ct->paths[RV9_STDIN]  = path_alloc(in,  "", RV9_MODE_READ,  &err);
+    if (in)  ct->paths[RV9_STDIN]  = path_alloc(in,  "", RV9_MODE_READ,
+                                                child, &err);
     if (out) {
-        ct->paths[RV9_STDOUT] = path_alloc(out, "", RV9_MODE_WRITE, &err);
+        ct->paths[RV9_STDOUT] = path_alloc(out, "", RV9_MODE_WRITE,
+                                           child, &err);
         if (ct->paths[RV9_STDOUT]) {
             ct->paths[RV9_STDOUT]->refs++;
             ct->paths[RV9_STDERR] = ct->paths[RV9_STDOUT];
@@ -839,7 +882,92 @@ static void io_on_exit(rv9_pid_t pid)
 
     rv9_lock_release(s_lock);
 
+    /*
+     * Whatever it reserved at fork, whether or not it ever opened it, and
+     * whether it returned or was stopped by the scheduler. This is the
+     * clause that matters on a machine that moves: a program does not get
+     * to keep the motor by dying.
+     *
+     * Outside the lock because nothing here needs it, and the claim table
+     * has one of its own.
+     */
+    rv9_claim_release_pid(pid);
+
     for (int i = 0; i < nidle; i++) dev_last_close(idle[i]);
+}
+
+/*
+ * What a program declared it needs, checked and claimed before it starts.
+ *
+ * Called by the process manager at fork -- through a hook, because rv9_proc
+ * must not know rv9_io exists. Two tags, and they fail differently on
+ * purpose:
+ *
+ *   device      it needs this, shared. Checked for existence only. A
+ *               program that names a device this machine does not have is
+ *               not going to work on it, and finding that out at fork is
+ *               better than finding out at the first open, three seconds
+ *               into a startup sequence.
+ *   exclusive   it needs this alone. Claimed for the process's whole life.
+ *
+ * Both are refusals before anything is allocated. A partial claim is undone
+ * by the caller: it releases the pid on any failure, which drops whatever
+ * was taken before the one that failed.
+ *
+ * Answers in the process manager's vocabulary rather than its own, because
+ * this is a fork failing and not an open failing, and the person reading
+ * the message is being told why their program did not start.
+ */
+static int io_claim_for_fork(rv9_pid_t pid, const void *image,
+                             const char *progname)
+{
+    static const struct { uint16_t tag; bool exclusive; } want[] = {
+        { RV9_MTAG_DEVICE,    false },
+        { RV9_MTAG_EXCLUSIVE, true  },
+    };
+
+    for (unsigned k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
+        const void *v = NULL;
+        uint16_t len = 0;
+
+        while ((v = rv9_mod_manifest_find(image, want[k].tag, v, &len)) != NULL) {
+            /* Manifest strings carry their length and are not terminated. */
+            char res[RV9_CLAIM_NAME_MAX];
+            size_t n = (len < sizeof(res) - 1) ? len : sizeof(res) - 1;
+            memcpy(res, v, n);
+            res[n] = '\0';
+            if (n == 0) continue;
+
+            char devname[16];
+            const char *rest = "";
+            split_path(res, devname, sizeof(devname), &rest);
+
+            rv9_lock_acquire(s_lock);
+            bool exists = (find_dev(devname) != NULL);
+            rv9_lock_release(s_lock);
+
+            if (!exists) {
+                ESP_LOGE(TAG, "admit '%s': it needs %s, which this machine "
+                              "does not have", progname, res);
+                return RV9_PROC_ERR_NODEV;
+            }
+
+            if (!want[k].exclusive) continue;
+
+            rv9_io_err_t err = rv9_claim_reserve(res, pid, true);
+            if (err == RV9_IO_ERR_BUSY) {
+                rv9_pid_t owner = RV9_PID_NONE;
+                if (rv9_claim_owner(res, &owner, NULL)) {
+                    ESP_LOGE(TAG, "admit '%s': it needs %s alone, and pid %u "
+                                  "has it", progname, res, (unsigned)owner);
+                }
+                return RV9_PROC_ERR_BUSY;
+            }
+            if (err != RV9_IO_OK) return RV9_PROC_ERR_NOMEM;
+        }
+    }
+
+    return RV9_PROC_OK;
 }
 
 rv9_io_err_t rv9_io_set_system_std(const char *in, const char *out)
@@ -909,6 +1037,15 @@ static int io_dup2_op(int from, int to)
     return (err == RV9_IO_OK) ? 0 : -(int)err;
 }
 
+/* Records, or a count when the buffer is empty -- the same shape as
+   procs and stacks, so a module can size its buffer before filling it. */
+static int io_claims_op(void *buf, uint32_t len)
+{
+    if (buf == NULL || len == 0) return rv9_claim_list(NULL, 0);
+    return rv9_claim_list((rv9_sys_claim_t *)buf,
+                          (int)(len / sizeof(rv9_sys_claim_t)));
+}
+
 static const rv9_mod_io_ops_t s_mod_io_ops = {
     .open  = io_open_op,
     .close = io_close_op,
@@ -919,14 +1056,17 @@ static const rv9_mod_io_ops_t s_mod_io_ops = {
     .seek    = io_seek_op,
     .getstat = io_getstat_op,
     .setstat = io_setstat_op,
+    .claims  = io_claims_op,
 };
 
 rv9_io_err_t rv9_io_init(void)
 {
     if (s_lock != NULL) return RV9_IO_OK;
     if (rv9_lock_create(&s_lock) != RV9_OK) return RV9_IO_ERR_NOMEM;
+    if (rv9_claim_init() != RV9_IO_OK) return RV9_IO_ERR_NOMEM;
 
     rv9_proc_set_hooks(io_on_fork, io_on_exit);
+    rv9_proc_set_claim_hook(io_claim_for_fork);
     rv9_mod_set_io_ops(&s_mod_io_ops);
     ESP_LOGI(TAG, "I/O manager up");
     return RV9_IO_OK;

@@ -20,6 +20,8 @@ _Static_assert((int)RV9_PROC_ERR_FAULT    == RV9_PE_FAULT,    "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_NOSLOT   == RV9_PE_NOSLOT,   "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_CONTRACT == RV9_PE_CONTRACT, "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_UTILISATION == RV9_PE_UTILISATION, "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_NODEV    == RV9_PE_NODEV,    "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_BUSY     == RV9_PE_BUSY,     "ABI drift");
 
 #include "esp_log.h"
 
@@ -54,14 +56,20 @@ static rv9_pid_t   s_next_pid = 1;
 static bool        s_aging = true;
 static bool        s_running;
 
-static rv9_proc_fork_hook_t s_on_fork;
-static rv9_proc_exit_hook_t s_on_exit;
+static rv9_proc_fork_hook_t  s_on_fork;
+static rv9_proc_exit_hook_t  s_on_exit;
+static rv9_proc_claim_hook_t s_on_claim;
 
 void rv9_proc_set_hooks(rv9_proc_fork_hook_t on_fork,
                         rv9_proc_exit_hook_t on_exit)
 {
     s_on_fork = on_fork;
     s_on_exit = on_exit;
+}
+
+void rv9_proc_set_claim_hook(rv9_proc_claim_hook_t hook)
+{
+    s_on_claim = hook;
 }
 
 const char *rv9_proc_strerror(rv9_proc_err_t err)
@@ -77,6 +85,8 @@ const char *rv9_proc_strerror(rv9_proc_err_t err)
     case RV9_PROC_ERR_NOSLOT:   return "no real-time slot free";
     case RV9_PROC_ERR_CONTRACT: return "its declaration contradicts itself";
     case RV9_PROC_ERR_UTILISATION: return "the CPU is already promised";
+    case RV9_PROC_ERR_NODEV:    return "it needs a device this machine lacks";
+    case RV9_PROC_ERR_BUSY:     return "a device it needs alone is owned";
     default:                    return "unknown error";
     }
 }
@@ -259,6 +269,28 @@ static void proc_trampoline(void *arg)
                  (unsigned)p->pid, next_name);
         rc = -1;
         break;
+    }
+
+    /*
+     * The module changes; the promise does not.
+     *
+     * Chaining keeps the pid, so whatever this process already owns stays
+     * owned -- claiming it again is a second reference to the same record
+     * and costs nothing. What must not happen is a module arriving through
+     * the back door with declarations nobody checked: a program could
+     * otherwise start as something harmless and continue as something that
+     * wants the actuator.
+     */
+    if (s_on_claim != NULL) {
+        int refused = s_on_claim(p->pid, next->image, next_name);
+        if (refused != RV9_PROC_OK) {
+            ESP_LOGE(TAG, "pid %u: refused to chain to '%s': %s",
+                     (unsigned)p->pid, next_name,
+                     rv9_proc_strerror((rv9_proc_err_t)refused));
+            rv9_mod_unlink(next);
+            rc = -refused;
+            break;
+        }
     }
 
     /* Swap the module out. Paths stay open, which is the point. */
@@ -886,12 +918,37 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
     if (stack == 0) stack = PROC_DEFAULT_STACK;
 
     /*
+     * The pid comes first, because admission needs somebody to admit.
+     *
+     * A device reserved from the manifest is reserved *for* a process, and
+     * the reservation has to exist before the process does -- otherwise the
+     * check and the claim are two separate moments and two programs can
+     * both pass the check. So the number is issued here and the descriptor
+     * is built around it later. A refusal spends a pid, which is the right
+     * way round: the alternative is a claim with nothing to release it.
+     */
+    rv9_lock_acquire(s_lock);
+    rv9_pid_t pid = s_next_pid++;
+    rv9_lock_release(s_lock);
+
+    /*
      * Admission, before anything is allocated on this program's behalf.
      *
-     * Ordinary processes are not admitted, only started: they are late if
-     * they are late, and nothing else depends on their timing. Real-time
-     * work is the opposite, so it is asked for rather than taken.
+     * Ordinary processes are not admitted for *timing*: they are late if
+     * they are late, and nothing else depends on it. But every process is
+     * admitted for what it says it must own, real-time or not -- two
+     * programs driving one output is wrong at any priority, and the
+     * scheduler has nothing to do with it.
      */
+    if (s_on_claim != NULL) {
+        int refused = s_on_claim(pid, mod->image, module_name);
+        if (refused != RV9_PROC_OK) {
+            if (s_on_exit) s_on_exit(pid);      /* undo a partial claim */
+            rv9_mod_unlink(mod);
+            return (rv9_proc_err_t)refused;
+        }
+    }
+
     uint32_t wcet_us = 0, deadline_us = 0;
     if (cls == RV9_CLASS_REALTIME) {
         uint32_t interval = period_us;
@@ -903,6 +960,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
         rv9_proc_err_t adm = admit_rt(mod->image, module_name, interval,
                                       stack, &wcet_us, &deadline_us);
         if (adm != RV9_PROC_OK) {
+            if (s_on_exit) s_on_exit(pid);
             rv9_mod_unlink(mod);
             return adm;
         }
@@ -910,6 +968,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
 
     rv9_proc_t *p = rv9_calloc(1, sizeof(*p));
     if (p == NULL) {
+        if (s_on_exit) s_on_exit(pid);
         rv9_mod_unlink(mod);
         return RV9_PROC_ERR_NOMEM;
     }
@@ -918,6 +977,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
         p->statics = rv9_calloc(1, h->static_size);
         if (p->statics == NULL) {
             rv9_free(p);
+            if (s_on_exit) s_on_exit(pid);
             rv9_mod_unlink(mod);
             return RV9_PROC_ERR_NOMEM;
         }
@@ -927,7 +987,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
 
     rv9_lock_acquire(s_lock);
 
-    p->pid                = s_next_pid++;
+    p->pid                = pid;
     p->parent             = parent;
     p->module             = mod;
     p->base_priority      = priority;
@@ -965,6 +1025,13 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
         p->state = RV9_PROC_EXITED;
         p->exit_status = -1;
         rv9_lock_release(s_lock);
+
+        /* The fork hook has already run, so this process owns a path table
+           and whatever it reserved. Nothing else will ever tell the I/O
+           manager it is gone -- the trampoline that normally does so is
+           exactly the thing that failed to start. */
+        if (s_on_exit) s_on_exit(pid);
+
         rv9_mod_unlink(mod);
         return RV9_PROC_ERR_NOMEM;
     }

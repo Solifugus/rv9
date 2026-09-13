@@ -48,7 +48,11 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     int p = env->open(path, writing ? RV9_MODE_RW : RV9_MODE_READ);
     if (p < 0) {
         m_say(env, RV9_STDOUT, path);
-        m_say(env, RV9_STDOUT, ": cannot open (reserved or not a pin)\n");
+        if (p == -RV9_IOE_BUSY) {
+            m_say(env, RV9_STDOUT, ": owned by another process (see 'owns')\n");
+        } else {
+            m_say(env, RV9_STDOUT, ": cannot open (reserved or not a pin)\n");
+        }
         return -3;
     }
 

@@ -2495,6 +2495,10 @@ ordinary process that runs late is slow, and nothing else depends on its
 timing. A real-time process that runs late is wrong, and something else
 usually does.
 
+(That holds for *timing*. §26 adds admission on what a program says it must
+own, and that applies to every process: two programs driving one output is
+wrong at any priority, and the scheduler has nothing to do with it.)
+
 ### Four ways to say no
 
 Each is a separate error code rather than one refusal, because each is
@@ -2599,6 +2603,162 @@ The wrong number was visible for one reason: `stacks` prints what it is
 told. Measurement caught a bug that had been silently corrupting nothing
 in particular for weeks, and would eventually have corrupted something
 specific.
+
+## 26. Who owns the motor
+
+Everything below the I/O manager is happy to be used twice. Two processes
+open `/gpio/2` and the driver hands each of them the pin. Two processes open
+`/pwm0/3` and the driver allocates each of them an LEDC channel — two
+channels, both wired to the same physical output. Nothing fails, no error is
+reported, and the pin does whatever the last writer said.
+
+On a machine that prints, that is a curiosity. On one that moves, it is a
+control loop and a diagnostic somebody left running, arguing through a
+servo. The hardware has no way to prefer either.
+
+### The resource is the unit, not the device
+
+`/gpio/2` and `/gpio/3` are separate resources on one device, because they
+are separate pins. So a claim is keyed by the full path as opened, not by
+the device — which also makes a *file* a resource, and an exclusive open of
+one a lock, for free.
+
+Comparison is exact. Whether `/r0/notes` and `/r0/NOTES` are one resource or
+two is a question about the file manager, and this layer does not
+second-guess it.
+
+### One record per owner
+
+Five processes sharing `/term` is five records. A single record with a count
+would be smaller and would answer *is it busy*, which is the question a lock
+asks. The questions actually worth asking are *who has it* and — the one
+coming next — *whose device was this when it died*. Neither survives being
+reduced to a count.
+
+```
+rv9> owns
+resource                  owner  refs  held as
+/pwm0/3                   9      2     exclusive, reserved
+/n0/listen/22             sys    1     shared
+/ssh0                     6      1     shared
+/term                     7      1     shared
+/uart0                    7      2     shared
+```
+
+`sys` is a driver's own hold — `rv9_io_open_detached`, which `sshd` uses for
+its listening socket. It belongs to no process, so no process exit can take
+it away.
+
+### Two kinds of reference, and why
+
+A claim is refcounted, and the references come from two places.
+
+Each **open path** holds one, released when the path closes. Each
+**manifest reservation** holds one, taken at fork *before the program runs*
+and released when it dies.
+
+The second is what makes the guarantee meaningful. A program that declares
+
+```
+exclusives="/pwm0/3"
+```
+
+owns that output for its lifetime, not for the duration of one open — so
+there is no window between its opens in which something else can take the
+actuator. And it means the refusal happens at fork, where it costs nothing:
+
+```
+rv9> hold &
+holding /pwm0/3 as pid 9
+[9] hold
+
+rv9> hold
+E (18045) rv9-claim: /pwm0/3 belongs to pid 9; pid 11 cannot be given it
+E (18046) rv9-io: admit 'hold': it needs /pwm0/3 alone, and pid 9 has it
+hold: a device it needs alone is owned (see 'owns')
+
+rv9> pwm 3 1200
+W (19048) rv9-claim: /pwm0/3 belongs to pid 9; pid 12 may not open it
+/pwm0/3: owned by another process (see 'owns')
+```
+
+The second refusal is a fork that never happened. The third is an open
+refused before the driver was asked for anything — which matters, because by
+the time `ledc_channel_config` has run, the second channel is already
+driving the pin the caller is about to be told it cannot have.
+
+### `device` is checked too, and differently
+
+`device` means *needed, shared*, and only its existence is checked. A
+program that names a device this machine does not have is not going to work
+on it, and finding that out at fork beats finding out at the first open,
+three seconds into a startup sequence:
+
+```
+rv9> hold                       # with devices="/sd0" declared
+E rv9-io: admit 'hold': it needs /sd0, which this machine does not have
+hold: it needs a device this machine does not have (see the log)
+```
+
+### Dying is not a way to keep the motor
+
+A program that ends by returning lets go of things because it is asked to.
+A program stopped by the scheduler is not asked anything, and that is the
+case the whole mechanism exists for. The exit hook releases reservations on
+every path out of a process, including the ones nobody planned:
+
+```
+rv9> hold crash
+holding /pwm0/3 as pid 8
+now dying without letting go...
+descending...
+E (14057) rv9-proc: pid 8 ('smash') killed: stack overflow
+hold returned -6
+
+rv9> owns
+resource                  owner  refs  held as
+/n0/listen/22             sys    1     shared
+...                             # /pwm0/3 is free
+```
+
+`hold crash` chains to `smash`, which runs off its own stack and is killed
+by the guard from §22. The claim is gone; the next `hold` gets the pin.
+
+Note what is *not* claimed: a path reference outlives its owner. If a
+process dies while a child still holds an inherited path to the resource,
+the claim stays until that path closes. That is the honest answer — the
+device is still open — and it is why the two reference kinds are counted
+separately rather than both being released at exit.
+
+### Three things this exposed
+
+**Chaining was a hole.** `chain()` keeps the pid and swaps the module
+underneath it, and nothing re-read the new module's manifest. A program
+could have started as something harmless and continued as something that
+wants the actuator. The chain path now runs the same admission the fork
+path does; claiming what the process already owns is a second reference to
+the same record and costs nothing.
+
+**A failed `rv9_task_create` leaked its path table.** The fork hook had
+already run, so the process owned a table and whatever it had reserved — and
+the trampoline that normally reports the exit is precisely the thing that
+failed to start. Nothing would ever have told the I/O manager. Pre-existing;
+found by asking who releases a claim on each path out of `fork_common`.
+
+**The pid now comes before admission.** A reservation is made *for* a
+process, so the number has to exist before the check — otherwise the check
+and the claim are two separate moments and two programs can both pass the
+check. A refusal therefore spends a pid, which is the right way round: the
+alternative is a claim with nothing to release it.
+
+### What this does not do
+
+Nothing puts a device into any particular state on the way out. `/pwm0`
+stops driving when its path closes because its driver chooses to; `/gpio`
+deliberately holds its level. Neither is a *declared* failsafe, and
+`RV9_MTAG_FAILSAFE` still has nothing behind it. Ownership was the
+prerequisite — you cannot ask "what state should this be left in" until you
+can answer "whose was it" — and that is the next piece.
 
 ## 9. Migration to a native kernel
 
