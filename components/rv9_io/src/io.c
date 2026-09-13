@@ -1445,7 +1445,37 @@ static int io_claims_op(void *buf, uint32_t len)
                           (int)(len / sizeof(rv9_sys_claim_t)));
 }
 
+/* Every attached device, or a count when the buffer is empty. */
+static int io_devices_op(void *buf, uint32_t len)
+{
+    uint32_t max = buf ? len / sizeof(rv9_sys_device_t) : 0;
+    rv9_sys_device_t *out = (rv9_sys_device_t *)buf;
+    int n = 0;
+
+    rv9_lock_acquire(s_lock);
+    for (rv9_dev_t *d = s_devs; d != NULL; d = d->next) {
+        if (out != NULL && (uint32_t)n < max) {
+            memset(&out[n], 0, sizeof(out[n]));
+            strncpy(out[n].name, d->name, sizeof(out[n].name) - 1);
+            if (d->fmgr != NULL) {
+                strncpy(out[n].filemgr, d->fmgr->name,
+                        sizeof(out[n].filemgr) - 1);
+            }
+            if (d->drv != NULL) {
+                strncpy(out[n].driver, d->drv->name, sizeof(out[n].driver) - 1);
+                out[n].retains  = d->drv->retains ? 1 : 0;
+                out[n].sessions = (d->drv->open != NULL) ? 1 : 0;
+            }
+            out[n].open_count = (uint16_t)d->open_count;
+        }
+        n++;
+    }
+    rv9_lock_release(s_lock);
+    return n;
+}
+
 static const rv9_mod_io_ops_t s_mod_io_ops = {
+    .devices = io_devices_op,
     .open  = io_open_op,
     .close = io_close_op,
     .read  = io_read_op,

@@ -40,3 +40,7 @@ $CC $FLAGS -o "$OUT/path_test"   "$HERE/path_test.c"   "$OUT/raster.c" "$OUT/fon
 
 "$OUT/raster_test"
 "$OUT/path_test" | grep -v '^I rv9-svgwin'
+
+# The target profile is generated from the sources. A stale one tells a
+# compiler something that is no longer true, which is worse than none.
+python3 "$HERE/../mkprofile.py" --check

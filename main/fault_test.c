@@ -444,7 +444,7 @@ static void declared_publications(void)
  */
 static void stopped_from_outside(const char *module, const char *arg,
                                  int want_status, int want_fault,
-                                 const char *what)
+                                 const char *cell, const char *what)
 {
     ESP_LOGI(TAG, "--- %s ---", what);
 
@@ -471,6 +471,13 @@ static void stopped_from_outside(const char *module, const char *arg,
     check(pin_read() == 0, "its pin was parked");
     check(rv9_rt_slots_used() == slots, "its release slot is free");
     check(took < 2000, "promptly, not eventually");
+
+    /* The cell speaks R9: whatever the table says, a loop that stopped
+       responding is published as having missed its deadline. */
+    rv9_pub_info_t ci;
+    check(cell != NULL && cell_info(cell, &ci) &&
+          ci.fault == RV9_FAULT_DEADLINE,
+          "its cell says DEADLINE, which is R9's name for it");
     ESP_LOGI(TAG, "  (%lu ms from fork to stopped)", (unsigned long)took);
 }
 
@@ -497,14 +504,15 @@ bool rv9_fault_selftest(void)
     a_loop_that_misses_its_deadline();
 
     stopped_from_outside("lateloop", "spin", -RV9_PROC_ERR_DEADLINE,
-                         RV9_FAULT_DEADLINE,
+                         RV9_FAULT_DEADLINE, CELL,
                          "a loop that never finishes its activation");
     stopped_from_outside("runaway", NULL, -RV9_PROC_ERR_RUNAWAY,
-                         RV9_FAULT_RUNAWAY,
+                         RV9_FAULT_RUNAWAY, "/pub0/RUNAWAY",
                          "a loop that stops waiting, in its own code");
     stopped_from_outside("runaway", "syscalls", -RV9_PROC_ERR_RUNAWAY,
-                         RV9_FAULT_RUNAWAY,
+                         RV9_FAULT_RUNAWAY, "/pub0/RUNAWAY",
                          "a loop that stops waiting, through system calls");
+    rv9_io_remove("/pub0/RUNAWAY");
 
     declared_publications();
 

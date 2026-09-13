@@ -3618,7 +3618,11 @@ carries the reason:
   thing it leaves behind, and a fault that erased it would destroy the
   evidence;
 - opening the cell to write again clears it. That is the component, or its
-  replacement, back in service.
+  replacement, back in service;
+- the reason is R9's, not RV-9's. A runaway (§30) is published as
+  `DEADLINE` — R9 decided a component that stops coming back to wait has
+  missed its deadline, and needs no word of its own — while the process
+  table and the log keep `RUNAWAY` for whoever is working out how.
 
 The ordering R9 requires is why this needed a second hook rather than the
 existing exit hook: the exit hook runs *before* the process table knows the
@@ -4059,6 +4063,126 @@ absence, as the utilisation check always was.
 **The explicit `priority` escape hatch in R9 §13 is not implemented.** With
 two levels, it could only mean "urgent" or "routine", and whether that is
 worth offering is a question for the language.
+
+## 34. What a compiler may rely on
+
+R9's design names three contracts between the language and the system.
+The second — the manifest, compiler to RV-9 — has existed since §24, and
+the third — measured reality, RV-9 back to the compiler — is everything
+`procs`, `rt`, `pubs` and the fault cells report. The first had never been
+built: *the RV-9 toolchain supplies a machine-readable target profile
+describing its ABI, module format, supported manifest entries, execution
+classes, and operations known to be real-time safe.*
+
+Alignment note 7 had been marked "documented in prose, `RV9_RT_CODE` in
+source; not readable" since it was written. A compiler cannot read prose,
+and should not be asked to read source.
+
+### Two halves, because two different things know the answers
+
+What every RV-9 build offers is known to its sources. What *this board*
+offers — which devices, where its radio sits, how many real-time slots — is
+known only to the board. So there are two profiles:
+
+- `docs/target/rv9-profile.json`, generated from the sources by
+  `tools/mkprofile.py` and committed beside them;
+- `profile`, a command that prints the board's half as JSON, from two new
+  sysinfo records, `RV9_SYS_DEVICES` and `RV9_SYS_LIMITS`.
+
+### Derived, not written
+
+A profile maintained by hand is wrong the first time somebody forgets it,
+and the thing reading it is a compiler that will believe it. So nothing in
+the static profile is typed in:
+
+- **Manifest tags** come from `tools/mkmodule.py`, the producer, and are
+  checked against `module.h`, the consumer. A tag either side lacks is an
+  error. Each tag carries its number, encoding, whether it repeats, and
+  its value names.
+- **"Enforced"** is true only where some component source outside the header
+  refers to the tag. Five are registered with nothing behind them —
+  `static`, `class`, `capability`, `compiler`, `runtime` — and the profile
+  says so rather than letting a compiler assume they mean something. The
+  first draft counted boot tests as consumers, and `desc` came out
+  "enforced"; tests are no longer counted.
+- **Calls** are every field of `rv9_mod_env_t` in order, with the ABI version
+  that added it, parsed from the struct's own `--- ABI n ---` markers.
+- **Real-time safety** is read off `RV9_RT_CODE` on the function that
+  actually implements each call, found by following the assignments in
+  `rv9_mod_env_init` and the process manager's overrides. `rt_wait` and
+  `time_us` are `yes`; `read` and `write` are `device`, bounded when the
+  device's file manager and driver are; everything else is `no`. File
+  managers and drivers are read the same way, from their registration
+  tables: `pio` and `pfm` are resident, `scf`, `rbf` and `nfm` are not, and
+  of the drivers only `gpio` is.
+- **Faults** each carry their R9 name, and a fault RV-9 adds without one
+  stops the generator. That mapping is a language decision; the script
+  refuses to make it by default.
+- **Limits** — slots, the runaway threshold, the watchdog period, the
+  utilisation ceiling, the process history — are read from the `#define`s
+  that set them.
+
+The attribute is the claim, and the profile says how far it goes: what an
+entry function calls is its implementer's responsibility. `pfm_write` is
+resident, and deliberately calls a wake-up that is not.
+
+`--check` regenerates in memory and fails if the committed file differs.
+It runs with the host tests, so a change to the ABI that forgets the
+profile fails there rather than in a compiler.
+
+### The board's half
+
+```
+rv9> profile
+{
+  "profile": "rv9-board",
+  "module_abi": 13,
+  "realtime": {
+    "slots": 4,
+    "utilisation_ceiling_permille": 700,
+    "runaway_ms": 250,
+    "watchdog_us": 2000,
+    "host_priority": { "urgent": 24, "routine": 21, "radio": 23, "kernel": 19 }
+  },
+  "memory": { "heap_floor": 12288 },
+  "processes": { "history": 16, "history_max": 32, "max_paths": 8 },
+  "devices": [
+    { "name": "/pub0", "filemgr": "pfm", "driver": "pubmem", "retains": true, "sessions": false },
+    { "name": "/gpio", "filemgr": "pio", "driver": "gpio", "retains": true, "sessions": false },
+    ...
+  ]
+}
+```
+
+The radio and kernel priorities are asked of the running host, not
+remembered from §33. A toolchain captures it the way anything is captured
+from RV-9: `printf 'profile\nexit\n' | ssh board`, or `profile > /r0/…`.
+
+### RUNAWAY, decided
+
+R9 settled the question §30 left open: a component that stops coming back
+to wait has missed its deadline, and the language needs no word of its
+own for it. PFM publishes a runaway into its cell as `DEADLINE`; the
+process table and the log keep `RUNAWAY`; the profile records the mapping
+in `faults`. `fault-test` checks both sides — table `RUNAWAY`, cell
+`DEADLINE` — for both runaway cases, and 76 checks pass.
+
+### What this does not do
+
+**The real-time claim is one level deep.** It is the attribute on the entry
+function, not an analysis of what that function reaches.
+
+**Device-level latency is not in it.** R9 lists "machine-readable device
+latency and ownership metadata" among its open items; the board profile
+says what each device is built from, not how long it takes.
+
+**Status and setting codes are not described per device class.** A compiler
+learns that `getstat` exists and is not real-time safe, not which codes a
+`pio` device answers.
+
+**The board's half travels as text over a shell.** There is no structured
+query protocol, and `format` is 1 because the shape of both files is
+expected to change as the compiler starts reading them.
 
 ## 9. Migration to a native kernel
 

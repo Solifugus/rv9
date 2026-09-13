@@ -861,7 +861,14 @@ static void pfm_ended(rv9_dev_t *dev, rv9_pid_t pid, int fault)
         if (fault == RV9_FAULT_NONE) continue;
         if (c->held || c->fault != 0) continue;
 
-        c->fault = (uint32_t)fault;
+        /*
+         * In R9's words, because the cell is what R9 reads. A component
+         * that stopped coming back to wait has missed its deadline, and
+         * the language calls it that (§15.3); the process table and the
+         * log below keep RUNAWAY for whoever is working out how.
+         */
+        c->fault = (fault == RV9_FAULT_RUNAWAY) ? RV9_FAULT_DEADLINE
+                                                : (uint32_t)fault;
 
         /* No writer holds it, so the sequence is even and nobody else is
            moving it. Two, as every publication is. */
@@ -870,8 +877,9 @@ static void pfm_ended(rv9_dev_t *dev, rv9_pid_t pid, int fault)
         wake_watchers(d, c);
 
         ESP_LOGW(TAG, "%s/%s: its publisher, pid %u, stopped (%s); the cell "
-                      "says so and keeps its last value", dev->name, c->name,
-                 (unsigned)pid, fault_word((uint32_t)fault));
+                      "says %s and keeps its last value", dev->name, c->name,
+                 (unsigned)pid, fault_word((uint32_t)fault),
+                 fault_word(c->fault));
     }
 
     rv9_lock_release(d->lock);

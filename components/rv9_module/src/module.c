@@ -678,6 +678,14 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
         return 1;
     }
 
+    case RV9_SYS_DEVICES:
+        if (s_io_ops == NULL || s_io_ops->devices == NULL) return -1;
+        return s_io_ops->devices(buf, len);
+
+    case RV9_SYS_LIMITS:
+        if (s_proc_ops == NULL || s_proc_ops->limits == NULL) return -1;
+        return s_proc_ops->limits(buf, len);
+
     case RV9_SYS_ADMIT: {
         if (s_proc_ops == NULL || s_proc_ops->rt_load == NULL) return -1;
         return s_proc_ops->rt_load(buf, len);

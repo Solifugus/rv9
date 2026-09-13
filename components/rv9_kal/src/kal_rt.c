@@ -1042,6 +1042,23 @@ void rv9_rt_release(void)
     if (rt != NULL) release_slot(rt);
 }
 
+void rv9_rt_limits(rv9_rt_limits_t *out)
+{
+    if (out == NULL) return;
+    memset(out, 0, sizeof(*out));
+
+    out->slots        = MAX_RT_TASKS;
+    out->runaway_ms   = RV9_RT_RUNAWAY_MS;
+    out->watchdog_us  = WATCH_US;
+    out->prio_urgent  = RT_PRIO_URGENT;
+    out->prio_routine = RT_PRIO_ROUTINE;
+
+    TaskHandle_t h = xTaskGetHandle("wifi");
+    if (h != NULL) out->prio_radio = (int)uxTaskPriorityGet(h);
+    h = xTaskGetHandle("rv9-kernel");
+    if (h != NULL) out->prio_kernel = (int)uxTaskPriorityGet(h);
+}
+
 void rv9_rt_set_class(rv9_task_t task, bool urgent, uint32_t bound_us)
 {
     TaskHandle_t t = (TaskHandle_t)task;

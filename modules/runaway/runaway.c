@@ -19,6 +19,7 @@
 #include "modlib.h"
 
 #define PIN      "/gpio/2"
+#define CELL     "/pub0/RUNAWAY"
 #define ON_TIME  20
 
 __attribute__((section(".text.entry")))
@@ -41,12 +42,24 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     uint32_t v = 1;
     env->write(pin, &v, sizeof(v));
 
+    /* Published while it still waits, so that a watcher has a value to
+       keep -- and the fault, when it comes, lands beside it. */
+    int pub = env->open(CELL, RV9_MODE_WRITE);
+    struct { rv9_pub_t head; int32_t n; } msg;
+    msg.head.seq      = 0;
+    msg.head.len      = sizeof(msg.n);
+    msg.head.stamp_us = 0;
+
     if (env->rt_declare(0) < 0) {
         env->close(pin);
         return -4;
     }
 
     for (uint32_t n = 0; n < ON_TIME; n++) {
+        if (pub >= 0) {
+            msg.n = (int32_t)n;
+            env->write(pub, &msg, sizeof(msg));
+        }
         if (env->rt_wait() < 0) break;
     }
 

@@ -1054,7 +1054,39 @@ static int proc_kill_op(int pid)
     return (err == RV9_PROC_OK) ? 0 : -(int)err;
 }
 
+/* The limits a toolchain may plan against, read from where each lives. */
+static int proc_limits_op(void *buf, uint32_t len)
+{
+    if (buf == NULL || len < sizeof(uint32_t)) return -1;
+
+    rv9_rt_limits_t rt;
+    rv9_rt_limits(&rt);
+
+    rv9_proc_rt_load_t load;
+    rv9_proc_rt_load(&load);
+
+    rv9_sys_limits_t l;
+    memset(&l, 0, sizeof(l));
+    l.module_abi               = RV9_MODULE_ABI;
+    l.rt_slots                 = rt.slots;
+    l.rt_util_ceiling_permille = load.ceiling_permille;
+    l.rt_runaway_ms            = rt.runaway_ms;
+    l.rt_watchdog_us           = rt.watchdog_us;
+    l.prio_urgent              = (uint8_t)rt.prio_urgent;
+    l.prio_routine             = (uint8_t)rt.prio_routine;
+    l.prio_radio               = (uint8_t)rt.prio_radio;
+    l.prio_kernel              = (uint8_t)rt.prio_kernel;
+    l.heap_floor               = (uint32_t)rv9_heap_floor();
+    l.proc_history             = PROC_HISTORY;
+    l.proc_history_max         = PROC_HISTORY_MAX;
+    l.max_paths                = RV9_MAX_PATHS;
+
+    memcpy(buf, &l, len < sizeof(l) ? len : sizeof(l));
+    return 1;
+}
+
 static const rv9_mod_proc_ops_t s_mod_proc_ops = {
+    .limits = proc_limits_op,
     .signal = proc_signal_op,
     .kill   = proc_kill_op,
     .fork  = proc_fork_op,

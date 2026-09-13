@@ -550,7 +550,11 @@ typedef struct {
 #define RV9_FAULT_RUNAWAY   4    /* held the CPU without waiting; see
                                     RV9_RT_RUNAWAY_MS. Whatever it declared
                                     about deadlines: `report` is not leave
-                                    to take the machine */
+                                    to take the machine. R9 names this
+                                    DEADLINE (§15.3), so a publication cell
+                                    says DEADLINE; the process table and the
+                                    log keep RUNAWAY, for whoever is working
+                                    out why */
 
 /* Generic getstat/setstat codes a module may use. */
 #define RV9_SS_ECHO        1
@@ -711,7 +715,8 @@ typedef struct __attribute__((packed)) {
 
     /*
      * Why the program this cell belongs to stopped, if it stopped badly:
-     * RV9_FAULT_*, or 0. R9 §15.1 has a faulted component *publish* that it
+     * RV9_FAULT_*, or 0 -- in R9's names, so a runaway reads DEADLINE here
+     * (see RV9_FAULT_RUNAWAY). R9 §15.1 has a faulted component *publish* that it
      * faulted, and this is where: the fault is itself a publication -- the
      * sequence moves on by one, so a watcher blocked in RV9_PUB_GS_WAIT
      * wakes -- while the value and its stamp stay exactly as the component
@@ -813,6 +818,43 @@ _Static_assert(sizeof(rv9_pub_info_t) == 56, "rv9_pub_info_t is frozen");
 #define RV9_SYS_STACK    5     /* rv9_sys_stack_t, one per live process */
 #define RV9_SYS_ADMIT    6     /* rv9_sys_admit_t, one record            */
 #define RV9_SYS_CLAIM    7     /* rv9_sys_claim_t, one per device claim  */
+#define RV9_SYS_DEVICES  8     /* rv9_sys_device_t, one per device       */
+#define RV9_SYS_LIMITS   9     /* rv9_sys_limits_t, one record           */
+
+/*
+ * What this machine offers, for a toolchain asking the board itself.
+ *
+ * The static half of RV-9's target profile -- the ABI, the manifest, which
+ * calls are real-time safe -- is generated from the sources by
+ * tools/mkprofile.py. These two are the half only the running board knows:
+ * which devices it has, and the limits it was built and started with. The
+ * `profile` command prints both as JSON.
+ */
+typedef struct __attribute__((packed)) {
+    char     name[16];         /* "/gpio" */
+    char     filemgr[16];      /* "pio" */
+    char     driver[16];       /* "gpio" */
+    uint8_t  retains;          /* holds its state past the last close */
+    uint8_t  sessions;         /* first open is a session: RV9_SS_HANGUP */
+    uint16_t open_count;
+} rv9_sys_device_t;
+
+/* Filled up to the caller's length, like rv9_sys_mem_t; appended only. */
+typedef struct __attribute__((packed)) {
+    uint32_t module_abi;
+    uint32_t rt_slots;
+    uint32_t rt_util_ceiling_permille;
+    uint32_t rt_runaway_ms;
+    uint32_t rt_watchdog_us;
+    uint8_t  prio_urgent;      /* host priorities, as the host numbers them */
+    uint8_t  prio_routine;
+    uint8_t  prio_radio;       /* 0 when there is no radio task */
+    uint8_t  prio_kernel;      /* RV-9's kernel: every ordinary process */
+    uint32_t heap_floor;
+    uint32_t proc_history;
+    uint32_t proc_history_max;
+    uint32_t max_paths;
+} rv9_sys_limits_t;
 
 /*
  * Who owns what.
@@ -1108,6 +1150,7 @@ typedef struct {
     int (*getstat)(int path, uint32_t code, void *arg);
     int (*setstat)(int path, uint32_t code, void *arg);
     int (*claims)(void *buf, uint32_t len);  /* fills rv9_sys_claim_t records */
+    int (*devices)(void *buf, uint32_t len); /* fills rv9_sys_device_t records */
 } rv9_mod_io_ops_t;
 
 void rv9_mod_set_io_ops(const rv9_mod_io_ops_t *ops);
@@ -1124,6 +1167,7 @@ typedef struct {
     int (*rt_load)(void *buf, uint32_t len); /* fills one rv9_sys_admit_t */
     int (*signal)(int pid, uint32_t signals);
     int (*kill)(int pid);
+    int (*limits)(void *buf, uint32_t len);  /* fills one rv9_sys_limits_t */
 } rv9_mod_proc_ops_t;
 
 void rv9_mod_set_proc_ops(const rv9_mod_proc_ops_t *ops);

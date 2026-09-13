@@ -1,0 +1,590 @@
+{
+  "profile": "rv9",
+  "format": 1,
+  "generated_by": "tools/mkprofile.py -- regenerate, do not edit",
+  "module": {
+    "magic": 1295603282,
+    "abi": 13,
+    "header_bytes": 40,
+    "types": {
+      "PROGRAM": 1,
+      "LIBRARY": 2,
+      "FILEMGR": 3,
+      "DRIVER": 4,
+      "DESCRIPTOR": 5,
+      "DATA": 6,
+      "SYSTEM": 7
+    },
+    "position": "independent: PC-relative code and rodata as one blob, no writable data, no external symbols"
+  },
+  "manifest": {
+    "mandatory_bit": 32768,
+    "highest_known_tag": 18,
+    "unknown_advisory": "skipped",
+    "unknown_mandatory": "module refused",
+    "layout": "entries of u16 tag, u16 length, value, padded to 4 bytes; ends at tag 0 or the end of the module",
+    "tags": [
+      {
+        "name": "desc",
+        "tag": 1,
+        "encoding": "string",
+        "repeatable": false,
+        "enforced": false
+      },
+      {
+        "name": "stack",
+        "tag": 2,
+        "encoding": "u32",
+        "repeatable": false,
+        "enforced": true
+      },
+      {
+        "name": "static",
+        "tag": 3,
+        "encoding": "u32",
+        "repeatable": false,
+        "enforced": false
+      },
+      {
+        "name": "heap_max",
+        "tag": 4,
+        "encoding": "u32",
+        "repeatable": false,
+        "enforced": true
+      },
+      {
+        "name": "class",
+        "tag": 5,
+        "encoding": "u8",
+        "repeatable": false,
+        "enforced": false,
+        "values": {
+          "unspecified": 0,
+          "proaction": 1,
+          "reaction": 2,
+          "realtime": 3
+        }
+      },
+      {
+        "name": "period_us",
+        "tag": 6,
+        "encoding": "u32",
+        "repeatable": false,
+        "enforced": true
+      },
+      {
+        "name": "deadline_us",
+        "tag": 7,
+        "encoding": "u32",
+        "repeatable": false,
+        "enforced": true
+      },
+      {
+        "name": "min_inter_us",
+        "tag": 8,
+        "encoding": "u32",
+        "repeatable": false,
+        "enforced": true
+      },
+      {
+        "name": "wcet_us",
+        "tag": 9,
+        "encoding": "u32",
+        "repeatable": false,
+        "enforced": true
+      },
+      {
+        "name": "device",
+        "tag": 10,
+        "encoding": "string",
+        "repeatable": true,
+        "enforced": true
+      },
+      {
+        "name": "exclusive",
+        "tag": 11,
+        "encoding": "string",
+        "repeatable": true,
+        "enforced": true
+      },
+      {
+        "name": "failsafe",
+        "tag": 12,
+        "encoding": "u32 value, then device path",
+        "repeatable": true,
+        "enforced": true
+      },
+      {
+        "name": "capability",
+        "tag": 13,
+        "encoding": "string",
+        "repeatable": true,
+        "enforced": false
+      },
+      {
+        "name": "compiler",
+        "tag": 14,
+        "encoding": "string",
+        "repeatable": false,
+        "enforced": false
+      },
+      {
+        "name": "runtime",
+        "tag": 15,
+        "encoding": "string",
+        "repeatable": false,
+        "enforced": false
+      },
+      {
+        "name": "on_deadline",
+        "tag": 16,
+        "encoding": "u8",
+        "repeatable": false,
+        "enforced": true,
+        "values": {
+          "report": 0,
+          "fault": 1
+        }
+      },
+      {
+        "name": "publishes",
+        "tag": 17,
+        "encoding": "string",
+        "repeatable": true,
+        "enforced": true
+      },
+      {
+        "name": "watches",
+        "tag": 18,
+        "encoding": "string",
+        "repeatable": true,
+        "enforced": true
+      }
+    ]
+  },
+  "execution_classes": {
+    "UNSPECIFIED": 0,
+    "PROACTION": 1,
+    "REACTION": 2,
+    "REALTIME": 3
+  },
+  "on_deadline": {
+    "REPORT": 0,
+    "FAULT": 1
+  },
+  "faults": [
+    {
+      "name": "NONE",
+      "value": 0,
+      "r9_reason": null
+    },
+    {
+      "name": "STACK",
+      "value": 1,
+      "r9_reason": "STACK"
+    },
+    {
+      "name": "KILLED",
+      "value": 2,
+      "r9_reason": null
+    },
+    {
+      "name": "DEADLINE",
+      "value": 3,
+      "r9_reason": "DEADLINE"
+    },
+    {
+      "name": "RUNAWAY",
+      "value": 4,
+      "r9_reason": "DEADLINE"
+    }
+  ],
+  "process_errors": {
+    "NOTFOUND": 1,
+    "NOMEM": 2,
+    "MODULE": 3,
+    "TIMEOUT": 4,
+    "INVAL": 5,
+    "FAULT": 6,
+    "NOSLOT": 7,
+    "CONTRACT": 8,
+    "UTILISATION": 9,
+    "NODEV": 10,
+    "BUSY": 11,
+    "KILLED": 12,
+    "DEADLINE": 13,
+    "RUNAWAY": 14,
+    "NOPUB": 15,
+    "UNSCHEDULABLE": 16
+  },
+  "io_errors": {
+    "NOTFOUND": 1,
+    "BADPATH": 2,
+    "NOPATHS": 3,
+    "NOMEM": 4,
+    "MODE": 5,
+    "UNSUPPORTED": 6,
+    "WOULDBLOCK": 7,
+    "IO": 8,
+    "INVAL": 9,
+    "EXISTS": 10,
+    "TIMEOUT": 11,
+    "BUSY": 12
+  },
+  "signals": {
+    "STOP": 1,
+    "USER1": 2,
+    "USER2": 4
+  },
+  "sysinfo": {
+    "MEM": 1,
+    "MODULES": 2,
+    "PROCS": 3,
+    "RT": 4,
+    "STACK": 5,
+    "ADMIT": 6,
+    "CLAIM": 7,
+    "DEVICES": 8,
+    "LIMITS": 9
+  },
+  "calls": [
+    {
+      "name": "abi_version",
+      "kind": "value",
+      "since_abi": 1
+    },
+    {
+      "name": "statics",
+      "kind": "value",
+      "since_abi": 1
+    },
+    {
+      "name": "statics_size",
+      "kind": "value",
+      "since_abi": 1
+    },
+    {
+      "name": "print",
+      "kind": "call",
+      "since_abi": 1,
+      "rt_safe": "no"
+    },
+    {
+      "name": "time_ms",
+      "kind": "call",
+      "since_abi": 1,
+      "rt_safe": "no"
+    },
+    {
+      "name": "pid",
+      "kind": "value",
+      "since_abi": 2
+    },
+    {
+      "name": "arg",
+      "kind": "value",
+      "since_abi": 2
+    },
+    {
+      "name": "yield",
+      "kind": "call",
+      "since_abi": 2,
+      "rt_safe": "no"
+    },
+    {
+      "name": "sleep_ms",
+      "kind": "call",
+      "since_abi": 2,
+      "rt_safe": "no"
+    },
+    {
+      "name": "signals_take",
+      "kind": "call",
+      "since_abi": 2,
+      "rt_safe": "no"
+    },
+    {
+      "name": "open",
+      "kind": "call",
+      "since_abi": 3,
+      "rt_safe": "no"
+    },
+    {
+      "name": "close",
+      "kind": "call",
+      "since_abi": 3,
+      "rt_safe": "no"
+    },
+    {
+      "name": "read",
+      "kind": "call",
+      "since_abi": 3,
+      "rt_safe": "device"
+    },
+    {
+      "name": "write",
+      "kind": "call",
+      "since_abi": 3,
+      "rt_safe": "device"
+    },
+    {
+      "name": "fork",
+      "kind": "call",
+      "since_abi": 4,
+      "rt_safe": "no"
+    },
+    {
+      "name": "wait",
+      "kind": "call",
+      "since_abi": 4,
+      "rt_safe": "no"
+    },
+    {
+      "name": "sysinfo",
+      "kind": "call",
+      "since_abi": 5,
+      "rt_safe": "no"
+    },
+    {
+      "name": "dup2",
+      "kind": "call",
+      "since_abi": 5,
+      "rt_safe": "no"
+    },
+    {
+      "name": "chain",
+      "kind": "call",
+      "since_abi": 6,
+      "rt_safe": "no"
+    },
+    {
+      "name": "remove",
+      "kind": "call",
+      "since_abi": 7,
+      "rt_safe": "no"
+    },
+    {
+      "name": "fork_arg",
+      "kind": "call",
+      "since_abi": 7,
+      "rt_safe": "no"
+    },
+    {
+      "name": "seek",
+      "kind": "call",
+      "since_abi": 8,
+      "rt_safe": "no"
+    },
+    {
+      "name": "getstat",
+      "kind": "call",
+      "since_abi": 8,
+      "rt_safe": "no"
+    },
+    {
+      "name": "setstat",
+      "kind": "call",
+      "since_abi": 8,
+      "rt_safe": "no"
+    },
+    {
+      "name": "load",
+      "kind": "call",
+      "since_abi": 9,
+      "rt_safe": "no"
+    },
+    {
+      "name": "rt_declare",
+      "kind": "call",
+      "since_abi": 10,
+      "rt_safe": "no"
+    },
+    {
+      "name": "rt_wait",
+      "kind": "call",
+      "since_abi": 10,
+      "rt_safe": "yes"
+    },
+    {
+      "name": "rt_stats",
+      "kind": "call",
+      "since_abi": 10,
+      "rt_safe": "no"
+    },
+    {
+      "name": "fork_rt",
+      "kind": "call",
+      "since_abi": 10,
+      "rt_safe": "no"
+    },
+    {
+      "name": "time_us",
+      "kind": "call",
+      "since_abi": 11,
+      "rt_safe": "yes"
+    },
+    {
+      "name": "rt_declare_event",
+      "kind": "call",
+      "since_abi": 12,
+      "rt_safe": "no"
+    },
+    {
+      "name": "signal",
+      "kind": "call",
+      "since_abi": 13,
+      "rt_safe": "no"
+    },
+    {
+      "name": "kill",
+      "kind": "call",
+      "since_abi": 13,
+      "rt_safe": "no"
+    }
+  ],
+  "rt_safety": {
+    "yes": "bounded; resident in memory that survives flash operations",
+    "device": "bounded when the device's file manager and driver operations are both marked real-time safe below",
+    "no": "not to be called with a deadline pending",
+    "basis": "read from the RV9_RT_CODE attribute on the function that implements each entry; what that function calls is its implementer's responsibility, not checked here"
+  },
+  "file_managers": [
+    {
+      "name": "nfm",
+      "read_rt": false,
+      "write_rt": false
+    },
+    {
+      "name": "pfm",
+      "read_rt": true,
+      "write_rt": true
+    },
+    {
+      "name": "pio",
+      "read_rt": true,
+      "write_rt": true
+    },
+    {
+      "name": "rbf",
+      "read_rt": false,
+      "write_rt": false
+    },
+    {
+      "name": "scf",
+      "read_rt": false,
+      "write_rt": false
+    }
+  ],
+  "drivers": [
+    {
+      "name": "adc",
+      "read_rt": false,
+      "write_rt": null,
+      "retains": false,
+      "sessions": false
+    },
+    {
+      "name": "flashdisk",
+      "read_rt": null,
+      "write_rt": null,
+      "retains": false,
+      "sessions": false
+    },
+    {
+      "name": "gpio",
+      "read_rt": true,
+      "write_rt": true,
+      "retains": true,
+      "sessions": false
+    },
+    {
+      "name": "lcdcon",
+      "read_rt": null,
+      "write_rt": false,
+      "retains": false,
+      "sessions": false
+    },
+    {
+      "name": "net",
+      "read_rt": null,
+      "write_rt": null,
+      "retains": false,
+      "sessions": false
+    },
+    {
+      "name": "pubmem",
+      "read_rt": null,
+      "write_rt": null,
+      "retains": true,
+      "sessions": false
+    },
+    {
+      "name": "pwm",
+      "read_rt": false,
+      "write_rt": false,
+      "retains": false,
+      "sessions": false
+    },
+    {
+      "name": "ramdisk",
+      "read_rt": null,
+      "write_rt": null,
+      "retains": false,
+      "sessions": false
+    },
+    {
+      "name": "ssh",
+      "read_rt": false,
+      "write_rt": false,
+      "retains": false,
+      "sessions": true
+    },
+    {
+      "name": "svgwin",
+      "read_rt": null,
+      "write_rt": false,
+      "retains": false,
+      "sessions": true
+    },
+    {
+      "name": "tsens",
+      "read_rt": false,
+      "write_rt": null,
+      "retains": false,
+      "sessions": false
+    },
+    {
+      "name": "uart",
+      "read_rt": false,
+      "write_rt": false,
+      "retains": false,
+      "sessions": false
+    }
+  ],
+  "realtime": {
+    "slots": 4,
+    "runaway_ms": 250,
+    "watchdog_us": 2000,
+    "utilisation_ceiling_permille": 700,
+    "levels": {
+      "urgent": "above every host task, the radio included",
+      "routine": "above every ordinary process, below the radio"
+    },
+    "placement": "response-time analysis at admission over declared periods, deadlines and execution bounds; measured execution stands in where none is declared"
+  },
+  "processes": {
+    "history": 16,
+    "history_max": 32,
+    "max_paths": 8,
+    "pids": [
+      1,
+      65535
+    ]
+  },
+  "publication": {
+    "max_name": 24,
+    "head_bytes": 16,
+    "getstat_wait": 48,
+    "getstat_info": 49
+  }
+}

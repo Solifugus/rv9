@@ -421,6 +421,24 @@ rv9_err_t rv9_task_create_rt(rv9_task_fn fn, const char *name,
  */
 void rv9_rt_set_class(rv9_task_t task, bool urgent, uint32_t bound_us);
 
+/*
+ * The real-time figures this build and this board run with, for a
+ * toolchain that asks: slots, the runaway limit, the watchdog period, and
+ * where the two real-time priorities sit against the radio and RV-9's own
+ * kernel. The last two are read from the running host, not assumed.
+ */
+typedef struct {
+    uint32_t slots;
+    uint32_t runaway_ms;
+    uint32_t watchdog_us;
+    int      prio_urgent;
+    int      prio_routine;
+    int      prio_radio;       /* 0 when there is no radio task */
+    int      prio_kernel;      /* 0 when RV-9's kernel is not a host task */
+} rv9_rt_limits_t;
+
+void rv9_rt_limits(rv9_rt_limits_t *out);
+
 /* Called by the task itself, once, before its loop. */
 rv9_err_t rv9_rt_declare(uint32_t period_us);
 
