@@ -2482,6 +2482,124 @@ divided by the record size to get a count, so growing one silently changes
 the stride an older module reads with. They need the same treatment the
 module header just got, and have not had it.
 
+## 25. Asking, rather than starting
+
+> The compiler describes what a program promises and what it requires.
+> RV-9 determines whether the physical machine can honour that contract.
+
+The manifest gave RV-9 the first half. This is the second: `fork_rt` now
+refuses before it allocates anything.
+
+Ordinary processes are still merely started, and that is right — an
+ordinary process that runs late is slow, and nothing else depends on its
+timing. A real-time process that runs late is wrong, and something else
+usually does.
+
+### Four ways to say no
+
+Each is a separate error code rather than one refusal, because each is
+actionable by a different person:
+
+| refusal | what it means | who fixes it |
+|---|---|---|
+| `CONTRACT` | the declaration contradicts itself | a `build.conf` line |
+| `NOSLOT` | all four real-time slots are taken | stop something |
+| `NOMEM` | its stack and heap cannot be guaranteed | free memory, or declare a smaller stack |
+| `UTILISATION` | the CPU is already promised | nothing, until something finishes |
+
+All four, on the board:
+
+```
+rv9> rt control 200
+E admit 'control': deadline 1000 us is longer than its 200 us release interval
+control: its declaration contradicts itself
+
+rv9> rt iolat & rt iolat & rt iolat
+E admit 'iolat': wants 300 permille, 600 already promised, ceiling 700
+iolat: the CPU is already promised
+real-time promised  60.0% of 70.0%
+
+rv9> rt control & (x4) ; rt control
+E admit 'control': all 4 real-time slots are taken
+control: no real-time slot free -- stop one first
+```
+
+The contract check is the cheap half of a resource certificate: an
+operator typing `rt control 200` is asking for a 200 µs release from a
+program that says it may take 1000 µs to finish, and arithmetic settles
+that without running anything.
+
+### The ceiling is headroom, not a theorem
+
+70%, and it deliberately is not a rate-monotonic bound. RV-9's real-time
+tasks all run at one host priority, so the classic bound does not describe
+them. What the remaining 30% is for is everything that is not in the sum at
+all: WiFi, the panel, the SPI driver, RV-9's own kernel, and every ordinary
+process. Admitting real-time work up to the last percent starves the system
+the real-time work depends on.
+
+### Three kinds of number, kept apart
+
+`rt` with no arguments answers the question rather than printing usage:
+
+```
+real-time promised  60.0% of 70.0%
+slots               2 of 4
+declared            2
+measured            0
+unaccounted         0
+```
+
+Only **declared** is a promise being kept. **Measured** stands in for work
+whose author did not say, using the worst execution it has actually shown —
+which is a floor on its true cost and never a bound, so the report says the
+total is a floor whenever any of it rests on one. **Unaccounted** is work
+that has neither said nor run, which an event-driven process is until it
+declares its minimum inter-arrival from inside.
+
+Collapsing those into a single "60% used" would hide whether the other 40%
+is actually free. That distinction is the whole value of the number.
+
+### What it cost elsewhere
+
+**The shell learned `&`.** It had been typed at this shell for months and
+silently handed to the module as an argument — which is why `gauge &` held
+the terminal until it finished. There is no job table and no notification;
+`procs` is where a background job is looked at. What it buys is two things
+running at once, without which none of the above could be seen.
+
+**Two numbers moved to where they belong.** `iolat` was taking the 8 KB
+default and using 740 bytes of it; it now declares 2,048. `rt` was taking
+8 KB and using 720. Three real-time processes did not fit before that, and
+the first attempt at the utilisation demonstration was refused for memory
+instead — the admission check working correctly and telling me something I
+had not asked about.
+
+### A bug the demonstration found
+
+`stacks` reported `iolat` with a 34-megabyte stack.
+
+A real-time process runs on the host's scheduler, so its task handle is a
+FreeRTOS TCB and not an `rv9k_thread_t`. The native KAL was casting every
+handle to a thread regardless, and reading whatever sat at that offset.
+`rv9_task_stack` had done this since real-time processes existed; the
+stack-guard work added `rv9_task_alive`, `rv9_task_fault` and
+`rv9_task_reap` to the same mistake, and those are worse — a healthy
+real-time process whose borrowed bytes happened to read as `RV9K_DEAD`
+would have had its funeral held while it was still running, and
+`rv9_task_reap` would have written into a live TCB.
+
+`rv9k_is_thread()` answers exactly: the kernel's threads live in one fixed
+array, so "is this pointer inside it, at an element boundary" is a total
+answer rather than a heuristic. Every handle-taking function in the native
+KAL now asks first — including `rv9_task_delete` and
+`rv9_task_priority_set`, which had the same latent hole.
+
+The wrong number was visible for one reason: `stacks` prints what it is
+told. Measurement caught a bug that had been silently corrupting nothing
+in particular for weeks, and would eventually have corrupted something
+specific.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

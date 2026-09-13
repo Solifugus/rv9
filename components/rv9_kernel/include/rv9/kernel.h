@@ -244,6 +244,22 @@ bool   rv9k_thread_alive(const rv9k_thread_t *t);
  */
 void   rv9k_thread_release(rv9k_thread_t *t);
 
+/*
+ * Is this handle one of ours?
+ *
+ * Not every task in the system is an RV-9 thread. A real-time process
+ * runs on the host's scheduler, and its handle is a host object that
+ * happens to be a pointer -- so anything above the seam holding a task
+ * handle may be holding either kind, and reading one as the other returns
+ * whatever was at that offset. That is how `stacks` came to report a
+ * 34-megabyte stack, and it is how a healthy real-time process could have
+ * been declared dead and buried by the fault collector.
+ *
+ * The kernel's threads live in one fixed array, so the question has an
+ * exact answer: is the pointer inside it, and at an element boundary.
+ */
+bool   rv9k_is_thread(const void *p);
+
 /* How many threads have been stopped for overrunning their stack. */
 uint32_t rv9k_stack_faults(void);
 size_t rv9k_stack_size(const rv9k_thread_t *t);

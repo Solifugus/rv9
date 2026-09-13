@@ -401,6 +401,13 @@ typedef struct {
 #define RV9_PE_MODULE        3   /* found, but not loadable */
 #define RV9_PE_TIMEOUT       4
 #define RV9_PE_INVAL         5
+#define RV9_PE_FAULT         6   /* the scheduler stopped it */
+
+/* Admission refusals. A real-time program is asked for rather than
+   started, and these are the ways the machine says no. */
+#define RV9_PE_NOSLOT        7   /* every real-time slot is taken */
+#define RV9_PE_CONTRACT      8   /* the declaration contradicts itself */
+#define RV9_PE_UTILISATION   9   /* the CPU is already promised */
 
 /* Generic getstat/setstat codes a module may use. */
 #define RV9_SS_ECHO        1
@@ -536,6 +543,29 @@ typedef struct {
 #define RV9_SYS_PROCS    3
 #define RV9_SYS_RT       4     /* rv9_sys_rt_t, one per real-time task */
 #define RV9_SYS_STACK    5     /* rv9_sys_stack_t, one per live process */
+#define RV9_SYS_ADMIT    6     /* rv9_sys_admit_t, one record            */
+
+/*
+ * What real-time work the machine has promised, and how sure it is.
+ *
+ * Three counts rather than one total. Only `declared` is a promise kept
+ * from what a module said about itself; `measured` is a floor taken from
+ * what a loop has actually cost so far, which is evidence and not a
+ * bound; `unaccounted` is work nobody can say anything about. A single
+ * "18% used" would hide which of those the other 82% is standing on.
+ *
+ * Fields may be appended, never reordered -- filled up to the caller's
+ * length, like rv9_sys_mem_t.
+ */
+typedef struct __attribute__((packed)) {
+    uint32_t used_permille;
+    uint32_t ceiling_permille;
+    uint32_t declared;
+    uint32_t measured;
+    uint32_t unaccounted;
+    uint32_t slots_used;
+    uint32_t slots_total;
+} rv9_sys_admit_t;
 
 /*
  * Fields may be appended to this record but never reordered or removed.
@@ -746,6 +776,7 @@ typedef struct {
     int (*chain)(const char *module);
     int (*fork_arg)(const char *module, int priority, const char *arg);
     int (*fork_rt)(const char *module, uint32_t period_us, const char *arg);
+    int (*rt_load)(void *buf, uint32_t len); /* fills one rv9_sys_admit_t */
 } rv9_mod_proc_ops_t;
 
 void rv9_mod_set_proc_ops(const rv9_mod_proc_ops_t *ops);

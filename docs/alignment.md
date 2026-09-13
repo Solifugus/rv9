@@ -144,18 +144,18 @@ Measured or checked against the running system, 2026-09-12.
 |---|---|
 | 1. resource contract in the header | **done as a mechanism** — an optional TLV manifest the header points at; unknown advisory tags skipped, unknown mandatory tags refused. Most tags have no consumer yet, which is the point |
 | 2. per-program stack | **done**, `stack_size` in `build.conf`; overflow **detected** (guard word, thread killed), not prevented — PMP is phase 7 |
-| 3. RT admission | still launched rather than admitted, but the requirement is now *declared*: class, period, deadline, WCET, heap ceiling ride in the manifest, and `rt control` takes its rate from there rather than from a shell default |
+| 3. RT admission | **done for what can be checked** — `fork_rt` refuses before allocating: self-contradictory declaration, no slot free, stack+heap not guaranteeable, or the 70% utilisation ceiling. Devices are not checked, because ownership does not exist yet |
 | 4. protected reserves | **partial** — a 12 KB floor RV-9 will not allocate into, so exhaustion is a refusal it reports rather than an abort inside ESP-IDF; no per-process limit, no RT-specific reserve |
 | 5. heap policy by class | see below — the situation is the reverse of what is assumed |
-| 6. device ownership | reference counts only; no owner identity, no exclusivity |
+| 6. device ownership | reference counts only; no owner identity, no exclusivity. The manifest carries `device` and `exclusive` and admission cannot yet act on them — the next real gap |
 | 7. RT-safe marked machine-readably | documented in prose, `RV9_RT_CODE` in source; not readable |
 | 8. init separate from execution | **already exactly this** |
 | 9. failsafe below the process | release-on-exit works; declared safe states do not exist |
 | 10. timing as state | **done**, `RV9_SYS_RT` |
 | 11. no POSIX assumptions | **already true** and worth defending |
 | 12. extensible manifest | **done** — `rv9_mod_header_t.manifest_offset` points at a TLV list; sixteen tags registered, `build.conf` emits them, `tools/modinfo.py` reads them back |
-| 13. resource certificate | not started; validation loop partly exists |
-| 14. measurement | **established practice**: `free`, `stacks`, `procs`, `docs/memory.md` |
+| 13. resource certificate | **begun** — admission checks the declaration against itself (deadline within period, WCET within deadline) and against the machine. `control` declares 50 us and reports 26-30 us observed, which is a claim RV-9 can check rather than believe |
+| 14. measurement | **established practice**: `free`, `stacks`, `procs`, `rt`, `docs/memory.md`. It earns its keep: `stacks` reporting a 34 MB stack is what exposed the KAL casting host task handles to kernel threads |
 | 15. no language semantics in the OS | held so far |
 
 ### Three corrections

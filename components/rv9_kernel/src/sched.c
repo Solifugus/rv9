@@ -621,6 +621,18 @@ static void stack_fault(rv9k_thread_t *t)
     s_stack_faults++;
 }
 
+bool rv9k_is_thread(const void *p)
+{
+    if (p == NULL) return false;
+
+    const uint8_t *b  = (const uint8_t *)p;
+    const uint8_t *lo = (const uint8_t *)&s_threads[0];
+    const uint8_t *hi = (const uint8_t *)&s_threads[RV9K_MAX_THREADS];
+
+    if (b < lo || b >= hi) return false;
+    return ((size_t)(b - lo) % sizeof(rv9k_thread_t)) == 0;
+}
+
 void rv9k_thread_release(rv9k_thread_t *t)
 {
     if (t == NULL) return;

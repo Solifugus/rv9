@@ -1,15 +1,97 @@
 /*
- * rt -- run a module in the real-time class.  rt control [period_us]
+ * rt -- ask for a module to be run in the real-time class.
+ *
+ *   rt                    what the machine has already promised
+ *   rt <module>           at the rate the module says it needs
+ *   rt <module> <period>  at a rate an operator insists on instead
+ *
+ * "Ask" rather than "run": a real-time program is admitted, not started.
+ * RV-9 checks the declaration against itself and against what is already
+ * promised, and the interesting output of this command is often a refusal.
  */
 #include "modlib.h"
+
+/*
+ * Parts per thousand, printed as a percentage with one decimal, because
+ * a control loop's duty is frequently under one percent and "0%" is not
+ * a useful thing to tell somebody.
+ */
+static void say_permille(const rv9_mod_env_t *env, uint32_t pm)
+{
+    m_num(env, RV9_STDOUT, (int32_t)(pm / 10));
+    m_say(env, RV9_STDOUT, ".");
+    m_num(env, RV9_STDOUT, (int32_t)(pm % 10));
+    m_say(env, RV9_STDOUT, "%");
+}
+
+static void report(const rv9_mod_env_t *env)
+{
+    rv9_sys_admit_t a;
+    if (env->sysinfo(RV9_SYS_ADMIT, &a, sizeof(a)) < 1) {
+        m_say(env, RV9_STDOUT, "no admission information\n");
+        return;
+    }
+
+    m_say(env, RV9_STDOUT, "real-time promised  ");
+    say_permille(env, a.used_permille);
+    m_say(env, RV9_STDOUT, " of ");
+    say_permille(env, a.ceiling_permille);
+    m_say(env, RV9_STDOUT, "\nslots               ");
+    m_num(env, RV9_STDOUT, (int32_t)a.slots_used);
+    m_say(env, RV9_STDOUT, " of ");
+    m_num(env, RV9_STDOUT, (int32_t)a.slots_total);
+
+    m_say(env, RV9_STDOUT, "\ndeclared            ");
+    m_num(env, RV9_STDOUT, (int32_t)a.declared);
+    m_say(env, RV9_STDOUT, "\nmeasured            ");
+    m_num(env, RV9_STDOUT, (int32_t)a.measured);
+    m_say(env, RV9_STDOUT, "\nunaccounted         ");
+    m_num(env, RV9_STDOUT, (int32_t)a.unaccounted);
+    m_say(env, RV9_STDOUT, "\n");
+
+    /* Say what the number is worth. A total standing on measurements is
+       a floor, not a promise, and reporting it as though it were a
+       promise is the failure this whole exercise is against. */
+    if (a.measured > 0 || a.unaccounted > 0) {
+        m_say(env, RV9_STDOUT,
+              "\nthat total is a floor: some work has not said what it "
+              "costs\n");
+    }
+}
+
+/* Why the machine said no. Each of these is actionable, which is why
+   they are separate codes and not one refusal. */
+static void refusal(const rv9_mod_env_t *env, const char *name, int pid)
+{
+    m_say(env, RV9_STDOUT, name);
+
+    if (pid == -RV9_PE_NOSLOT) {
+        m_say(env, RV9_STDOUT, ": no real-time slot free -- stop one first\n");
+    } else if (pid == -RV9_PE_CONTRACT) {
+        m_say(env, RV9_STDOUT, ": its declaration contradicts itself "
+                               "(see the log)\n");
+    } else if (pid == -RV9_PE_UTILISATION) {
+        m_say(env, RV9_STDOUT, ": the CPU is already promised\n");
+        report(env);
+    } else if (pid == -RV9_PE_NOMEM) {
+        m_say(env, RV9_STDOUT, ": not enough memory can be guaranteed it\n");
+    } else if (pid == -RV9_PE_NOTFOUND) {
+        m_say(env, RV9_STDOUT, ": no such module\n");
+    } else {
+        m_say(env, RV9_STDOUT, ": cannot start as real-time\n");
+    }
+}
 
 __attribute__((section(".text.entry")))
 int rv9_module_entry(const rv9_mod_env_t *env)
 {
     if (env == NULL || env->abi_version < 10) return -1;
+
+    /* No argument is a question, not a mistake. */
     if (env->arg == NULL || env->arg[0] == '\0') {
-        m_say(env, RV9_STDOUT, "usage: rt <module> [period_us]\n");
-        return -2;
+        report(env);
+        m_say(env, RV9_STDOUT, "\nusage: rt <module> [period_us]\n");
+        return 0;
     }
 
     char name[32];
@@ -36,8 +118,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 
     int pid = env->fork_rt(name, period, rest);
     if (pid < 0) {
-        m_say(env, RV9_STDOUT, name);
-        m_say(env, RV9_STDOUT, ": cannot start as real-time\n");
+        refusal(env, name, pid);
         return -3;
     }
 

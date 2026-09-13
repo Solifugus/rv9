@@ -53,6 +53,28 @@ static char *rest_of_line(char *raw, const char *redirect_target)
     return (*p == '\0') ? NULL : p;
 }
 
+/*
+ * Chop a trailing "&" off the line and say whether it was there.
+ *
+ * It has been typed at this shell for months and silently handed to the
+ * module as an argument, which is how `gauge &` came to hold the terminal
+ * until it finished. Two things that run at once cannot be looked at from
+ * a shell that only runs one.
+ */
+static bool take_ampersand(char *raw)
+{
+    char *end = raw;
+    while (*end) end++;
+
+    while (end > raw && (end[-1] == ' ' || end[-1] == '\t')) end--;
+    if (end == raw || end[-1] != '&') return false;
+
+    end--;                                          /* drop the & */
+    while (end > raw && (end[-1] == ' ' || end[-1] == '\t')) end--;
+    *end = '\0';
+    return true;
+}
+
 /* Split in place on whitespace. Returns the argument count. */
 static int tokenize(char *line, char *argv[], int max)
 {
@@ -75,6 +97,7 @@ static void help(const rv9_mod_env_t *env)
           "  help              this text\n"
           "  exit              leave the shell\n"
           "  <module> [arg] [> dev]  fork it, optionally redirected\n"
+          "  <module> &        run it without waiting; see it in 'procs'\n"
           "\n"
           "try: mdir, procs, free, dir, filetest, netstat\n"
           "     dir /r0        echo > /term\n"
@@ -90,7 +113,7 @@ static void help(const rv9_mod_env_t *env)
  * forks -- the child gets the target without knowing -- then puts it back.
  */
 static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
-                const char *target)
+                const char *target, bool background)
 {
     int redirected = 0;
 
@@ -117,7 +140,7 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
     int pid = env->fork_arg(name, 8, arg);
     int status = 0;
 
-    if (pid >= 0) {
+    if (pid >= 0 && !background) {
         /* Until it finishes. Giving up after thirty seconds did not stop
            the command -- it put a second reader on the same terminal, and
            an editor and a shell then fought over every keystroke. */
@@ -140,6 +163,15 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         } else {
             m_say(env, RV9_STDOUT, ": no such module\n");
         }
+    } else if (background) {
+        /* No job table and no notification when it ends: `procs` is where
+           to look. What this buys is two things running at once, which is
+           the whole of what was missing. */
+        m_say(env, RV9_STDOUT, "[");
+        m_num(env, RV9_STDOUT, pid);
+        m_say(env, RV9_STDOUT, "] ");
+        m_say(env, RV9_STDOUT, name);
+        m_say(env, RV9_STDOUT, "\n");
     } else if (status != 0) {
         m_say(env, RV9_STDOUT, name);
         m_say(env, RV9_STDOUT, " returned ");
@@ -208,6 +240,10 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         /* Keep a whole copy before tokenize() chops the original. */
         for (int i = 0; i <= n; i++) st->raw[i] = st->line[i];
 
+        /* Off both copies, before either is parsed. */
+        bool background = take_ampersand(st->raw);
+        if (background) take_ampersand(st->line);
+
         char *argv[ARG_MAX];
         int argc = tokenize(st->line, argv, ARG_MAX);
         if (argc == 0) continue;
@@ -242,7 +278,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
             m_say(env, st->term, "\n");
         }
 
-        run(env, argv[0], arg, target);
+        run(env, argv[0], arg, target, background);
     }
 
     if (st->term_open) env->close(st->term);

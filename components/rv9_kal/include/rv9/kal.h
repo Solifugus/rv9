@@ -378,6 +378,20 @@ void rv9_rt_release(void);
 rv9_err_t rv9_rt_stats(rv9_rt_stats_t *out);
 rv9_err_t rv9_rt_stats_by_index(int index, rv9_rt_stats_t *out, bool *valid);
 
+/*
+ * Another task's numbers, for the layer deciding whether to admit a new
+ * one. What a running loop has actually cost is the only evidence there is
+ * about work whose author did not say -- a floor on its worst case, never
+ * a bound, and admission has to be told which of the two it is holding.
+ */
+rv9_err_t rv9_rt_stats_for(rv9_task_t task, rv9_rt_stats_t *out);
+
+/* How many real-time tasks this build can hold at once, and how many are
+   holding a slot now. A slot is a timer and a release semaphore; there is
+   a fixed number of them and running out is a refusal, not a queue. */
+int rv9_rt_slot_count(void);
+int rv9_rt_slots_used(void);
+
 /* ------------------------------------------------------------------ */
 /* Counting semaphores                                                 */
 /* ------------------------------------------------------------------ */

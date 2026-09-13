@@ -204,9 +204,30 @@ rv9_err_t rv9_task_create(rv9_task_fn fn, const char *name, size_t stack_bytes,
     return RV9_OK;
 }
 
+/*
+ * EVERY FUNCTION BELOW TAKES A HANDLE THAT MAY NOT BE OURS.
+ *
+ * A real-time process runs on the host's scheduler, so its handle is a
+ * FreeRTOS TCB, not an rv9k_thread_t. Casting one to the other reads
+ * whatever happens to sit at that offset -- which is how `stacks` reported
+ * a 34-megabyte stack for `iolat`, and how a perfectly healthy real-time
+ * process could have been read as dead and buried by the fault collector.
+ *
+ * rv9k_is_thread answers exactly, so each of these asks first and falls
+ * back to what the host can tell us.
+ */
 rv9_err_t rv9_task_stack(rv9_task_t task, size_t *size, size_t *unused)
 {
     if (task == NULL) return RV9_ERR_INVAL;
+
+    if (!rv9k_is_thread(task)) {
+        /* A host task. FreeRTOS keeps a high-water mark and not a size,
+           so the size is reported as unknown rather than invented. */
+        if (size)   *size   = 0;
+        if (unused) *unused = uxTaskGetStackHighWaterMark((TaskHandle_t)task)
+                              * sizeof(StackType_t);
+        return RV9_OK;
+    }
 
     const rv9k_thread_t *t = (const rv9k_thread_t *)task;
     if (size)   *size   = rv9k_stack_size(t);
@@ -216,23 +237,30 @@ rv9_err_t rv9_task_stack(rv9_task_t task, size_t *size, size_t *unused)
 
 int rv9_task_fault(rv9_task_t task)
 {
+    if (!rv9k_is_thread(task)) return RV9_TASK_FAULT_NONE;
     return rv9k_thread_fault((const rv9k_thread_t *)task);
 }
 
 bool rv9_task_alive(rv9_task_t task)
 {
+    /* A host task's liveness is the trampoline's business, as it is on
+       the FreeRTOS backend. Saying "true" is a statement about what is
+       known here, and claiming otherwise would bury the living. */
+    if (!rv9k_is_thread(task)) return true;
     return rv9k_thread_alive((const rv9k_thread_t *)task);
 }
 
 void rv9_task_reap(rv9_task_t task)
 {
+    if (!rv9k_is_thread(task)) return;
     rv9k_thread_release((rv9k_thread_t *)task);
 }
 
 void rv9_task_delete(rv9_task_t task)
 {
     if (task != NULL) {
-        rv9k_thread_kill((rv9k_thread_t *)task);
+        if (rv9k_is_thread(task)) rv9k_thread_kill((rv9k_thread_t *)task);
+        else                      vTaskDelete((TaskHandle_t)task);
         return;
     }
 
@@ -290,6 +318,10 @@ void rv9_task_delay_ms(uint32_t ms)
 
 rv9_err_t rv9_task_priority_set(rv9_task_t task, int priority)
 {
+    /* A real-time task's priority is not RV-9's to change: it sits above
+       everything by definition, and the ager has no business there. */
+    if (!rv9k_is_thread(task)) return RV9_ERR_UNSUPPORTED;
+
     rv9k_priority_set((rv9k_thread_t *)task, priority);
     return RV9_OK;
 }

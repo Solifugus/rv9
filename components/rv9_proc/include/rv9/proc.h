@@ -92,6 +92,18 @@ typedef struct rv9_proc {
     rv9_proc_class_t  cls;
     uint32_t          period_us;      /* real-time processes only */
 
+    /* What the module promised about itself, from its manifest. Zero
+       means it did not say, which admission has to treat differently from
+       saying zero. */
+    uint32_t          wcet_us;
+    uint32_t          deadline_us;
+
+    /* What its stack was actually created with. The KAL can measure how
+       much of a stack is unused but cannot always say how big it was --
+       a real-time process is a host task, and FreeRTOS keeps only the
+       high-water mark. This is the figure we handed it. */
+    uint32_t          stack_bytes;
+
     int               base_priority;
     int               age;              /* aging counter, 0 when running */
     int               effective_priority;
@@ -116,6 +128,26 @@ typedef struct rv9_proc {
     struct rv9_proc  *next;
 } rv9_proc_t;
 
+/*
+ * What real-time work the machine has promised.
+ *
+ * Three counts rather than one total, because "18% used" hides whether
+ * the other 82% is free. Only `declared` is a promise; `measured` is a
+ * floor taken from what a loop has actually cost so far, and
+ * `unaccounted` is work nobody can say anything about.
+ */
+typedef struct {
+    uint32_t used_permille;
+    uint32_t ceiling_permille;
+    uint32_t declared;          /* processes whose cost the module stated */
+    uint32_t measured;          /* counted from what they have cost so far */
+    uint32_t unaccounted;       /* neither stated nor yet observed */
+    uint32_t slots_used;
+    uint32_t slots_total;
+} rv9_proc_rt_load_t;
+
+void rv9_proc_rt_load(rv9_proc_rt_load_t *out);
+
 typedef enum {
     RV9_PROC_OK = 0,
     RV9_PROC_ERR_NOTFOUND,
@@ -124,6 +156,19 @@ typedef enum {
     RV9_PROC_ERR_TIMEOUT,
     RV9_PROC_ERR_INVAL,
     RV9_PROC_ERR_FAULT,     /* the scheduler stopped it; see rv9_proc_t.fault */
+
+    /*
+     * Admission refusals.
+     *
+     * Separate codes rather than one "no", because the caller can act on
+     * the difference and a person can fix it: a self-contradictory
+     * declaration is a build.conf line, a full slot table is something to
+     * stop first, and a utilisation refusal is a statement about the
+     * machine rather than about the program.
+     */
+    RV9_PROC_ERR_NOSLOT,     /* every real-time slot is taken            */
+    RV9_PROC_ERR_CONTRACT,   /* the declaration contradicts itself       */
+    RV9_PROC_ERR_UTILISATION,/* the CPU is already promised elsewhere    */
 } rv9_proc_err_t;
 
 const char *rv9_proc_strerror(rv9_proc_err_t err);

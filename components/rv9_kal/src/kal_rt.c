@@ -648,6 +648,26 @@ rv9_err_t rv9_rt_stats(rv9_rt_stats_t *out)
     return RV9_OK;
 }
 
+rv9_err_t rv9_rt_stats_for(rv9_task_t task, rv9_rt_stats_t *out)
+{
+    if (task == NULL || out == NULL) return RV9_ERR_INVAL;
+
+    rt_task_t *rt = slot_for((TaskHandle_t)task);
+    if (rt == NULL) return RV9_ERR_INVAL;   /* not a real-time task */
+
+    fill_stats(rt, out);
+    return RV9_OK;
+}
+
+int rv9_rt_slot_count(void) { return MAX_RT_TASKS; }
+
+int rv9_rt_slots_used(void)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_RT_TASKS; i++) if (s_rt[i].in_use) n++;
+    return n;
+}
+
 rv9_err_t rv9_rt_stats_by_index(int index, rv9_rt_stats_t *out, bool *valid)
 {
     if (index < 0 || index >= MAX_RT_TASKS || out == NULL) {

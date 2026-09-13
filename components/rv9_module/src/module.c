@@ -600,6 +600,11 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
         return 1;
     }
 
+    case RV9_SYS_ADMIT: {
+        if (s_proc_ops == NULL || s_proc_ops->rt_load == NULL) return -1;
+        return s_proc_ops->rt_load(buf, len);
+    }
+
     case RV9_SYS_MODULES: {
         uint32_t max = len / sizeof(rv9_sys_module_t);
         rv9_sys_module_t *out = (rv9_sys_module_t *)buf;

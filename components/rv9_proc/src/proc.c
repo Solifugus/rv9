@@ -16,6 +16,10 @@ _Static_assert((int)RV9_PROC_ERR_NOMEM    == RV9_PE_NOMEM,    "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_MODULE   == RV9_PE_MODULE,   "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_TIMEOUT  == RV9_PE_TIMEOUT,  "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_INVAL    == RV9_PE_INVAL,    "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_FAULT    == RV9_PE_FAULT,    "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_NOSLOT   == RV9_PE_NOSLOT,   "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_CONTRACT == RV9_PE_CONTRACT, "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_UTILISATION == RV9_PE_UTILISATION, "ABI drift");
 
 #include "esp_log.h"
 
@@ -69,6 +73,10 @@ const char *rv9_proc_strerror(rv9_proc_err_t err)
     case RV9_PROC_ERR_MODULE:   return "module error";
     case RV9_PROC_ERR_TIMEOUT:  return "timed out";
     case RV9_PROC_ERR_INVAL:    return "invalid argument";
+    case RV9_PROC_ERR_FAULT:    return "stopped by the scheduler";
+    case RV9_PROC_ERR_NOSLOT:   return "no real-time slot free";
+    case RV9_PROC_ERR_CONTRACT: return "its declaration contradicts itself";
+    case RV9_PROC_ERR_UTILISATION: return "the CPU is already promised";
     default:                    return "unknown error";
     }
 }
@@ -522,6 +530,10 @@ static int proc_stacks_op(void *buf, uint32_t len)
         size_t size = 0, unused = 0;
         rv9_task_stack(p->task, &size, &unused);
 
+        /* The KAL answers 0 for a host task, which a real-time process
+           is. We know what we asked for, so say that rather than nothing. */
+        if (size == 0) size = p->stack_bytes;
+
         memset(&out[n], 0, sizeof(out[n]));
         out[n].pid          = (uint16_t)p->pid;
         strncpy(out[n].name, p->name, sizeof(out[n].name) - 1);
@@ -534,6 +546,28 @@ static int proc_stacks_op(void *buf, uint32_t len)
     return (int)n;
 }
 
+/* One record, filled to whatever length the caller knew about. */
+static int proc_rt_load_op(void *buf, uint32_t len)
+{
+    if (buf == NULL || len < sizeof(uint32_t) * 2) return -1;
+
+    rv9_proc_rt_load_t l;
+    rv9_proc_rt_load(&l);
+
+    rv9_sys_admit_t a = {
+        .used_permille    = l.used_permille,
+        .ceiling_permille = l.ceiling_permille,
+        .declared         = l.declared,
+        .measured         = l.measured,
+        .unaccounted      = l.unaccounted,
+        .slots_used       = l.slots_used,
+        .slots_total      = l.slots_total,
+    };
+
+    memcpy(buf, &a, len < sizeof(a) ? len : sizeof(a));
+    return 1;
+}
+
 static const rv9_mod_proc_ops_t s_mod_proc_ops = {
     .fork  = proc_fork_op,
     .wait  = proc_wait_op,
@@ -542,6 +576,7 @@ static const rv9_mod_proc_ops_t s_mod_proc_ops = {
     .chain = proc_chain_op,
     .fork_arg = proc_fork_arg_op,
     .fork_rt  = proc_fork_rt_op,
+    .rt_load  = proc_rt_load_op,
 };
 
 rv9_proc_err_t rv9_proc_init(void)
@@ -583,6 +618,199 @@ rv9_pid_t rv9_proc_current_pid(void)
     rv9_pid_t pid = p ? p->pid : RV9_PID_NONE;
     rv9_lock_release(s_lock);
     return pid;
+}
+
+/* ------------------------------------------------------------------ */
+/* Admission                                                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * How much of the CPU real-time work may promise itself.
+ *
+ * This is not a schedulability theorem, and saying so matters. RV-9's
+ * real-time tasks all run at one host priority, so the classic
+ * rate-monotonic bound does not describe them. What the headroom is for
+ * is everything that is not in the sum at all: WiFi, the panel, the SPI
+ * driver, RV-9's own kernel and every ordinary process. Admitting
+ * real-time work up to the last percent starves the system the real-time
+ * work depends on.
+ */
+#define RT_UTIL_MAX_PERMILLE 700
+
+/*
+ * Utilisation in parts per thousand. There is no floating point worth
+ * spending here, and a control loop's duty is a number like "26
+ * microseconds in every 1000" -- 26 permille -- which integer arithmetic
+ * reports exactly.
+ */
+static uint32_t permille(uint32_t cost_us, uint32_t interval_us)
+{
+    if (interval_us == 0) return 0;
+    uint64_t u = ((uint64_t)cost_us * 1000u) / interval_us;
+    return (u > 1000u) ? 1000u : (uint32_t)u;
+}
+
+/*
+ * What the already-admitted real-time work costs.
+ *
+ * Three kinds of answer, and they are not the same kind of thing:
+ *
+ *   declared  the module said, and the sum is a promise being kept.
+ *   measured  it did not say, but it has run, so the worst execution seen
+ *             so far stands in. That is a floor on its true worst case,
+ *             never a bound, and admission must not pretend otherwise.
+ *   unknown   it did not say and has not run. Nothing can be counted.
+ *
+ * Keeping the three apart is the point. A total of "18%" hides whether
+ * the other 82% is actually free.
+ */
+static void rt_load(uint32_t *out_permille, uint32_t *out_declared,
+                    uint32_t *out_measured, uint32_t *out_unknown)
+{
+    uint32_t total = 0, declared = 0, measured = 0, unknown = 0;
+
+    rv9_lock_acquire(s_lock);
+    for (rv9_proc_t *p = s_procs; p; p = p->next) {
+        if (p->state == RV9_PROC_EXITED)  continue;
+        if (p->cls != RV9_CLASS_REALTIME) continue;
+
+        if (p->period_us != 0 && p->wcet_us != 0) {
+            total += permille(p->wcet_us, p->period_us);
+            declared++;
+            continue;
+        }
+
+        rv9_rt_stats_t st;
+        if (p->period_us != 0 && p->task != NULL &&
+            rv9_rt_stats_for(p->task, &st) == RV9_OK && st.activations > 0) {
+            total += permille(st.max_exec_us, p->period_us);
+            measured++;
+        } else {
+            unknown++;
+        }
+    }
+    rv9_lock_release(s_lock);
+
+    if (out_permille) *out_permille = total;
+    if (out_declared) *out_declared = declared;
+    if (out_measured) *out_measured = measured;
+    if (out_unknown)  *out_unknown  = unknown;
+}
+
+/*
+ * Decide whether the machine can honour what this program says it needs,
+ * before anything is allocated on its behalf.
+ *
+ * The compiler describes; RV-9 decides. Everything checked here is
+ * checkable cheaply and now, which is what makes it admission rather than
+ * validation: a refusal costs nothing, and a control loop admitted when it
+ * should not have been costs a deadline.
+ *
+ * `interval_us` may be zero. An event-driven process has no period to give
+ * at fork -- it declares its minimum inter-arrival from inside, once it
+ * knows which device is releasing it -- so a zero here is not a fault. It
+ * means this process cannot be accounted for yet, which is reported rather
+ * than assumed away.
+ */
+static rv9_proc_err_t admit_rt(const void *image, const char *name,
+                               uint32_t interval_us, size_t stack,
+                               uint32_t *out_wcet, uint32_t *out_deadline)
+{
+    if (rv9_rt_slots_used() >= rv9_rt_slot_count()) {
+        ESP_LOGE(TAG, "admit '%s': all %d real-time slots are taken",
+                 name, rv9_rt_slot_count());
+        return RV9_PROC_ERR_NOSLOT;
+    }
+
+    uint32_t deadline = 0, wcet = 0, heap_max = 0;
+    bool has_deadline = rv9_mod_manifest_u32(image, RV9_MTAG_DEADLINE_US,
+                                             &deadline);
+    bool has_wcet     = rv9_mod_manifest_u32(image, RV9_MTAG_WCET_US, &wcet);
+    bool has_heap     = rv9_mod_manifest_u32(image, RV9_MTAG_HEAP_MAX,
+                                             &heap_max);
+
+    if (out_wcet)     *out_wcet     = has_wcet     ? wcet     : 0;
+    if (out_deadline) *out_deadline = has_deadline ? deadline : 0;
+
+    /*
+     * Check the claim against itself first. This is the cheap half of a
+     * resource certificate: a compiler's arithmetic is not to be trusted
+     * where trusting it costs nothing to avoid.
+     */
+    if (has_deadline && interval_us != 0 && deadline > interval_us) {
+        ESP_LOGE(TAG, "admit '%s': deadline %lu us is longer than its "
+                      "%lu us release interval", name,
+                 (unsigned long)deadline, (unsigned long)interval_us);
+        return RV9_PROC_ERR_CONTRACT;
+    }
+    if (has_wcet) {
+        uint32_t finish_in = has_deadline ? deadline : interval_us;
+        if (finish_in != 0 && wcet > finish_in) {
+            ESP_LOGE(TAG, "admit '%s': %lu us of work cannot finish in "
+                          "%lu us", name,
+                     (unsigned long)wcet, (unsigned long)finish_in);
+            return RV9_PROC_ERR_CONTRACT;
+        }
+    }
+
+    /* Memory, before any is spent: the stack, plus whatever heap it says
+       it will take. Asked against `available` rather than `free`, so
+       real-time work is refused up front instead of starting and finding
+       the reserve gone. */
+    size_t wants = stack + (has_heap ? heap_max : 0);
+    if (wants > rv9_heap_available()) {
+        ESP_LOGE(TAG, "admit '%s': wants %u bytes, %u available",
+                 name, (unsigned)wants, (unsigned)rv9_heap_available());
+        return RV9_PROC_ERR_NOMEM;
+    }
+
+    uint32_t used = 0, declared = 0, measured = 0, unknown = 0;
+    rt_load(&used, &declared, &measured, &unknown);
+
+    uint32_t mine = (has_wcet && interval_us != 0)
+                        ? permille(wcet, interval_us) : 0;
+
+    if (used + mine > RT_UTIL_MAX_PERMILLE) {
+        ESP_LOGE(TAG, "admit '%s': wants %lu permille, %lu already promised, "
+                      "ceiling %d", name,
+                 (unsigned long)mine, (unsigned long)used,
+                 RT_UTIL_MAX_PERMILLE);
+        return RV9_PROC_ERR_UTILISATION;
+    }
+
+    if (mine == 0) {
+        ESP_LOGW(TAG, "admit '%s': admitted without an accountable cost -- "
+                      "%s", name,
+                 has_wcet ? "no release interval yet"
+                          : "no declared execution time");
+    }
+    if (measured > 0 || unknown > 0) {
+        ESP_LOGW(TAG, "real-time load %lu permille is a floor: %lu declared, "
+                      "%lu measured, %lu unaccounted",
+                 (unsigned long)(used + mine), (unsigned long)declared,
+                 (unsigned long)measured, (unsigned long)unknown);
+    }
+
+    ESP_LOGI(TAG, "admit '%s': %lu us interval, %lu permille, %lu of %d "
+                  "promised", name,
+             (unsigned long)interval_us, (unsigned long)mine,
+             (unsigned long)(used + mine), RT_UTIL_MAX_PERMILLE);
+    return RV9_PROC_OK;
+}
+
+/*
+ * What real-time work the machine has promised, for anyone reporting it.
+ */
+void rv9_proc_rt_load(rv9_proc_rt_load_t *out)
+{
+    if (out == NULL) return;
+
+    memset(out, 0, sizeof(*out));
+    rt_load(&out->used_permille, &out->declared, &out->measured,
+            &out->unaccounted);
+    out->ceiling_permille = RT_UTIL_MAX_PERMILLE;
+    out->slots_used       = (uint32_t)rv9_rt_slots_used();
+    out->slots_total      = (uint32_t)rv9_rt_slot_count();
 }
 
 static rv9_proc_err_t fork_common(const char *module_name, int priority,
@@ -646,6 +874,40 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
         }
     }
 
+    /* The manifest's figure is the compiler's; the header's is the build's.
+       Either beats the 8 KB default, which is a guess nobody made. */
+    size_t stack = h->stack_size;
+    if (stack == 0) {
+        uint32_t declared = 0;
+        if (rv9_mod_manifest_u32(mod->image, RV9_MTAG_STACK, &declared)) {
+            stack = declared;
+        }
+    }
+    if (stack == 0) stack = PROC_DEFAULT_STACK;
+
+    /*
+     * Admission, before anything is allocated on this program's behalf.
+     *
+     * Ordinary processes are not admitted, only started: they are late if
+     * they are late, and nothing else depends on their timing. Real-time
+     * work is the opposite, so it is asked for rather than taken.
+     */
+    uint32_t wcet_us = 0, deadline_us = 0;
+    if (cls == RV9_CLASS_REALTIME) {
+        uint32_t interval = period_us;
+        if (interval == 0) {
+            (void)rv9_mod_manifest_u32(mod->image, RV9_MTAG_MIN_INTER_US,
+                                       &interval);
+        }
+
+        rv9_proc_err_t adm = admit_rt(mod->image, module_name, interval,
+                                      stack, &wcet_us, &deadline_us);
+        if (adm != RV9_PROC_OK) {
+            rv9_mod_unlink(mod);
+            return adm;
+        }
+    }
+
     rv9_proc_t *p = rv9_calloc(1, sizeof(*p));
     if (p == NULL) {
         rv9_mod_unlink(mod);
@@ -675,6 +937,9 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
     p->started_ms         = rv9_time_ms();
     p->cls                = cls;
     p->period_us          = period_us;
+    p->wcet_us            = wcet_us;
+    p->deadline_us        = deadline_us;
+    p->stack_bytes        = (uint32_t)stack;
     strncpy(p->name, module_name, sizeof(p->name) - 1);
     if (arg != NULL) strncpy(p->arg, arg, sizeof(p->arg) - 1);
 
@@ -685,17 +950,6 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
 
     /* Hand the child whatever the parent had open, before it can run. */
     if (s_on_fork) s_on_fork(parent, p->pid);
-
-    /* The manifest's figure is the compiler's; the header's is the build's.
-       Either beats the 8 KB default, which is a guess nobody made. */
-    size_t stack = h->stack_size;
-    if (stack == 0) {
-        uint32_t declared = 0;
-        if (rv9_mod_manifest_u32(mod->image, RV9_MTAG_STACK, &declared)) {
-            stack = declared;
-        }
-    }
-    if (stack == 0) stack = PROC_DEFAULT_STACK;
 
     /* A real-time process is not an RV-9 thread: it runs preemptively
        above everything, because its latency must not depend on anyone
