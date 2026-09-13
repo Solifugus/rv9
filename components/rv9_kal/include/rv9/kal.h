@@ -124,11 +124,53 @@ void      rv9_task_delete(rv9_task_t task);
  *
  * Stacks are the dominant per-process cost -- everything else about a
  * process is about a kilobyte -- so sizing them by guesswork wastes most
- * of a small machine's memory or corrupts it. There is no overflow
- * detection here, which makes "it did not crash" worthless as evidence;
- * this is the measurement that replaces it.
+ * of a small machine's memory or corrupts it. This is the measurement
+ * that lets a stack be cut down with evidence rather than nerve.
  */
 rv9_err_t rv9_task_stack(rv9_task_t task, size_t *size, size_t *unused);
+
+/*
+ * Why a task stopped, if it stopped for a reason worth naming.
+ *
+ * A task that runs off the bottom of its stack cannot report that itself:
+ * by the time anything notices, the thing that would have done the
+ * reporting is the thing that was overwritten. So the scheduler notices
+ * instead, and leaves a fault code behind on the corpse.
+ *
+ * Only RV-9's own kernel detects this. On the host backend the answer is
+ * always NONE, which is a statement about what is known, not about what
+ * happened.
+ */
+#define RV9_TASK_FAULT_NONE   0
+#define RV9_TASK_FAULT_STACK  1
+
+int  rv9_task_fault(rv9_task_t task);
+
+/*
+ * Is this task still able to run?
+ *
+ * The ordinary way a process ends is by returning, and the trampoline that
+ * called it reports that. A task killed by the scheduler never returns, so
+ * nothing reports anything and anybody in wait() waits forever. This is
+ * how the process manager finds out anyway.
+ *
+ * On the host backend this is always true: the trampoline is the only
+ * authority there, and claiming otherwise would invent knowledge.
+ */
+bool rv9_task_alive(rv9_task_t task);
+
+/*
+ * Done with the corpse.
+ *
+ * A task the scheduler killed is kept, emptied of everything expensive,
+ * until whoever was watching has read the fault off it -- otherwise the
+ * handle is reused underneath them and reports the next task's health as
+ * though it were this one's. This says the reading is finished.
+ *
+ * Harmless on a task that ended normally, and harmless on the host
+ * backend, which keeps nothing.
+ */
+void rv9_task_reap(rv9_task_t task);
 rv9_task_t rv9_task_self(void);
 void      rv9_task_yield(void);
 void      rv9_task_delay_ms(uint32_t ms);

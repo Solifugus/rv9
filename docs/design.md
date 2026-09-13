@@ -2098,6 +2098,157 @@ once it means something, nobody looks.
   when there is something wants a loop doing real work, or one deliberately
   overrunning.
 
+## 22. The floor of a stack
+
+Phase 4 made small stacks easy — `stack_size` in a module's `build.conf`,
+and a measurement to size it against — without making them safe. That is a
+poor trade: a `stacks` report showing 60 bytes spare invites cutting to
+zero, and the failure mode was a silent overwrite of whatever the allocator
+had put underneath, surfacing minutes later as an unrelated crash.
+
+### A guard, not a wall
+
+The lowest four words of every stack are painted with `RV9K_STACK_PAINT`
+along with the rest of it, and never legitimately written: a stack grows
+down, so the deepest thing a thread does lands there first.
+
+`reschedule()` checks them on the way out of every thread. That is the only
+moment the question can be asked cheaply — a running thread keeps its stack
+pointer in a register, so there is nothing in memory to inspect until it
+stops, and every thread stops here.
+
+Four words is not a wall. A single large local steps straight over it.
+Prevention needs the PMP, which is phase 7's last step.
+
+### A place to land
+
+Detection on its own is worth much less than it looks. By the time the
+guard is noticed the write has happened, and what it landed on was whoever
+the allocator put underneath — so the report arrives alongside a second,
+silent failure in an unrelated process, and the useful half of the news is
+buried under the useless half.
+
+So every stack is allocated with 128 bytes underneath it that belong to
+nobody: `RV9K_STACK_PAD_WORDS`. The thread is never told — `stack` points
+above it, `stack_words` excludes it, and `stacks` reports the size the
+module asked for. It is not more stack; it is somewhere for a modest
+overrun to land. The ordinary case, a call chain a frame or two too deep,
+now damages nothing at all, and the guard above it still fires.
+
+That makes the report worth having: the failure is attributed *to the
+thread that caused it*, by name, and nothing else is wrong.
+
+### Killing without touching
+
+A faulted thread is marked `RV9K_FAULT_STACK` and `RV9K_DEAD`, and the
+scheduler switches away from it — but it must not *save* it. `rv9_ctx_switch`
+pushes fourteen words onto the outgoing stack, which for a thread that has
+already run off the bottom means fourteen more words of somebody else's
+memory. One victim's overflow would become two.
+
+So `switch.S` gained `rv9_ctx_load`: the half of a switch that loads without
+saving. The registers of a thread that will never run again are worth
+nothing, so they are dropped rather than written somewhere harmful.
+
+### The kernel does not say so
+
+`stack_fault()` prints nothing. The kernel is below the seam, it has no
+console, and it has never heard of a process — it does not know that the
+thread it just killed was `pid 7 ('gauge')`. It records the fact and moves
+on.
+
+The layer that *does* know is the process manager, and it finds out by
+asking: `rv9_task_alive()` and `rv9_task_fault()` through the KAL.
+
+### The funeral is held by a passer-by
+
+A process normally ends by returning through `proc_trampoline`, which is
+where its paths are closed, its module unlinked and its status recorded. A
+thread the scheduler killed never returns, so none of that happens: its
+paths stay open, its module stays linked, and its parent waits forever for
+a status nobody will write.
+
+The tempting fix — have the scheduler call the process manager — is the
+deadlock we already paid for once, taking the process lock from inside
+`reschedule()`. Instead, anybody who *looks* at a process may notice the
+task is gone and finish the job: `rv9_proc_wait`'s poll loop, and the ager,
+which is the one thing that walks every process on a timer and so catches a
+faulted process with nobody waiting on it. Whoever gets there first claims
+it with `collecting` and does the work outside the lock, because closing
+paths reaches into the I/O manager and the two locks must never be taken in
+both orders. The parent gets `-RV9_PROC_ERR_FAULT`, which is negative and
+is not a status any module returns.
+
+### Holding the corpse
+
+The first version had a race that would have been very hard to find. A
+thread's handle is a pointer into a fixed table; `reap_dead()` frees the
+stack and releases the slot; the next `fork` reuses it. A watcher still
+holding the old handle then asks after a corpse and is told a healthy
+stranger is alive and well — so it waits forever, which is the bug the
+whole exercise was meant to remove.
+
+A faulted thread now holds its slot after its stack is returned. The memory
+goes back immediately, because that is the expensive part; the slot and the
+name stay until `rv9k_thread_release()`, which the process manager calls
+once it has read the fault off. Threads that end normally are never held.
+
+### Testing it without wrecking the heap
+
+The obvious test is a runaway recursion, and it is the wrong one: it writes
+hundreds of bytes below the stack, so a test of the detector becomes a test
+of how much heap corruption the system survives.
+
+What the detector watches is the guard, so the test writes the guard and
+nothing else — `smasher_thread` takes its own `rv9k_self()->stack` and
+scribbles on the four words it is not allowed to touch. The effect on the
+check in `reschedule()` is identical to a real overrun; the effect on the
+rest of the heap is nil. A bystander thread runs alongside to prove that
+killing one thread does not disturb the others, and the slot-reuse check
+covers the race above.
+
+Those tests cannot run in the shipped build: they call `rv9k_init()`, which
+is fine when RV-9 is a guest and fatal when the kernel being torn down is
+the one underneath you. They run in a `CONFIG_RV9_KERNEL_NATIVE=n` build —
+42 passed, 0 failed.
+
+### `smash`, and the recursion that wasn't
+
+The kernel test proves the detector. It does not prove the funeral, which
+is the part with the locks in it, so there is a module: `smash` runs off
+its own stack on purpose, on the real board, through the whole chain.
+
+It descends one small frame at a time and asks `sysinfo` after every one
+how much of its own stack is left, stopping the moment the answer is under
+eight bytes — by which point the guard has been written and nothing below
+it has. Self-calibrating rather than guessed, because the number of frames
+that fits in a stack is not knowable from inside the module, and guessing
+high is the runaway recursion again. It refuses to run where the size
+reads zero, which is the host backend saying it does not know.
+
+The first two runs reported "the measurement never fell": sixty-four levels
+deep and not one byte of stack consumed. `return descend(...)` is a tail
+call, and at `-Os` GCC turns it into a jump back to the top with the frame
+reused. Reading the frame *after* the recursive call forces it to outlive
+the call, and the descent became a descent. A test that cannot fail is not
+evidence, and this one had been quietly passing nothing.
+
+What the board prints now:
+
+```
+rv9> smash
+descending...
+E (14054) rv9-proc: pid 9 ('smash') killed: stack overflow
+smash returned -6
+rv9> echo hello
+echo: hello from a forked module
+```
+
+`-6` is `-RV9_PROC_ERR_FAULT`: the shell's `wait()` returned rather than
+hanging. Three runs in a row cost 816 bytes of heap, which is four retained
+process descriptors and nothing else — the paths were closed, the module
+unlinked and the statics freed by a passer-by.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

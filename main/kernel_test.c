@@ -292,6 +292,107 @@ static bool heap_tests(void)
     return true;
 }
 
+/* ---- stack overflow detection ---- */
+
+/*
+ * A thread that runs off the bottom of its own stack -- exactly, and no
+ * further.
+ *
+ * The obvious test is a runaway recursion, and it is the wrong one: it
+ * writes hundreds of bytes into whatever the allocator put underneath the
+ * stack, so a test of the detector becomes a test of how much heap
+ * corruption the system survives. What the detector actually watches is
+ * the guard, so this writes the guard and nothing else. The effect on the
+ * check in reschedule() is identical to a real overrun; the effect on the
+ * rest of the heap is nil.
+ */
+static volatile int s_smashed;
+
+static void smasher_thread(void *arg)
+{
+    (void)arg;
+
+    rv9k_thread_t *self = rv9k_self();
+    volatile uint32_t *floor = (volatile uint32_t *)self->stack;
+
+    for (int i = 0; i < RV9K_GUARD_WORDS; i++) floor[i] = 0xDEADBEEFu;
+    s_smashed = 1;
+
+    /* Ask to be scheduled. We do not come back from this: the guard is
+       checked on the way out, and a thread that failed it is not resumed.
+       rv9k_yield, not rv9_task_yield -- these tests run against a kernel
+       the KAL is not currently pointed at, so the KAL would yield the
+       wrong scheduler. */
+    rv9k_yield();
+
+    /* Reaching here means the overrun went unnoticed. */
+    s_smashed = 2;
+}
+
+static void bystander_thread(void *arg)
+{
+    volatile int *rounds = (volatile int *)arg;
+    for (int i = 0; i < 200; i++) { (*rounds)++; rv9k_yield(); }
+}
+
+static bool stack_guard_tests(void)
+{
+    rv9k_init();
+    rv9k_set_allocators(test_alloc, test_release);
+
+    s_smashed = 0;
+    static volatile int rounds;
+    rounds = 0;
+
+    rv9k_thread_t *bad  = rv9k_thread_create(smasher_thread, NULL, "smash",
+                                             2048, 8);
+    rv9k_thread_t *good = rv9k_thread_create(bystander_thread, (void *)&rounds,
+                                             "bystander", 2048, 8);
+    if (bad == NULL || good == NULL) return false;
+
+    uint32_t faults_before = rv9k_stack_faults();
+
+    rv9_sched_lock();
+    rv9k_run();
+    rv9_sched_unlock();
+
+    check(s_smashed == 1, "the overrunning thread was stopped at the yield");
+    check(rv9k_stack_faults() == faults_before + 1, "one stack fault counted");
+    check(!rv9k_thread_alive(bad), "the overrunning thread is dead");
+    check(rv9k_thread_fault(bad) == RV9K_FAULT_STACK,
+          "and the kernel says why");
+
+    /* The point of killing one thread is that the others keep going. */
+    check(rounds == 200, "the bystander ran to completion");
+    check(rv9k_thread_fault(good) == RV9K_FAULT_NONE,
+          "and is not blamed for it");
+
+    /*
+     * The corpse keeps its slot until somebody lets go of it.
+     *
+     * This is the race the hold exists for: the stack is expensive and
+     * goes back at once, but if the *slot* went back too, the next thread
+     * created would land on it and a watcher holding the old handle would
+     * be told its dead process is alive and well -- and wait forever,
+     * which is the failure the whole exercise was meant to remove.
+     */
+    check(bad->stack == NULL, "the dead thread's stack was returned");
+    check(bad->name[0] != '\0', "but its name is still there to report");
+
+    rv9k_thread_t *other = rv9k_thread_create(bystander_thread,
+                                              (void *)&rounds, "later",
+                                              2048, 8);
+    check(other != NULL && other != bad,
+          "a new thread does not land on the corpse");
+    if (other) rv9k_thread_kill(other);
+
+    rv9k_thread_release(bad);
+    check(rv9k_thread_fault(bad) == RV9K_FAULT_NONE && bad->name[0] == '\0',
+          "releasing it clears the slot");
+
+    return true;
+}
+
 /* ---- the conformance suite, run inside an RV-9 thread ---- */
 
 static volatile int s_native_failures = -1;
@@ -426,6 +527,7 @@ bool rv9_kernel_selftest(void)
 
     check(blocking_tests(), "blocking costs nothing");
     check(heap_tests(), "the kernel's allocator works");
+    check(stack_guard_tests(), "a stack overrun is caught and contained");
 
     /* And the real acceptance test: the KAL contract, unchanged, run
        against RV-9's own kernel. */

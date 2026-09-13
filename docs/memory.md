@@ -89,10 +89,22 @@ setup — because that runs in the opening process's context.
 
 A module may now declare `stack_size` in its `build.conf`; the default
 remains 8,192 only because nothing had ever measured what was needed. A
-trivial program runs in 256 bytes, but that is not a recommendation:
-there is **no stack overflow detection**, so "it did not crash" is not
-evidence. Size against the measured high-water mark with real margin —
-2,048 is comfortable for everything here.
+trivial program runs in 256 bytes, but that is not a recommendation.
+Size against the measured high-water mark with real margin — 2,048 is
+comfortable for everything here.
+
+Running out is now **detected, not prevented**. The lowest four words of
+every stack are a guard painted with `RV9K_STACK_PAINT`; the scheduler
+checks them each time it switches a thread away, and a thread that has
+written below its own floor is killed with `RV9_TASK_FAULT_STACK`. Its
+process is collected by whoever next looks at it — a `wait()`, or the
+ager — so a parent gets `-RV9_PROC_ERR_FAULT` instead of waiting forever.
+
+By the time it fires the corruption has already happened: something below
+the stack in the heap has been overwritten. What the guard buys is that
+the failure is *reported at the thread that caused it* rather than
+surfacing later as an unrelated crash. Real prevention needs the PMP,
+which is the last step of phase 7.
 
 For a language whose programs are processes, this is the number that
 decides concurrency. At 8 KB, 53 KB of free heap holds six. At 2 KB it

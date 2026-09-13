@@ -143,7 +143,7 @@ Measured or checked against the running system, 2026-09-12.
 | | status |
 |---|---|
 | 1. resource contract in the header | partial — four fields exist, no extension mechanism |
-| 2. per-program stack | **done**, `stack_size` in `build.conf`; **no overflow detection** |
+| 2. per-program stack | **done**, `stack_size` in `build.conf`; overflow **detected** (guard word, thread killed), not prevented — PMP is phase 7 |
 | 3. RT admission | not started — RT work is launched, not admitted |
 | 4. protected reserves | **nothing**; exhaustion aborts inside ESP-IDF |
 | 5. heap policy by class | see below — the situation is the reverse of what is assumed |

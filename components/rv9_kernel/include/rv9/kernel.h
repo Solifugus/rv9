@@ -91,6 +91,8 @@ struct rv9k_thread {
     uint64_t       last_ran_seq;    /* selection order, for round-robin */
 
     void          *local;           /* one pointer belonging to this thread */
+    int            fault;           /* RV9K_FAULT_*, why the kernel stopped it */
+    bool           held;            /* corpse kept for whoever is watching */
 
     rv9k_thread_t *next;
 };
@@ -184,7 +186,66 @@ void rv9k_set_idle_hook(void (*fn)(void));
    guessed. Unused counts from the low end; zero means it has run out. */
 #define RV9K_STACK_PAINT 0xA5C3A5C3u
 
+/*
+ * The lowest words of a stack are a guard, never legitimately written.
+ *
+ * A stack grows down, so the deepest thing a thread does lands here first.
+ * Four words is not a wall -- a single large local can step straight over
+ * it -- but it catches the ordinary case of a call chain one frame too
+ * deep, which is the failure a hand-declared stack actually produces.
+ *
+ * Real prevention needs the PMP, which is phase 7's last step. Until then
+ * this is detection: the corruption has already happened when it fires,
+ * and the value is that it is reported rather than mysterious.
+ */
+#define RV9K_GUARD_WORDS 4
+
+/*
+ * Space below the guard that belongs to nobody.
+ *
+ * A guard that only reports is worth much less than one that also
+ * contains. Without this, a thread one frame too deep has already
+ * overwritten whatever the allocator put underneath it by the time the
+ * guard is noticed -- so the report arrives alongside a second, silent
+ * failure in an unrelated process.
+ *
+ * Every stack is allocated with this much extra underneath it, and the
+ * thread is never told about it: `stack` points above it, `stack_words`
+ * excludes it, and the measurement reports the stack the thread asked for.
+ * It is a place for a modest overrun to land, not more stack.
+ *
+ * 128 bytes covers the ordinary case -- a call chain a frame or two too
+ * deep. A single large local still steps over it, which is what the PMP is
+ * for.
+ */
+#define RV9K_STACK_PAD_WORDS 32
+
+/* Why a thread was stopped by the kernel rather than by itself. */
+#define RV9K_FAULT_NONE  0
+#define RV9K_FAULT_STACK 1
+
 size_t rv9k_stack_unused(const rv9k_thread_t *t);
+
+/* Non-zero once the kernel has stopped this thread for a fault. */
+int    rv9k_thread_fault(const rv9k_thread_t *t);
+bool   rv9k_thread_alive(const rv9k_thread_t *t);
+
+/*
+ * Let go of a faulted thread's slot.
+ *
+ * A thread the kernel killed keeps its slot after its stack is freed, so
+ * that whoever holds a handle to it can still ask what happened. Without
+ * that hold the slot is reused by the next thread created, and a watcher
+ * comparing against a stale handle is told the corpse is alive and well --
+ * which is worse than no answer at all.
+ *
+ * The layer that noticed the fault calls this when it has finished with
+ * it. Threads that end normally are never held.
+ */
+void   rv9k_thread_release(rv9k_thread_t *t);
+
+/* How many threads have been stopped for overrunning their stack. */
+uint32_t rv9k_stack_faults(void);
 size_t rv9k_stack_size(const rv9k_thread_t *t);
 void rv9k_serve(void);
 

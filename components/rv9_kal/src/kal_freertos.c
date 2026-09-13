@@ -105,6 +105,29 @@ rv9_err_t rv9_task_stack(rv9_task_t task, size_t *size, size_t *unused)
     return RV9_OK;
 }
 
+/*
+ * FreeRTOS does not hand back a reason, and it does not survive an
+ * overflow well enough to be asked. Both answers below say "nothing
+ * known", which leaves the trampoline as the only authority on this
+ * backend -- as it has always been.
+ */
+int rv9_task_fault(rv9_task_t task)
+{
+    (void)task;
+    return RV9_TASK_FAULT_NONE;
+}
+
+bool rv9_task_alive(rv9_task_t task)
+{
+    (void)task;
+    return true;
+}
+
+void rv9_task_reap(rv9_task_t task)
+{
+    (void)task;
+}
+
 void rv9_task_delete(rv9_task_t task)
 {
     vTaskDelete((TaskHandle_t)task);   /* NULL means "this task" */

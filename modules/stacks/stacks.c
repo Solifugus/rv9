@@ -6,9 +6,11 @@
  * kilobytes free holds six processes, almost none of which need anything
  * like that much.
  *
- * The used figure is measured rather than estimated -- stacks are painted
- * at creation and scanned afterwards -- because there is no overflow
- * detection here, which makes "it did not crash" no evidence at all.
+ * The used figure is measured rather than estimated: stacks are painted at
+ * creation and scanned afterwards. A stack that runs out is caught -- the
+ * kernel guards the floor and kills the thread -- but being caught is a
+ * dead process, not a warning, so this is the number to cut a stack down
+ * by. Spare of nearly zero means the next branch taken kills it.
  */
 #include "modlib.h"
 

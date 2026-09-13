@@ -211,6 +211,21 @@ rv9_err_t rv9_task_stack(rv9_task_t task, size_t *size, size_t *unused)
     return RV9_OK;
 }
 
+int rv9_task_fault(rv9_task_t task)
+{
+    return rv9k_thread_fault((const rv9k_thread_t *)task);
+}
+
+bool rv9_task_alive(rv9_task_t task)
+{
+    return rv9k_thread_alive((const rv9k_thread_t *)task);
+}
+
+void rv9_task_reap(rv9_task_t task)
+{
+    rv9k_thread_release((rv9k_thread_t *)task);
+}
+
 void rv9_task_delete(rv9_task_t task)
 {
     if (task != NULL) {

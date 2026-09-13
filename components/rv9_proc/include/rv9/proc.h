@@ -100,6 +100,11 @@ typedef struct rv9_proc {
     int               exit_status;
     uint32_t          signals;          /* pending, cleared when taken */
 
+    /* RV9_TASK_FAULT_*: why the scheduler stopped it, if it did. A process
+       that ended by returning has no fault, which is the usual case. */
+    int               fault;
+    bool              collecting;       /* somebody is holding its funeral */
+
     uint64_t          started_ms;
 
     char              arg[64];        /* what fork was given, for env->arg */
@@ -118,6 +123,7 @@ typedef enum {
     RV9_PROC_ERR_MODULE,
     RV9_PROC_ERR_TIMEOUT,
     RV9_PROC_ERR_INVAL,
+    RV9_PROC_ERR_FAULT,     /* the scheduler stopped it; see rv9_proc_t.fault */
 } rv9_proc_err_t;
 
 const char *rv9_proc_strerror(rv9_proc_err_t err);

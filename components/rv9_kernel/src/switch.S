@@ -63,6 +63,45 @@ rv9_ctx_switch:
     .size rv9_ctx_switch, . - rv9_ctx_switch
 
 /*
+ * Leave the current thread without saving it.
+ *
+ *   void rv9_ctx_load(uint32_t *load_sp);   -- does not return
+ *
+ * The half of a switch that abandons the outgoing context. It exists for
+ * the one case where saving would be actively harmful: a thread that ran
+ * off the bottom of its own stack. Pushing fourteen more words onto that
+ * stack writes further into whatever the allocator put underneath it, so
+ * a switch that saves turns one victim's overflow into two victims. The
+ * thread is dead and will never be resumed, so its registers are worth
+ * nothing -- drop them.
+ */
+    .globl rv9_ctx_load
+    .type rv9_ctx_load, @function
+    .align 2
+
+rv9_ctx_load:
+    mv    sp, a0
+
+    lw    ra,  0(sp)
+    lw    s0,  4(sp)
+    lw    s1,  8(sp)
+    lw    s2, 12(sp)
+    lw    s3, 16(sp)
+    lw    s4, 20(sp)
+    lw    s5, 24(sp)
+    lw    s6, 28(sp)
+    lw    s7, 32(sp)
+    lw    s8, 36(sp)
+    lw    s9, 40(sp)
+    lw    s10,44(sp)
+    lw    s11,48(sp)
+
+    addi  sp, sp, CTX_BYTES
+    ret
+
+    .size rv9_ctx_load, . - rv9_ctx_load
+
+/*
  * Where a new thread begins.
  *
  * A fresh stack is built so that the first switch into it "returns" here,

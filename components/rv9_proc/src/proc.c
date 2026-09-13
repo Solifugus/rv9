@@ -286,6 +286,83 @@ static void proc_trampoline(void *arg)
 }
 
 /* ------------------------------------------------------------------ */
+/* Collecting the killed                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A process normally ends by returning through proc_trampoline, which is
+ * where its paths are closed, its module released and its status recorded.
+ *
+ * A task the scheduler killed -- for running off the bottom of its stack,
+ * so far the only way -- never returns, so none of that happens. Its paths
+ * stay open, its module stays linked, and anybody in wait() waits forever
+ * for a status that will never be written. The kernel cannot do the
+ * clearing up itself: it is below the seam, it has never heard of a
+ * process, and calling up into this layer from inside reschedule() would
+ * take the process lock from the scheduler, which is exactly the deadlock
+ * we spent an evening on.
+ *
+ * So the funeral is held by a passer-by. Anybody who looks at a process --
+ * a waiter, the ager -- may notice the task is gone and finish the job.
+ * Whoever gets there first claims it with `collecting` and does the work
+ * outside the lock, because closing paths reaches into the I/O manager and
+ * the two locks must never be held in the same order twice.
+ */
+static bool claim_faulted_locked(rv9_proc_t *p)
+{
+    if (p->state == RV9_PROC_EXITED || p->collecting) return false;
+    if (p->task == NULL || rv9_task_alive(p->task))   return false;
+
+    p->fault      = rv9_task_fault(p->task);
+    p->collecting = true;
+    return true;
+}
+
+static void collect_faulted(rv9_proc_t *p)
+{
+    ESP_LOGE(TAG, "pid %u ('%s') killed: %s", (unsigned)p->pid, p->name,
+             p->fault == RV9_TASK_FAULT_STACK ? "stack overflow" : "faulted");
+
+    if (p->cls == RV9_CLASS_REALTIME) rv9_rt_release();
+    if (s_on_exit) s_on_exit(p->pid);
+
+    rv9_mod_entry_t *mod = p->module;
+    void            *st  = p->statics;
+    rv9_task_t       tk  = p->task;
+
+    rv9_lock_acquire(s_lock);
+    p->statics = NULL;
+    p->task    = NULL;
+    /* Negative, and not a status any module returns, so a parent can tell
+       "it failed" from "it succeeded and returned zero". */
+    p->exit_status = -RV9_PROC_ERR_FAULT;
+    p->state       = RV9_PROC_EXITED;
+    p->collecting  = false;
+    rv9_lock_release(s_lock);
+
+    if (mod) rv9_mod_unlink(mod);
+    rv9_free(st);
+    rv9_task_reap(tk);      /* the slot may be reused now */
+}
+
+/* Sweep every process. Called from places that are already looking. */
+static void collect_faulted_all(void)
+{
+    for (;;) {
+        rv9_proc_t *victim = NULL;
+
+        rv9_lock_acquire(s_lock);
+        for (rv9_proc_t *p = s_procs; p; p = p->next) {
+            if (claim_faulted_locked(p)) { victim = p; break; }
+        }
+        rv9_lock_release(s_lock);
+
+        if (victim == NULL) return;
+        collect_faulted(victim);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Aging                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -295,6 +372,12 @@ static void ager_task(void *arg)
 
     for (;;) {
         rv9_task_delay_ms(AGE_PERIOD_MS);
+
+        /* The ager is the one thing that looks at every process on a
+           timer, so it is where a killed process with nobody waiting on
+           it gets collected. */
+        collect_faulted_all();
+
         if (!s_aging) continue;
 
         rv9_lock_acquire(s_lock);
@@ -627,6 +710,14 @@ rv9_proc_err_t rv9_proc_wait(rv9_pid_t pid, int *out_status, uint32_t timeout_ms
             return RV9_PROC_ERR_TIMEOUT;
         }
         rv9_task_delay_ms(WAIT_POLL_MS);
+
+        /* Waiting forever on a child the scheduler already killed is the
+           failure this looks for. Nobody else will write its status. */
+        bool mine;
+        rv9_lock_acquire(s_lock);
+        mine = claim_faulted_locked(p);
+        rv9_lock_release(s_lock);
+        if (mine) collect_faulted(p);
     }
 
     if (out_status) *out_status = p->exit_status;

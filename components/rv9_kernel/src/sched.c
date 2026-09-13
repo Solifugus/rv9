@@ -13,6 +13,7 @@
 
 /* From switch.S */
 extern void rv9_ctx_switch(uint32_t **save_sp, uint32_t *load_sp);
+extern void rv9_ctx_load(uint32_t *load_sp);      /* switch away, unsaved */
 extern void rv9_thread_trampoline(void);
 
 /* The trampoline jumps here if a thread returns from its entry point. */
@@ -20,6 +21,8 @@ void rv9_thread_exited(void);
 
 static void reschedule(void);
 static rv9k_thread_t *waitq_pop_best(rv9k_waitq_t *wq);
+static bool stack_intact(const rv9k_thread_t *t);
+static void stack_fault(rv9k_thread_t *t);
 
 static rv9k_thread_t  s_threads[RV9K_MAX_THREADS];
 static rv9k_thread_t *s_current;
@@ -31,6 +34,7 @@ static uint64_t       s_blocks;
 static bool           s_running;
 static uint32_t       s_sched_lock;
 static void         (*s_idle_hook)(void);
+static uint32_t       s_stack_faults;
 
 /* ------------------------------------------------------------------ */
 /* Interrupts                                                          */
@@ -133,6 +137,7 @@ void rv9k_init(void)
     for (int i = 0; i < RV9K_MAX_THREADS; i++) {
         s_threads[i].state = RV9K_DEAD;
         s_threads[i].next  = NULL;
+        s_threads[i].held  = false;
     }
     s_current       = NULL;
     s_last_age_tick = s_ticks;
@@ -162,7 +167,8 @@ rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
 
     rv9k_thread_t *t = NULL;
     for (int i = 0; i < RV9K_MAX_THREADS; i++) {
-        if (s_threads[i].state == RV9K_DEAD && s_threads[i].stack == NULL) {
+        if (s_threads[i].state == RV9K_DEAD && s_threads[i].stack == NULL &&
+            !s_threads[i].held) {
             t = &s_threads[i];
             break;
         }
@@ -172,22 +178,32 @@ rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
     size_t words = (stack_bytes + 3) / 4;
     if (words < 128) words = 128;
 
-    uint32_t *stack = (uint32_t *)s_alloc(words * 4);
-    if (stack == NULL) return NULL;
+    /* The pad sits underneath and is never handed to the thread: see
+       RV9K_STACK_PAD_WORDS. It is painted with everything else so that a
+       thread which reaches it is still caught by the guard above it. */
+    uint32_t *base = (uint32_t *)s_alloc((words + RV9K_STACK_PAD_WORDS) * 4);
+    if (base == NULL) return NULL;
+
+    uint32_t *stack = base + RV9K_STACK_PAD_WORDS;
 
     /*
      * Paint it, so that how much was used can be asked afterwards.
      *
      * Without this the only stack measurement available is "it did not
-     * crash", which is not a measurement -- there is no overflow detection
-     * here, so a thread that overran quietly corrupted the heap and carried
-     * on. A pattern and a scan turn a guess into a number, which is what
-     * anyone sizing a stack actually needs.
+     * crash", which is not a measurement. A pattern and a scan turn a guess
+     * into a number, which is what anyone sizing a stack actually needs.
+     *
+     * The same pattern in the lowest words is the guard: see
+     * RV9K_GUARD_WORDS and stack_intact().
      */
-    for (size_t i = 0; i < words; i++) stack[i] = RV9K_STACK_PAINT;
+    for (size_t i = 0; i < words + RV9K_STACK_PAD_WORDS; i++) {
+        base[i] = RV9K_STACK_PAINT;
+    }
 
     t->stack       = stack;
     t->stack_words = words;
+    t->fault       = RV9K_FAULT_NONE;
+    t->held        = false;
 
     /* Stacks grow down. RISC-V wants the pointer 16-byte aligned. */
     uint32_t *top = stack + words;
@@ -397,11 +413,15 @@ static void reap_dead(void)
         if (th == s_current) continue;
         if (th->state != RV9K_DEAD || th->stack == NULL) continue;
 
-        if (s_release) s_release(th->stack);
+        if (s_release) s_release(th->stack - RV9K_STACK_PAD_WORDS);
         th->stack       = NULL;
         th->stack_words = 0;
         th->sp          = NULL;
-        th->name[0]     = '\0';
+
+        /* A faulted thread's memory goes back, but its slot does not: see
+           rv9k_thread_release. Its name is what identifies it in the
+           report, so that stays too. */
+        if (!th->held) th->name[0] = '\0';
     }
 }
 
@@ -428,6 +448,27 @@ static void reschedule(void)
 
     rv9k_thread_t *prev = s_current;
 
+    /*
+     * Before anything else: did the thread we are leaving run off the
+     * bottom of its own stack?
+     *
+     * This is the only moment the question can be asked cheaply. A thread
+     * that is running has its stack pointer in a register, not in memory,
+     * so there is nothing to inspect until it stops -- and every thread
+     * stops here.
+     *
+     * `abandon` says the outgoing context must not be saved: see
+     * rv9_ctx_load. s_current deliberately keeps pointing at the corpse so
+     * that reap_dead() below leaves the stack alone while we are still
+     * standing on it; whoever runs next frees it.
+     */
+    bool abandon = false;
+
+    if (prev != NULL && !stack_intact(prev)) {
+        stack_fault(prev);
+        abandon = true;
+    }
+
     reap_dead();
     wake_sleepers();
     age_threads();
@@ -438,8 +479,8 @@ static void reschedule(void)
         /* Nothing runnable. Go back to the host, which will either give us
            time again or let the system exit. */
         s_current = NULL;
-        if (prev) rv9_ctx_switch(&prev->sp, s_host_sp);
-        else return;
+        if (abandon)   rv9_ctx_load(s_host_sp);        /* does not return */
+        else if (prev) rv9_ctx_switch(&prev->sp, s_host_sp);
         return;
     }
 
@@ -459,7 +500,9 @@ static void reschedule(void)
     next->last_ran_seq = s_switches;
     s_current          = next;
 
-    if (prev) {
+    if (abandon) {
+        rv9_ctx_load(next->sp);                        /* does not return */
+    } else if (prev) {
         rv9_ctx_switch(&prev->sp, next->sp);
     } else {
         rv9_ctx_switch(&s_host_sp, next->sp);
@@ -542,6 +585,61 @@ size_t rv9k_stack_unused(const rv9k_thread_t *t)
     while (i < t->stack_words && t->stack[i] == RV9K_STACK_PAINT) i++;
     return i * sizeof(uint32_t);
 }
+
+/*
+ * Has this thread written below the floor of its own stack?
+ *
+ * Checked when it is switched away from, which is every time it blocks,
+ * yields or is preempted -- so an overrun is caught within one scheduling
+ * decision of happening rather than whenever the damage surfaces.
+ */
+static bool stack_intact(const rv9k_thread_t *t)
+{
+    if (t == NULL || t->stack == NULL) return true;
+
+    for (int i = 0; i < RV9K_GUARD_WORDS; i++) {
+        if (t->stack[i] != RV9K_STACK_PAINT) return false;
+    }
+    return true;
+}
+
+/*
+ * Stop it, and say so.
+ *
+ * There is no recovering the memory below the stack -- it is already
+ * written -- so the only useful act is to stop the thread running again.
+ *
+ * Nothing is printed here. A kernel below the seam has no business owning
+ * a console, and the layer that knows this thread is a *process* is the
+ * one that can say so usefully; it notices through rv9k_thread_fault.
+ */
+static void stack_fault(rv9k_thread_t *t)
+{
+    t->fault = RV9K_FAULT_STACK;
+    t->state = RV9K_DEAD;
+    t->held  = true;
+    s_stack_faults++;
+}
+
+void rv9k_thread_release(rv9k_thread_t *t)
+{
+    if (t == NULL) return;
+    t->held    = false;
+    t->fault   = RV9K_FAULT_NONE;
+    t->name[0] = '\0';
+}
+
+int rv9k_thread_fault(const rv9k_thread_t *t)
+{
+    return t ? t->fault : RV9K_FAULT_NONE;
+}
+
+bool rv9k_thread_alive(const rv9k_thread_t *t)
+{
+    return t != NULL && t->state != RV9K_DEAD;
+}
+
+uint32_t rv9k_stack_faults(void) { return s_stack_faults; }
 
 size_t rv9k_stack_size(const rv9k_thread_t *t)
 {
