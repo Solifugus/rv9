@@ -3,15 +3,15 @@
  *
  *   rt heavyloop
  *
- * Every 100 ms, 20 ms of computation. Its deadline is its period and it
- * meets it easily; what matters is that for a fifth of the time it is
- * busy, and anything sharing its priority waits for it. Paired with
- * `fastloop` it is the workload one priority cannot serve and two can.
+ * Every 100 ms, 15 ms of computation. Its deadline is its period and it
+ * meets it easily; what matters is that anything sharing its priority can
+ * find it run ahead of them for 15 ms. Paired with `fastloop` it is the
+ * workload one priority cannot serve and two can.
  */
 #include "modlib.h"
 
 #define RUNS     20         /* two seconds */
-#define WORK_US  20000
+#define WORK_US  15000
 
 __attribute__((section(".text.entry")))
 int rv9_module_entry(const rv9_mod_env_t *env)

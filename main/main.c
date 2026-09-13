@@ -21,6 +21,7 @@
 #include "fault_test.h"
 #include "proc_test.h"
 #include "sched_test.h"
+#include "mem_test.h"
 #include "conformance.h"
 
 #define RV9_RUN_KERNEL_TEST 1
@@ -128,6 +129,22 @@ static void run_module(const char *name)
 }
 
 /* devs -- list attached devices, showing the binding each descriptor made. */
+/*
+ * Where the heap stands, at the boundaries of boot.
+ *
+ * Idle memory went from 44 KB to 26 KB over an afternoon of changes and
+ * nothing said where. A warning rather than information, so that it still
+ * shows once the console is quietened for the shell.
+ */
+static void heap_mark(const char *when)
+{
+    ESP_LOGW(TAG, "heap %-16s free %6u  available %6u  for programs %6u  "
+                  "low %6u", when, (unsigned)rv9_heap_free(),
+             (unsigned)rv9_heap_available(),
+             (unsigned)rv9_heap_available_for(RV9_MEM_GENERAL),
+             (unsigned)rv9_heap_low_water());
+}
+
 static void devs(void)
 {
     ESP_LOGI(TAG, "devices:");
@@ -534,6 +551,12 @@ static void init_shell_loop(void)
         /* Quiet while the console shell is in use; warnings still show,
            which is where a service restarting belongs. */
         esp_log_level_set("*", ESP_LOG_WARN);
+
+        /* Once, when the services have settled: the figure an operator
+           logging in will actually have to work with. */
+        static int settled;
+        if (++settled == 5000 / SERVICE_POLL_MS) heap_mark("services up");
+
         rv9_task_delay_ms(SERVICE_POLL_MS);
     }
 }
@@ -756,26 +779,45 @@ static void rv9_init_task(void *arg)
 
     rv9_module_selftest();
 
+    /*
+     * From here init is the system: it brings the machine up and keeps its
+     * services running, and restarting sshd after something ate the
+     * ordinary memory is precisely when it must still be able to allocate.
+     * After the KAL's own tests, which exercise the floor as an ordinary
+     * caller sees it.
+     */
+    rv9_mem_class_set(RV9_MEM_SYSTEM);
+
     rv9_mod_dir_init();
     mdir();
     io_bringup();
+    heap_mark("after bringup");
 
     /* After bringup: the claim table comes up with the I/O manager, and
        testing it before then would test nothing. The same goes for
        publication, which needs /pub0 attached. */
     rv9_io_selftest();
     rv9_pub_selftest();
+    heap_mark("after io, pub");
 
     /* Needs the module store, the claim table and /gpio: it forks real
        modules and judges them by the pin they leave behind. */
     rv9_fault_selftest();
+    heap_mark("after fault");
 
     /* Last of the tests, because it forks the most: what it checks is
        that forking a lot leaves the machine as it found it. */
     rv9_proc_selftest();
+    heap_mark("after proc");
 
     /* Real-time scheduling: several loops at once, each for seconds. */
     rv9_sched_selftest();
+    heap_mark("after sched");
+
+    /* Memory reserves and budgets: exhausts ordinary memory on purpose, so
+       it runs last, when nothing else is starting. */
+    rv9_mem_selftest();
+    heap_mark("after mem");
 
     run_module("hello");
 
@@ -784,6 +826,7 @@ static void rv9_init_task(void *arg)
 #if RV9_RUN_INVERSION_DEMO
     inversion_demo();
 #endif
+    heap_mark("before services");
     init_shell_loop();
 
     rv9_task_delete(NULL);

@@ -19,7 +19,7 @@
   },
   "manifest": {
     "mandatory_bit": 32768,
-    "highest_known_tag": 18,
+    "highest_known_tag": 19,
     "unknown_advisory": "skipped",
     "unknown_mandatory": "module refused",
     "layout": "entries of u16 tag, u16 length, value, padded to 4 bytes; ends at tag 0 or the end of the module",
@@ -159,6 +159,13 @@
         "encoding": "string",
         "repeatable": true,
         "enforced": true
+      },
+      {
+        "name": "mem_max",
+        "tag": 19,
+        "encoding": "u32",
+        "repeatable": false,
+        "enforced": true
       }
     ]
   },
@@ -215,7 +222,8 @@
     "DEADLINE": 13,
     "RUNAWAY": 14,
     "NOPUB": 15,
-    "UNSCHEDULABLE": 16
+    "UNSCHEDULABLE": 16,
+    "BUDGET": 17
   },
   "io_errors": {
     "NOTFOUND": 1,
@@ -245,7 +253,8 @@
     "ADMIT": 6,
     "CLAIM": 7,
     "DEVICES": 8,
-    "LIMITS": 9
+    "LIMITS": 9,
+    "BUDGETS": 10
   },
   "calls": [
     {
@@ -579,7 +588,21 @@
     "pids": [
       1,
       65535
-    ]
+    ],
+    "budget_default": 32768,
+    "budget_ancestors": 8,
+    "budget_charges": "stack + statics + descriptor, to the process and its nearest ancestors"
+  },
+  "memory": {
+    "rt_reserve": 8192,
+    "classes": {
+      "GENERAL": 0,
+      "REALTIME": 1,
+      "SYSTEM": 2
+    },
+    "general": "stops while the real-time reserve is still left",
+    "realtime": "admission and a real-time loop's own set-up; may spend the reserve",
+    "system": "failsafes and RV-9's own work; may go to half the floor"
   },
   "publication": {
     "max_name": 24,

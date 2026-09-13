@@ -668,6 +668,8 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
         m.heap_floor     = (uint32_t)rv9_heap_floor();
         m.heap_available = (uint32_t)rv9_heap_available();
         m.heap_refusals  = rv9_heap_refusals();
+        m.heap_rt_reserve = (uint32_t)rv9_heap_rt_reserve();
+        m.heap_general    = (uint32_t)rv9_heap_available_for(RV9_MEM_GENERAL);
 
         if (s_proc_ops && s_proc_ops->procs) {
             int n = s_proc_ops->procs(NULL, 0);
@@ -685,6 +687,10 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
     case RV9_SYS_LIMITS:
         if (s_proc_ops == NULL || s_proc_ops->limits == NULL) return -1;
         return s_proc_ops->limits(buf, len);
+
+    case RV9_SYS_BUDGETS:
+        if (s_proc_ops == NULL || s_proc_ops->budgets == NULL) return -1;
+        return s_proc_ops->budgets(buf, len);
 
     case RV9_SYS_ADMIT: {
         if (s_proc_ops == NULL || s_proc_ops->rt_load == NULL) return -1;

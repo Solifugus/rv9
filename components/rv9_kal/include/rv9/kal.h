@@ -713,6 +713,45 @@ uint32_t rv9_heap_refusals(void);   /* allocations turned away, since boot */
    nothing else -- never for anything a module can reach. */
 void *rv9_alloc_critical(size_t size);
 
+/*
+ * Who may spend how much of what is left.
+ *
+ * One floor decided whether RV-9 or ESP-IDF failed when memory ran out.
+ * It did not decide *which part of RV-9*: a shell session starting
+ * background jobs could take the last kilobyte above the floor, and then
+ * a control loop could not be admitted, a failsafe could not open the
+ * device it had to park -- that open allocates -- and `kill` could not be
+ * started to stop the thing responsible.
+ *
+ * So allocations are made in a class, taken from whoever is asking:
+ *
+ *   RV9_MEM_GENERAL   ordinary work: every process, by default. Stops
+ *                     while the real-time reserve is still left above the
+ *                     floor.
+ *   RV9_MEM_REALTIME  admitting a real-time loop, and the loop's own
+ *                     set-up. May spend the reserve, down to the floor.
+ *   RV9_MEM_SYSTEM    RV-9 keeping itself and the machine safe: applying
+ *                     failsafes, init restarting services, RV-9's own
+ *                     host tasks. May go to half the floor; the other half
+ *                     is ESP-IDF's, which aborts rather than fails.
+ *
+ * rv9_mem_class_set returns the previous class, to be put back with a
+ * second call. An RV-9 thread keeps its own; a host task not told
+ * otherwise is SYSTEM, which is what every host task that is not a
+ * real-time process is. rv9_mem_task_forget drops what was recorded for a
+ * host task that is ending.
+ */
+#define RV9_MEM_GENERAL   0
+#define RV9_MEM_REALTIME  1
+#define RV9_MEM_SYSTEM    2
+
+int    rv9_mem_class_get(void);
+int    rv9_mem_class_set(int cls);
+void   rv9_mem_task_forget(rv9_task_t task);
+
+size_t rv9_heap_rt_reserve(void);                 /* bytes above the floor */
+size_t rv9_heap_available_for(int cls);           /* what that class may take */
+
 /* ------------------------------------------------------------------ */
 /* Critical sections                                                   */
 /*                                                                     */

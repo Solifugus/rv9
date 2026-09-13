@@ -102,6 +102,10 @@ struct rv9k_thread {
     /* Somebody tried to stop this thread while it held something. Anything
        it is blocked in that can give up early should, and let go. */
     bool           cancel;
+
+    /* RV9_MEM_*: how far into the heap's reserves this thread may allocate.
+       See rv9_mem_class_set. Zero is ordinary. */
+    uint8_t        mem_class;
     bool           held;            /* corpse kept for whoever is watching */
 
     rv9k_thread_t *next;

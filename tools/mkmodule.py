@@ -31,6 +31,7 @@ TAGS = {
     "device": 0x000A, "exclusive": 0x000B, "failsafe": 0x000C,
     "capability": 0x000D, "compiler": 0x000E, "runtime": 0x000F,
     "on_deadline": 0x0010, "publishes": 0x0011, "watches": 0x0012,
+    "mem_max": 0x0013,
 }
 
 CLASSES = {"unspecified": 0, "proaction": 1, "reaction": 2, "realtime": 3}
@@ -42,7 +43,7 @@ U8_NAMES = {"class": CLASSES, "on_deadline": ON_DEADLINE}
 # How each tag's value is encoded, so a build.conf says `heap_max=0` and
 # gets four bytes rather than the string "0".
 U32_TAGS = {"stack", "static", "heap_max", "period_us", "deadline_us",
-            "min_inter_us", "wcet_us"}
+            "min_inter_us", "wcet_us", "mem_max"}
 U8_TAGS = {"class", "on_deadline"}
 STR_TAGS = {"desc", "device", "exclusive", "capability",
             "compiler", "runtime", "publishes", "watches"}

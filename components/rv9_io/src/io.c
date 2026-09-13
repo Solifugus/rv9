@@ -1007,6 +1007,14 @@ static void io_on_fork(rv9_pid_t parent, rv9_pid_t child)
 
 static void apply_failsafes(const rv9_claim_fs_t *fs, int n)
 {
+    /*
+     * With whatever memory is left. Parking an actuator opens its device,
+     * and an open allocates -- so a failsafe that ran in the dying
+     * process's class would be refused exactly when memory had run out,
+     * which is exactly when something may have died of it.
+     */
+    int prev = rv9_mem_class_set(RV9_MEM_SYSTEM);
+
     for (int i = 0; i < n; i++) {
         rv9_path_t *p = NULL;
         rv9_io_err_t err = rv9_io_open_detached(fs[i].name, RV9_MODE_WRITE, &p);
@@ -1029,6 +1037,8 @@ static void apply_failsafes(const rv9_claim_fs_t *fs, int n)
                      (unsigned long)v);
         }
     }
+
+    rv9_mem_class_set(prev);
 }
 
 /*

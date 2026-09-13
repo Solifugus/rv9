@@ -83,13 +83,15 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     m_say(env, RV9_STDOUT, "    }\n  },\n");
 
     m_say(env, RV9_STDOUT, "  \"memory\": {\n");
-    num(env, "    ", "heap_floor", l->heap_floor, true);
+    num(env, "    ", "heap_floor", l->heap_floor, false);
+    num(env, "    ", "rt_reserve", l->rt_reserve, true);
     m_say(env, RV9_STDOUT, "  },\n");
 
     m_say(env, RV9_STDOUT, "  \"processes\": {\n");
     num(env, "    ", "history", l->proc_history, false);
     num(env, "    ", "history_max", l->proc_history_max, false);
-    num(env, "    ", "max_paths", l->max_paths, true);
+    num(env, "    ", "max_paths", l->max_paths, false);
+    num(env, "    ", "budget_default", l->budget_default, true);
     m_say(env, RV9_STDOUT, "  },\n");
 
     m_say(env, RV9_STDOUT, "  \"devices\": [\n");

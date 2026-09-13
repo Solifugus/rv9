@@ -99,6 +99,7 @@ for dir in "$ROOT"/modules/*/; do
     min_inter_us=""
     wcet_us=""
     on_deadline=""      # report (the default) or fault
+    mem_max=""          # bytes it and everything it starts may hold
     failsafes=""        # space separated PATH=VALUE, e.g. "/gpio/2=0"
     devices=""          # space separated, shared access
     exclusives=""       # space separated, wanted alone
@@ -154,6 +155,7 @@ for dir in "$ROOT"/modules/*/; do
     add_tag min_inter_us "$min_inter_us"
     add_tag wcet_us      "$wcet_us"
     add_tag on_deadline  "$on_deadline"
+    add_tag mem_max      "$mem_max"
     for d in $devices;      do add_tag device     "$d"; done
     for d in $exclusives;   do add_tag exclusive  "$d"; done
     for f in $failsafes;    do add_tag failsafe   "$f"; done

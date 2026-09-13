@@ -140,6 +140,21 @@ typedef struct rv9_proc {
     bool              waited;
     uint32_t          ended_seq;
 
+    /*
+     * Memory, charged. See "Budgets" in proc.c.
+     *
+     * `serial` names this process for accounting and is never reused, so
+     * that a pid issued again after the wrap cannot be credited for memory
+     * the first holder of the number was charged. `ancestors` are the
+     * serials this process's footprint was charged to, nearest first.
+     */
+    uint32_t          serial;
+    uint32_t          footprint;
+    uint32_t          held;
+    uint32_t          budget;
+    uint32_t          ancestors[8];
+    uint8_t           n_ancestors;
+
     uint64_t          started_ms;
 
     char              arg[64];        /* what fork was given, for env->arg */
@@ -212,6 +227,9 @@ typedef enum {
 
     /* Admission: no placement of the real-time work meets every deadline. */
     RV9_PROC_ERR_UNSCHEDULABLE,
+
+    /* Starting it would take a process past its memory budget. */
+    RV9_PROC_ERR_BUDGET,
 } rv9_proc_err_t;
 
 const char *rv9_proc_strerror(rv9_proc_err_t err);
@@ -291,6 +309,9 @@ typedef struct {
     bool             waited;         /* its status has been collected */
     bool             rt_urgent;      /* real-time only: placed above the radio */
     uint32_t         rt_bound_us;    /* real-time only: analysed response bound */
+    uint32_t         footprint;      /* its own stack, statics and descriptor */
+    uint32_t         held;           /* with its live descendants */
+    uint32_t         budget;
 } rv9_proc_info_t;
 
 /*

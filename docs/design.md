@@ -3917,20 +3917,34 @@ scheduling priority from the complete admitted workload and its periods,
 deadlines, minimum intervals, and execution bounds. A faster period alone
 is not always enough.* This does that.
 
-### The false fault, reproduced
+### The false fault, and how often it happens
 
-`fastloop` has 500 µs to answer each 5 ms release, and declares a miss
-fatal. `heavyloop` spends 20 ms of every 100 working. Neither is wrong on
-its own. Together, at one priority:
+The first pair built to show it: a fast loop with 500 µs to answer each
+5 ms release, a miss declared fatal, beside a slow loop spending 20 ms of
+every 100 working. At one priority:
 
 ```
 E rv9-proc: pid 5 ('fastloop') missed its 500 us deadline: answered in 1072,
             0 releases skipped; stopped and not released again
 ```
 
-Released in the middle of the heavy loop's work, it waited for the next
-tick to get the CPU. On a machine that moves, that is actuators parked
-because of a scheduling decision nobody made on purpose.
+On a machine that moves, that is actuators parked because of a scheduling
+decision nobody made on purpose.
+
+It was also not what happened every time, and the test built on it failed
+to fail on one boot in four. The explanation assumed the fast loop always
+waited for the next scheduler tick. This host wakes a task of equal
+priority at once most of the time, so the fault needs the less usual case
+where the slow loop runs first. A second pair was built to make that case
+common — the fast loop now does 2 ms of work in every 5, due in 3 — and
+still passed at one priority on two boots of two, with worst jitter of 812
+and 327 µs where the derived placement gave 14 and 12. On the next boot it
+was stopped.
+
+So the honest statement is: at one priority, a loop can be made to wait
+for another loop's work, which makes its response worse every time and
+occasionally fatal. The test checks the first, which is reliable, and
+counts the second as an instance of it.
 
 ### Two priorities, because that is what there is
 
@@ -3985,11 +3999,14 @@ and is counted as unaccounted, as before.
 If a running loop's placement changes, it is moved while it runs:
 
 ```
-I rv9-proc: admit 'heavyloop': urgent, response bound 25000 us against 100000
-I rv9-proc: pid 2 ('heavyloop') now runs routine, bound 26200 us
-I rv9-proc: admit 'fastloop': urgent, response bound 200 us against 500
+I rv9-proc: pid 2 ('heavyloop') now runs routine, bound 38000 us
+I rv9-proc: admit 'fastloop': urgent, response bound 2500 us against 3000
 fastloop: 400 on time, worst jitter 14 us
 ```
+
+(`heavyloop` does 15 ms of work declared as 18; `fastloop` 2 ms declared as
+2.5. The heavy loop's bound is its own 18 ms plus the fast loop's 2.5 ms
+for every 5 ms it is kept waiting: 38 ms, against a 100 ms deadline.)
 
 A task the watchdog has flagged is not moved: it was lowered on purpose
 and is about to be stopped (§30).
@@ -4003,15 +4020,16 @@ in for a schedulability test, which it never was:
 
 ```
 E rv9-proc: admit 'st-rt-tight': with it admitted, pid 6 ('fastloop') would
-            answer in 550 us against a 500 us deadline, however the
+            answer in 3100 us against a 3000 us deadline, however the
             real-time work is placed
-I rv9-proc: admit 'st-rt-fits': routine, response bound 550 us against 2000
+I rv9-proc: admit 'st-rt-fits': routine, response bound 3100 us against 6000
 ```
 
-Both of those use 3.5% of the CPU. One has a 400 µs deadline beside a loop
-with 500, and whichever goes first makes the other wait 350 or 200 µs too
-long. The other has 2 ms and fits underneath, with a bound computed exactly
-as by hand.
+Both of those use 6% of the CPU, beside a fast loop using 50%. One has a
+2.8 ms deadline, and whichever of the two goes first makes the other wait
+too long: 2500 + 600 does not fit in 3000, nor 600 + 2500 in 2800. The
+other has 6 ms and fits underneath, with a bound of 3100 µs computed
+exactly as by hand.
 
 ### Seen from the shell
 
@@ -4029,17 +4047,22 @@ slot  period  deadline  runs     bound  worst  misses
 ```
 
 The bound and the worst side by side is the point: a declaration that
-measurement keeps approaching is a declaration to look at.
+measurement keeps approaching is a declaration to look at. (That table was
+captured with the first version of the pair — 100 µs of fast work, 20 ms
+of heavy — and the figures are from it.)
 
 ### Tested
 
 `sched-test`, 11 checks. The pair with priority derived: the heavy loop is
 moved below the fast one when the fast one is admitted, and the fast loop
 meets every deadline. The same pair with the derivation switched off, as a
-control: the fast loop is stopped with `DEADLINE`. Without the control the
-first result would prove nothing. Then admission, with modules built in
+control: the fast loop's worst response, read from the live statistics
+near the end of its run, must be later than it was when placed — and a
+fault counts as later. Without the control the first result would prove
+nothing; with a control that only sometimes fails, as the first version
+had, it proves nothing either. Then admission, with modules built in
 memory: the tight candidate refused, the loose one admitted at routine with
-a bound of 550 µs, and the running fast loop undisturbed.
+a bound of 3100 µs, and the running fast loop undisturbed.
 
 ### What this does not do
 
@@ -4184,6 +4207,164 @@ learns that `getstat` exists and is not real-time safe, not which codes a
 **The board's half travels as text over a shell.** There is no structured
 query protocol, and `format` is 1 because the shape of both files is
 expected to change as the compiler starts reading them.
+
+## 35. When memory runs out
+
+Until now RV-9 had one heap floor (§23): below 12 KB, every allocation is
+refused, for everyone. That keeps the machine from dying of exhaustion,
+but not the parts of it that matter most. A background job that spends
+the heap down to the floor leaves a control loop unable to start, and in
+the worst case leaves a dying loop's failsafe path with nothing to run on.
+Before this section, `deaf &` five times over SSH made `kill` itself fail
+with "no memory". A shell that cannot kill the thing that ate the memory
+has no way out.
+
+R9's contract is that real-time work is admitted against what the
+machine can *guarantee* it. So memory now has classes and budgets.
+
+### Three floors, not one
+
+Every allocation is asked against the floor of the class of the thread
+making it:
+
+| class | floor | who |
+|---|---|---|
+| general | floor + 8 KB reserve | ordinary programs, shells, daemons |
+| realtime | floor | real-time processes, and anyone forking one |
+| system | floor / 2 | init, the failsafe path, unregistered host tasks |
+
+RV-9 threads carry their class in the thread structure. Host tasks (wifi,
+esp_timer) have no RV-9 thread, so `kal_mem.c` keeps a small registry for
+them, and a host task nobody registered counts as system: the radio stack
+cannot be told to fail, and refusing it gains nothing.
+
+The class is set where the reason for it is known:
+
+- `fork_rt` raises the caller to realtime for the fork. Otherwise a
+  general shell asking for a control loop would be refused at the general
+  floor, and the reserve would protect nothing.
+- The real-time trampoline sets realtime for the process itself.
+- `apply_failsafes` runs at system and restores the old class afterwards.
+  Parking an actuator is the last thing that must still work.
+- Init is system from before the module directory is built.
+
+### Budgets
+
+Modules cannot allocate. Everything a process costs is spent for it by
+RV-9, and nearly all of that at fork: stack, statics, and descriptor. So
+a process's footprint (stack + statics + descriptor + 96 bytes of
+allocator headers) is known before it runs. The footprint is charged to
+the process and to each of its nearest eight ancestors, which are tracked
+by serial number rather than pid, so a reused pid is never charged for a
+dead process's children. A fork that would take any of them over budget
+is refused with `RV9_PE_BUDGET`, and the refusal names whose budget it
+was.
+
+Budgets nest. A shell's budget covers the commands it runs, and `sshd`'s
+covers every session's shell and whatever that shell starts. The default
+is 32 KB, enough for a shell to hold `ed` (17 KB with its statics) with
+room to spare. A program that needs more says so in its manifest with a
+new tag, `mem_max` (0x0013). `sshd` and `rshd` declare 40 KB. The charge
+is returned when the process ends, not when it is collected, so a
+remembered descriptor in the history does not hold budget.
+
+`budgets` lists every live process's footprint, what it and its
+descendants hold, and its budget. The profile (§34) gains
+`processes.budget_default` and a `memory` section with the reserve.
+
+### The shell keeps a way out
+
+`procs` and `kill` are the two commands you need most when memory is gone,
+so the shell has its own copies. The process table lives in the shell's
+statics. If forking either command is refused for memory or budget, the
+shell does the work itself. Over SSH, with background `deaf` jobs
+started until one was refused, the lines that mattered were:
+
+```
+deaf: no memory to start it
+(no memory to start procs; the shell's own)
+(no memory to start kill; the shell's own) killed
+```
+
+and `budgets` showed `sshd` holding 13552 of its 40960. In that run the fifth `deaf` hit the general floor before it hit a budget.
+General memory ran out first, and that is the case the fallbacks exist
+for.
+
+### Tested
+
+`mem-test` runs last at boot and uses up memory on purpose (boot log,
+13/13):
+
+```
+--- when ordinary memory is gone ---
+(took 105 x 512 bytes; 8612 left above the floor)
+  pass  and was refused with the real-time reserve still there
+  pass  an ordinary program cannot start now
+  pass  but a control loop is still admitted
+(took 8 x 512 more; 2004 left above the floor)
+  pass  the loop is stopped with every reserve above the floor gone
+  pass  and its pin was still parked
+(heap -40 bytes lower than before)
+--- a program that forks without end ---
+(started 4 children before the budget refused one)
+(second run: heap 0 bytes lower)
+mem: 13/13 passed
+```
+
+General work stopped with the 8 KB reserve intact. A control loop was
+still admitted by an ordinary caller. A real-time hog then took the
+reserve down to 2 KB above the floor, and a dying loop's pin was still
+parked under the system floor. `forkbomb` (12 KB budget) was stopped at
+four children both times, with nothing lost on the second run.
+
+`heap_mark` logs the heap at each stage of boot so these costs can be
+seen, not guessed: 92 KB free after bringup, 82 KB before services, and
+48.5 KB (28 KB for programs) once the services are up.
+
+### What it costs to use the machine
+
+Measured over serial with an SSH session opened and closed:
+
+| state | free | for programs |
+|---|---|---|
+| idle | 37912 | 17432 |
+| session open, idle | 30828 | 10348 |
+| `free` forked inside the session | 23896 | 3416 |
+| session closed | 37548 | — |
+
+Nothing leaks. A session costs about 7 KB, and a command forked inside it
+about 7 KB more. That leaves **3.4 KB for programs inside a session with
+one command running**. This is the most important thing this section
+found. The protections work, but the margin they protect is thin on this
+board. A second command in the same session is refused, and the shell
+falls back to its own `procs` and `kill`.
+
+### What this does not do
+
+**Headroom is not tuned.** Many modules still use the 8 KB default stack
+when they need far less (only the daemons have been right-sized, from
+measured high-water marks), and each of those is 8 KB that could be 3. Right-sizing the rest is the cheapest
+memory this board will ever get. Likewise, the 8 KB reserve and the 32 KB
+default were chosen by reasoning, not measured against a real control
+workload.
+
+**Idle drifts.** Free memory at "services up" was 48.5 KB, but an idle
+board some minutes later had 37.9 KB. Wifi buffers and lwIP state are the
+likely cause, but that has not been shown.
+
+**Budgets count what RV-9 spends at fork, not everything.** Buffers a
+driver or file manager allocates on a process's behalf (a socket, an open
+file's cache) are not charged to it. They are bounded by the floors, not
+by the budget.
+
+**Classes are per thread, not per allocation.** A general thread that
+calls into a resident path allocates at its own class. Only the paths
+named above change class.
+
+**No compile-time check.** A compiler could total the footprint of a
+component tree and check it against `budget_default` from the profile
+before it ever reaches a board. The data to do that is now published, but
+nothing uses it.
 
 ## 9. Migration to a native kernel
 

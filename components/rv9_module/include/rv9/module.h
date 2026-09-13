@@ -149,10 +149,12 @@ typedef struct __attribute__((packed)) {
 #define RV9_MTAG_ON_DEADLINE  0x0010  /* u8:  RV9_ON_DEADLINE_*            */
 #define RV9_MTAG_PUBLISHES    0x0011  /* string: a cell it writes; repeats */
 #define RV9_MTAG_WATCHES      0x0012  /* string: a cell it reads; repeats  */
+#define RV9_MTAG_MEM_MAX      0x0013  /* u32: bytes it and all it starts may
+                                         hold at once; see RV9_PE_BUDGET */
 
 /* The highest tag this build understands. Anything above it is unknown,
    and unknown plus mandatory is a refusal. */
-#define RV9_MTAG_MAX          0x0012
+#define RV9_MTAG_MAX          0x0013
 
 /*
  * Publications, declared rather than conventional.
@@ -536,6 +538,19 @@ typedef struct {
 #define RV9_PE_UNSCHEDULABLE 16
 
 /*
+ * Starting it would take a process past its memory budget: the program
+ * doing the starting, or one of the programs that started that one.
+ *
+ * A process's footprint -- its stack, its statics, what RV-9 keeps about
+ * it -- is charged to it and to its ancestors, and each has a budget: its
+ * manifest's RV9_MTAG_MEM_MAX, or a default. A program that forks without
+ * end therefore stops at its own budget, not at the machine's last
+ * kilobyte, and the programs beside it keep working. The log names whose
+ * budget it was.
+ */
+#define RV9_PE_BUDGET       17
+
+/*
  * Why a process stopped, as the process table reports it.
  *
  * R9 §15.1 requires the reason to become ordinary published state, and
@@ -820,6 +835,17 @@ _Static_assert(sizeof(rv9_pub_info_t) == 56, "rv9_pub_info_t is frozen");
 #define RV9_SYS_CLAIM    7     /* rv9_sys_claim_t, one per device claim  */
 #define RV9_SYS_DEVICES  8     /* rv9_sys_device_t, one per device       */
 #define RV9_SYS_LIMITS   9     /* rv9_sys_limits_t, one record           */
+#define RV9_SYS_BUDGETS 10     /* rv9_sys_budget_t, one per live process */
+
+/* What each running process is charged, and what it is allowed. */
+typedef struct __attribute__((packed)) {
+    uint16_t pid;
+    uint16_t parent;
+    char     name[16];
+    uint32_t footprint;        /* its own stack, statics and descriptor */
+    uint32_t held;             /* its footprint plus its live descendants' */
+    uint32_t budget;           /* what `held` may not exceed */
+} rv9_sys_budget_t;
 
 /*
  * What this machine offers, for a toolchain asking the board itself.
@@ -854,6 +880,8 @@ typedef struct __attribute__((packed)) {
     uint32_t proc_history;
     uint32_t proc_history_max;
     uint32_t max_paths;
+    uint32_t rt_reserve;       /* above the floor, for real-time work only */
+    uint32_t budget_default;   /* a process's budget when it declares none */
 } rv9_sys_limits_t;
 
 /*
@@ -931,6 +959,9 @@ typedef struct __attribute__((packed)) {
     uint32_t heap_floor;       /* reserved; RV-9 will not allocate into it */
     uint32_t heap_available;   /* free above the floor: what may be spent */
     uint32_t heap_refusals;    /* allocations turned away since boot */
+
+    uint32_t heap_rt_reserve;  /* above the floor, kept for real-time work */
+    uint32_t heap_general;     /* what an ordinary program may still take */
 } rv9_sys_mem_t;
 
 /* What a caller must ask for at minimum, and the boundary that must not
@@ -1168,6 +1199,7 @@ typedef struct {
     int (*signal)(int pid, uint32_t signals);
     int (*kill)(int pid);
     int (*limits)(void *buf, uint32_t len);  /* fills one rv9_sys_limits_t */
+    int (*budgets)(void *buf, uint32_t len); /* fills rv9_sys_budget_t records */
 } rv9_mod_proc_ops_t;
 
 void rv9_mod_set_proc_ops(const rv9_mod_proc_ops_t *ops);

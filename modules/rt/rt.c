@@ -113,6 +113,9 @@ static void refusal(const rv9_mod_env_t *env, const char *name, int pid)
     } else if (pid == -RV9_PE_NOPUB) {
         m_say(env, RV9_STDOUT, ": it watches a publication nothing on this "
                                "machine provides\n");
+    } else if (pid == -RV9_PE_BUDGET) {
+        m_say(env, RV9_STDOUT, ": over the memory budget of whatever is "
+                               "starting it (see 'budgets')\n");
     } else if (pid == -RV9_PE_UNSCHEDULABLE) {
         /* Not the utilisation refusal: the CPU has room, the deadlines do
            not. The log names which loop would be late, and by how much. */

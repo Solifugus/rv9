@@ -29,6 +29,7 @@ _Static_assert((int)RV9_PROC_ERR_RUNAWAY  == RV9_PE_RUNAWAY,  "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_NOPUB    == RV9_PE_NOPUB,    "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_UNSCHEDULABLE == RV9_PE_UNSCHEDULABLE,
                "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_BUDGET   == RV9_PE_BUDGET,   "ABI drift");
 
 /* The kernel's fault codes travel straight into the process table. */
 _Static_assert(RV9_TASK_FAULT_STACK  == RV9_FAULT_STACK,  "ABI drift");
@@ -86,6 +87,10 @@ static void undo_fork(rv9_pid_t pid)
     if (s_on_ended) s_on_ended(pid, RV9_FAULT_NONE);
 }
 
+/* And its memory charge, for a refusal before the descriptor holds it. */
+struct charge;
+static void refuse_fork(rv9_pid_t pid, const struct charge *c);
+
 void rv9_proc_set_hooks(rv9_proc_fork_hook_t on_fork,
                         rv9_proc_exit_hook_t on_exit)
 {
@@ -119,6 +124,7 @@ const char *rv9_proc_strerror(rv9_proc_err_t err)
     case RV9_PROC_ERR_NOPUB:    return "it watches something nothing publishes";
     case RV9_PROC_ERR_UNSCHEDULABLE:
         return "no placement meets every real-time deadline";
+    case RV9_PROC_ERR_BUDGET:   return "over its memory budget";
     default:                    return "unknown error";
     }
 }
@@ -182,10 +188,27 @@ static void put(rv9_proc_t *p)
     rv9_lock_release(s_lock);
 }
 
+/* Give an ended process's footprint back to everyone it was charged to. */
+static void uncharge_locked(const uint32_t *ancestors, int n, uint32_t bytes)
+{
+    for (int i = 0; i < n; i++) {
+        for (rv9_proc_t *q = s_procs; q; q = q->next) {
+            if (q->serial != ancestors[i]) continue;
+            q->held = (q->held > bytes) ? q->held - bytes : 0;
+            break;
+        }
+    }
+}
+
 static void ended_locked(rv9_proc_t *p)
 {
     p->state     = RV9_PROC_EXITED;
     p->ended_seq = ++s_ended_seq;
+
+    /* Once, and on every way out: every ending passes through here. */
+    uncharge_locked(p->ancestors, p->n_ancestors, p->footprint);
+    p->n_ancestors = 0;
+    p->held = 0;
 }
 
 /* The system itself (pid 0) counts as a parent that may yet ask. */
@@ -246,6 +269,100 @@ static rv9_pid_t next_pid_locked(void)
         if (pid != RV9_PID_NONE && find_locked(pid) == NULL) return pid;
     }
     return RV9_PID_NONE;
+}
+
+/* ------------------------------------------------------------------ */
+/* Budgets                                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * How much memory a process, and everything it starts, may hold.
+ *
+ * Modules cannot allocate: everything a process costs is spent on its
+ * behalf by RV-9, and nearly all of it at fork -- the stack, the statics,
+ * the descriptor. So a process's footprint is known before it runs, and
+ * charging it to the process and to every ancestor turns "a program that
+ * forks without end" into "a program that stops at its own budget", while
+ * the programs beside it keep working.
+ *
+ * Budgets nest. A shell's includes the commands it runs; `sshd`'s includes
+ * each session's shell and whatever that starts. The default is sized so a
+ * shell can hold its largest ordinary command -- `ed`, 17 KB with its
+ * statics -- with room left; a program that needs more says so with
+ * RV9_MTAG_MEM_MAX.
+ *
+ * Only the nearest eight ancestors are charged. Deeper than that is not a
+ * tree anyone has built here, and a fixed array is what keeps accounting
+ * off the heap it is accounting for.
+ */
+#define PROC_BUDGET_DEFAULT  32768
+#define PROC_ANCESTORS       8
+
+/* What RV-9 keeps about a process besides its stack and statics: the
+   descriptor, its path table, and the allocator's own headers. */
+#define PROC_OVERHEAD        (sizeof(rv9_proc_t) + 96)
+
+static uint32_t s_next_serial = 1;
+
+typedef struct charge {
+    uint32_t serial;
+    uint32_t bytes;
+    uint32_t ancestors[PROC_ANCESTORS];
+    uint8_t  n;
+} charge_t;
+
+static void refuse_fork(rv9_pid_t pid, const struct charge *c)
+{
+    rv9_lock_acquire(s_lock);
+    uncharge_locked(c->ancestors, c->n, c->bytes);
+    rv9_lock_release(s_lock);
+    undo_fork(pid);
+}
+
+/*
+ * Charge a new process to the process forking it and that one's ancestors.
+ * Refuses, charging nothing, if any of them -- or the new process itself --
+ * would go over budget. `whose` names the one that would.
+ */
+static bool charge_locked(charge_t *c, uint32_t bytes, uint32_t budget,
+                          char *whose, size_t whose_len)
+{
+    memset(c, 0, sizeof(*c));
+    c->bytes = bytes;
+
+    if (bytes > budget) {
+        snprintf(whose, whose_len, "its own");
+        return false;
+    }
+
+    rv9_proc_t *parent = current_locked();
+    if (parent != NULL && parent->state != RV9_PROC_EXITED) {
+        c->ancestors[c->n++] = parent->serial;
+        for (int i = 0; i < parent->n_ancestors && c->n < PROC_ANCESTORS; i++) {
+            c->ancestors[c->n++] = parent->ancestors[i];
+        }
+    }
+
+    for (int i = 0; i < c->n; i++) {
+        for (rv9_proc_t *q = s_procs; q; q = q->next) {
+            if (q->serial != c->ancestors[i]) continue;
+            if (q->state != RV9_PROC_EXITED && q->held + bytes > q->budget) {
+                snprintf(whose, whose_len, "pid %u ('%s')'s",
+                         (unsigned)q->pid, q->name);
+                return false;
+            }
+            break;
+        }
+    }
+
+    for (int i = 0; i < c->n; i++) {
+        for (rv9_proc_t *q = s_procs; q; q = q->next) {
+            if (q->serial == c->ancestors[i]) { q->held += bytes; break; }
+        }
+    }
+
+    c->serial = s_next_serial++;
+    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -487,6 +604,7 @@ static void finish(rv9_proc_t *p, int rc, int fault,
     /* The task's own hold, last: nothing below touches the descriptor. */
     put(p);
 
+    rv9_mem_task_forget(rv9_task_self());
     rv9_task_delete(NULL);
 }
 
@@ -543,6 +661,11 @@ static void proc_trampoline(void *arg)
     rv9_lock_acquire(s_lock);
     p->task = rv9_task_self();
     rv9_lock_release(s_lock);
+
+    /* A real-time loop's set-up may spend the real-time reserve. An
+       ordinary process allocates as ordinary, which is every thread's
+       default. */
+    if (p->cls == RV9_CLASS_REALTIME) rv9_mem_class_set(RV9_MEM_REALTIME);
 
     /*
      * A process may outlive the module it started as: chain() swaps the
@@ -849,6 +972,7 @@ static bool rt_overrun(rv9_task_t task, int why)
 
     if (s_on_ended) s_on_ended(p->pid, fault);
 
+    rv9_mem_task_forget(task);
     rv9_task_delete(task);
     if (mod) rv9_mod_unlink(mod);
     rv9_free(statics);
@@ -1080,12 +1204,40 @@ static int proc_limits_op(void *buf, uint32_t len)
     l.proc_history             = PROC_HISTORY;
     l.proc_history_max         = PROC_HISTORY_MAX;
     l.max_paths                = RV9_MAX_PATHS;
+    l.rt_reserve               = (uint32_t)rv9_heap_rt_reserve();
+    l.budget_default           = PROC_BUDGET_DEFAULT;
 
     memcpy(buf, &l, len < sizeof(l) ? len : sizeof(l));
     return 1;
 }
 
+/* Every live process's charge and budget, or a count with no buffer. */
+static int proc_budgets_op(void *buf, uint32_t len)
+{
+    uint32_t max = buf ? len / sizeof(rv9_sys_budget_t) : 0;
+    rv9_sys_budget_t *out = (rv9_sys_budget_t *)buf;
+    int n = 0;
+
+    rv9_lock_acquire(s_lock);
+    for (rv9_proc_t *p = s_procs; p; p = p->next) {
+        if (p->state == RV9_PROC_EXITED) continue;
+        if (out != NULL && (uint32_t)n < max) {
+            memset(&out[n], 0, sizeof(out[n]));
+            out[n].pid       = p->pid;
+            out[n].parent    = p->parent;
+            strncpy(out[n].name, p->name, sizeof(out[n].name) - 1);
+            out[n].footprint = p->footprint;
+            out[n].held      = p->held;
+            out[n].budget    = p->budget;
+        }
+        n++;
+    }
+    rv9_lock_release(s_lock);
+    return n;
+}
+
 static const rv9_mod_proc_ops_t s_mod_proc_ops = {
+    .budgets = proc_budgets_op,
     .limits = proc_limits_op,
     .signal = proc_signal_op,
     .kill   = proc_kill_op,
@@ -1565,9 +1717,37 @@ rv9_proc_err_t rv9_proc_fork_rt(const char *module_name, uint32_t period_us,
                        period_us, out_pid);
 }
 
+static rv9_proc_err_t fork_inner(const char *module_name, int priority,
+                                 const char *arg, rv9_proc_class_t cls,
+                                 uint32_t period_us, rv9_pid_t *out_pid);
+
+/*
+ * Forking a real-time process spends the real-time reserve.
+ *
+ * Everything a child costs is allocated here, in the parent's context --
+ * so it is the parent's memory class that would decide whether a control
+ * loop can be admitted, and the parent is usually a shell. For a real-time
+ * child the class is raised for the length of the fork, never lowered: a
+ * system caller keeps what it had.
+ */
 static rv9_proc_err_t fork_common(const char *module_name, int priority,
                                   const char *arg, rv9_proc_class_t cls,
                                   uint32_t period_us, rv9_pid_t *out_pid)
+{
+    int prev = rv9_mem_class_get();
+    bool raise = (cls == RV9_CLASS_REALTIME && prev < RV9_MEM_REALTIME);
+    if (raise) rv9_mem_class_set(RV9_MEM_REALTIME);
+
+    rv9_proc_err_t err = fork_inner(module_name, priority, arg, cls,
+                                    period_us, out_pid);
+
+    if (raise) rv9_mem_class_set(prev);
+    return err;
+}
+
+static rv9_proc_err_t fork_inner(const char *module_name, int priority,
+                                 const char *arg, rv9_proc_class_t cls,
+                                 uint32_t period_us, rv9_pid_t *out_pid)
 {
     if (module_name == NULL) return RV9_PROC_ERR_INVAL;
 
@@ -1622,14 +1802,31 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
      * is built around it later. A refusal spends a pid, which is the right
      * way round: the alternative is a claim with nothing to release it.
      */
+    /* Its footprint, and what it may hold with everything it starts. */
+    uint32_t footprint = (uint32_t)(stack + h->static_size + PROC_OVERHEAD);
+    uint32_t budget = PROC_BUDGET_DEFAULT;
+    (void)rv9_mod_manifest_u32(mod->image, RV9_MTAG_MEM_MAX, &budget);
+
+    charge_t charge;
+    char whose[48] = "";
+
     rv9_lock_acquire(s_lock);
     prune_locked();
     rv9_pid_t pid = next_pid_locked();
+    bool charged = (pid != RV9_PID_NONE) &&
+                   charge_locked(&charge, footprint, budget, whose,
+                                 sizeof(whose));
     rv9_lock_release(s_lock);
 
     if (pid == RV9_PID_NONE) {      /* every pid names somebody */
         rv9_mod_unlink(mod);
         return RV9_PROC_ERR_NOMEM;
+    }
+    if (!charged) {
+        ESP_LOGW(TAG, "fork '%s': %lu bytes would take it past %s budget",
+                 module_name, (unsigned long)footprint, whose);
+        rv9_mod_unlink(mod);
+        return RV9_PROC_ERR_BUDGET;
     }
 
     /*
@@ -1644,7 +1841,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
     if (s_on_claim != NULL) {
         int refused = s_on_claim(pid, mod->image, module_name);
         if (refused != RV9_PROC_OK) {
-            undo_fork(pid);      /* undo a partial claim */
+            refuse_fork(pid, &charge);      /* undo a partial claim */
             rv9_mod_unlink(mod);
             return (rv9_proc_err_t)refused;
         }
@@ -1667,7 +1864,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
             on_deadline > RV9_ON_DEADLINE_FAULT) {
             ESP_LOGE(TAG, "admit '%s': on_deadline %u is not a policy this "
                           "system knows", module_name, (unsigned)on_deadline);
-            undo_fork(pid);
+            refuse_fork(pid, &charge);
             rv9_mod_unlink(mod);
             return RV9_PROC_ERR_CONTRACT;
         }
@@ -1682,7 +1879,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
                                       stack, &wcet_us, &deadline_us,
                                       &rt_urgent, &rt_bound);
         if (adm != RV9_PROC_OK) {
-            undo_fork(pid);
+            refuse_fork(pid, &charge);
             rv9_mod_unlink(mod);
             return adm;
         }
@@ -1690,7 +1887,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
 
     rv9_proc_t *p = rv9_calloc(1, sizeof(*p));
     if (p == NULL) {
-        undo_fork(pid);
+        refuse_fork(pid, &charge);
         rv9_mod_unlink(mod);
         return RV9_PROC_ERR_NOMEM;
     }
@@ -1699,7 +1896,7 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
         p->statics = rv9_calloc(1, h->static_size);
         if (p->statics == NULL) {
             rv9_free(p);
-            undo_fork(pid);
+            refuse_fork(pid, &charge);
             rv9_mod_unlink(mod);
             return RV9_PROC_ERR_NOMEM;
         }
@@ -1726,6 +1923,12 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
     p->rt_bound_us        = rt_bound;
     p->stack_bytes        = (uint32_t)stack;
     p->refs               = 1;      /* the task's, dropped at the end of finish() */
+    p->serial             = charge.serial;
+    p->footprint          = footprint;
+    p->held               = footprint;
+    p->budget             = budget;
+    p->n_ancestors        = charge.n;
+    memcpy(p->ancestors, charge.ancestors, sizeof(p->ancestors));
     strncpy(p->name, module_name, sizeof(p->name) - 1);
     if (arg != NULL) strncpy(p->arg, arg, sizeof(p->arg) - 1);
 
@@ -1985,6 +2188,9 @@ bool rv9_proc_info(rv9_pid_t pid, rv9_proc_info_t *out)
         out->waited      = p->waited;
         out->rt_urgent   = p->rt_urgent;
         out->rt_bound_us = p->rt_bound_us;
+        out->footprint   = p->footprint;
+        out->held        = p->held;
+        out->budget      = p->budget;
     }
     rv9_lock_release(s_lock);
     return p != NULL;

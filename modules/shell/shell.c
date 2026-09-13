@@ -22,7 +22,60 @@ typedef struct {
     char raw[LINE_MAX];     /* kept whole, for multi-word arguments */
     int  term;
     char term_open;
+    rv9_sys_proc_t procs[16];   /* for the fallback `procs`, which cannot fork */
 } shell_statics_t;
+
+/*
+ * The way out, when there is no memory to start it.
+ *
+ * `kill` and `procs` are modules like every other command. But the moment
+ * they matter most is the moment something has used up the memory or the
+ * budget a fork needs -- and then the command that would stop it cannot be
+ * started. So when forking one of them is refused for memory, the shell
+ * does the same job itself, with nothing to allocate: the process table
+ * goes into statics the shell already has, and a kill is two calls.
+ */
+static void fallback_procs(const rv9_mod_env_t *env)
+{
+    shell_statics_t *st = (shell_statics_t *)env->statics;
+    int n = env->sysinfo(RV9_SYS_PROCS, st->procs, sizeof(st->procs));
+    if (n > 16) n = 16;
+
+    m_say(env, RV9_STDOUT, "(no memory to start procs; the shell's own)\n"
+                           "pid   par   name        state\n");
+    for (int i = 0; i < n; i++) {
+        const rv9_sys_proc_t *p = &st->procs[i];
+        m_numpad(env, RV9_STDOUT, p->pid, 6);
+        m_numpad(env, RV9_STDOUT, p->parent, 6);
+        m_pad(env, RV9_STDOUT, p->name, 12);
+        m_say(env, RV9_STDOUT, p->state == 3 ? "exited\n" : "active\n");
+    }
+}
+
+static void fallback_kill(const rv9_mod_env_t *env, const char *arg)
+{
+    const char *a = arg ? arg : "";
+    while (*a == ' ') a++;
+    bool force = (a[0] == '-' && a[1] == 'f');
+    if (force) { a += 2; while (*a == ' ') a++; }
+
+    const char *end = a;
+    int pid = (int)m_num_parse(a, &end);
+    if (pid <= 0 || end == a) {
+        m_say(env, RV9_STDOUT, "usage: kill [-f] <pid>\n");
+        return;
+    }
+
+    m_say(env, RV9_STDOUT, "(no memory to start kill; the shell's own)\n");
+    int status = 0;
+    if (!force && env->signal(pid, RV9_SIG_STOP) == 0 &&
+        env->wait(pid, &status, 2000) == 0) {
+        m_say(env, RV9_STDOUT, "stopped when asked\n");
+        return;
+    }
+    m_say(env, RV9_STDOUT, env->kill(pid) == 0 ? "killed\n"
+                                               : "could not be stopped\n");
+}
 
 /*
  * The argument is the rest of the line, not just the next token.
@@ -141,6 +194,12 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
     int pid = env->fork_arg(name, 8, arg);
     int status = 0;
 
+    bool fallback = false;
+    if (pid == -RV9_PE_NOMEM || pid == -RV9_PE_BUDGET) {
+        if (m_eq(name, "kill"))  { fallback_kill(env, arg); fallback = true; }
+        if (m_eq(name, "procs")) { fallback_procs(env);     fallback = true; }
+    }
+
     if (pid >= 0 && !background) {
         /* Until it finishes. Giving up after thirty seconds did not stop
            the command -- it put a second reader on the same terminal, and
@@ -153,7 +212,9 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         env->close(SAVE_PATH);
     }
 
-    if (pid < 0) {
+    if (pid < 0 && fallback) {
+        /* Done already, by the shell itself. */
+    } else if (pid < 0) {
         /* Which failure it was. "No such module" for an exhausted heap is
            a message that sends you hunting for the wrong thing. */
         m_say(env, RV9_STDOUT, name);
@@ -172,6 +233,9 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         } else if (pid == -RV9_PE_NOPUB) {
             m_say(env, RV9_STDOUT, ": it watches a publication nothing on "
                                    "this machine provides (see the log)\n");
+        } else if (pid == -RV9_PE_BUDGET) {
+            m_say(env, RV9_STDOUT, ": over the memory budget of whatever is "
+                                   "starting it (see 'budgets')\n");
         } else if (pid == -RV9_PE_UNSCHEDULABLE) {
             m_say(env, RV9_STDOUT, ": with it running, some real-time loop "
                                    "would miss its deadline (see the log)\n");

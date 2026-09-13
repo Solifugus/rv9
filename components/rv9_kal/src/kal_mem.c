@@ -35,9 +35,13 @@
  * reserve; the point is that RV-9 does not spend it first.
  */
 #include "rv9/kal.h"
+#include "kal_internal.h"
 
 #include "esp_heap_caps.h"
 #include "sdkconfig.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include <stdlib.h>
 
@@ -45,11 +49,122 @@
 #define CONFIG_RV9_HEAP_FLOOR 0
 #endif
 
+/*
+ * Above the floor, for real-time work only. See RV9_MEM_* in rv9/kal.h.
+ *
+ * Sized for what admitting a loop actually costs rather than for comfort:
+ * a control loop's stack and statics are two kilobytes, its set-up opens a
+ * few hundred bytes more, and a failsafe's detached open is less than
+ * that. Eight kilobytes admits a few loops with ordinary memory gone,
+ * without taking so much from ordinary work that it runs short sooner.
+ */
+#define RV9_RT_RESERVE_BYTES 8192
+
 static size_t   s_floor = CONFIG_RV9_HEAP_FLOOR;
 static uint32_t s_refusals;
 
+/* ---- classes ---- */
+
 /*
- * Would this take us below the floor?
+ * Host tasks have no RV-9 thread to carry a class, and both thread-local
+ * storage slots are taken (pthreads and lwIP own the first, RV-9's path
+ * table cache the second). They are few, so they are a table: a host task
+ * with no entry is SYSTEM. Real-time processes put themselves in it when
+ * they start and are taken out when they end.
+ */
+#define MEM_HOST_TASKS 8
+
+static struct {
+    TaskHandle_t task;
+    uint8_t      cls;
+} s_host_class[MEM_HOST_TASKS];
+
+static portMUX_TYPE s_class_guard = portMUX_INITIALIZER_UNLOCKED;
+
+static int host_class(TaskHandle_t t)
+{
+    int cls = RV9_MEM_SYSTEM;
+    portENTER_CRITICAL(&s_class_guard);
+    for (int i = 0; i < MEM_HOST_TASKS; i++) {
+        if (s_host_class[i].task == t) { cls = s_host_class[i].cls; break; }
+    }
+    portEXIT_CRITICAL(&s_class_guard);
+    return cls;
+}
+
+int rv9_mem_class_get(void)
+{
+    rv9k_thread_t *th = rv9_kal_self_thread();
+    if (th != NULL) return th->mem_class;
+    return host_class(xTaskGetCurrentTaskHandle());
+}
+
+int rv9_mem_class_set(int cls)
+{
+    int prev = rv9_mem_class_get();
+
+    rv9k_thread_t *th = rv9_kal_self_thread();
+    if (th != NULL) {
+        th->mem_class = (uint8_t)cls;
+        return prev;
+    }
+
+    TaskHandle_t t = xTaskGetCurrentTaskHandle();
+    portENTER_CRITICAL(&s_class_guard);
+    int slot = -1, empty = -1;
+    for (int i = 0; i < MEM_HOST_TASKS; i++) {
+        if (s_host_class[i].task == t) { slot = i; break; }
+        if (s_host_class[i].task == NULL && empty < 0) empty = i;
+    }
+    if (cls == RV9_MEM_SYSTEM) {
+        if (slot >= 0) s_host_class[slot].task = NULL;   /* the default */
+    } else {
+        if (slot < 0) slot = empty;
+        /* A full table leaves the task SYSTEM: more permissive than asked,
+           never less, so nothing that should run is refused for it. */
+        if (slot >= 0) {
+            s_host_class[slot].task = t;
+            s_host_class[slot].cls  = (uint8_t)cls;
+        }
+    }
+    portEXIT_CRITICAL(&s_class_guard);
+    return prev;
+}
+
+void rv9_mem_task_forget(rv9_task_t task)
+{
+    TaskHandle_t t = (TaskHandle_t)task;
+    if (t == NULL) return;
+
+    portENTER_CRITICAL(&s_class_guard);
+    for (int i = 0; i < MEM_HOST_TASKS; i++) {
+        if (s_host_class[i].task == t) s_host_class[i].task = NULL;
+    }
+    portEXIT_CRITICAL(&s_class_guard);
+}
+
+/* How far down this class may take free memory. */
+static size_t floor_for(int cls)
+{
+    if (s_floor == 0) return 0;
+    switch (cls) {
+    case RV9_MEM_GENERAL:  return s_floor + RV9_RT_RESERVE_BYTES;
+    case RV9_MEM_REALTIME: return s_floor;
+    default:               return s_floor / 2;
+    }
+}
+
+size_t rv9_heap_rt_reserve(void) { return RV9_RT_RESERVE_BYTES; }
+
+size_t rv9_heap_available_for(int cls)
+{
+    size_t free_now = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+    size_t f = floor_for(cls);
+    return (free_now > f) ? free_now - f : 0;
+}
+
+/*
+ * Would this take us below the floor -- the caller's floor?
  *
  * Asked against the *default* heap for every allocation, including the DMA
  * and executable ones. On this board those are the same physical memory
@@ -65,10 +180,11 @@ static bool would_breach(size_t size)
 {
     if (s_floor == 0) return false;
 
+    size_t f = floor_for(rv9_mem_class_get());
     size_t free_now = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
-    if (free_now < s_floor) return true;
+    if (free_now < f) return true;
 
-    return size > free_now - s_floor;
+    return size > free_now - f;
 }
 
 static void *refuse(void)

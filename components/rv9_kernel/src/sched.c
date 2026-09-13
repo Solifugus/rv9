@@ -206,6 +206,7 @@ rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
     t->held        = false;
     t->holds       = 0;
     t->cancel      = false;
+    t->mem_class   = 0;
 
     /* Stacks grow down. RISC-V wants the pointer 16-byte aligned. */
     uint32_t *top = stack + words;

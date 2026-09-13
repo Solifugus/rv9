@@ -21,6 +21,14 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     m_num(env, RV9_STDOUT, (int32_t)m.heap_free);
     m_say(env, RV9_STDOUT, "\navailable      ");
     m_num(env, RV9_STDOUT, (int32_t)m.heap_available);
+
+    /* The first is what a program you type may still take; the second is
+       held back so a control loop can be admitted, and a failsafe applied,
+       after the first has run out. */
+    m_say(env, RV9_STDOUT, "\n  for programs ");
+    m_num(env, RV9_STDOUT, (int32_t)m.heap_general);
+    m_say(env, RV9_STDOUT, "\n  rt reserve   ");
+    m_num(env, RV9_STDOUT, (int32_t)m.heap_rt_reserve);
     m_say(env, RV9_STDOUT, "\nreserved       ");
     m_num(env, RV9_STDOUT, (int32_t)m.heap_floor);
     m_say(env, RV9_STDOUT, "\nrefused        ");

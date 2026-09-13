@@ -358,6 +358,20 @@ def profile():
             "history_max": one(proc_c, "PROC_HISTORY_MAX"),
             "max_paths": one(proc_h, "RV9_MAX_PATHS"),
             "pids": [1, 65535],
+            "budget_default": one(proc_c, "PROC_BUDGET_DEFAULT"),
+            "budget_ancestors": one(proc_c, "PROC_ANCESTORS"),
+            "budget_charges": "stack + statics + descriptor, to the process "
+                              "and its nearest ancestors",
+        },
+        "memory": {
+            "rt_reserve": one(read("components/rv9_kal/src/kal_mem.c"),
+                              "RV9_RT_RESERVE_BYTES"),
+            "classes": short(defines(kal_h, "RV9_MEM_"), "RV9_MEM_"),
+            "general": "stops while the real-time reserve is still left",
+            "realtime": "admission and a real-time loop's own set-up; "
+                        "may spend the reserve",
+            "system": "failsafes and RV-9's own work; may go to half "
+                      "the floor",
         },
         "publication": {
             "max_name": one(module_h, "RV9_PUB_MAX_NAME"),
