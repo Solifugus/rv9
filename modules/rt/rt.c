@@ -82,6 +82,9 @@ static void refusal(const rv9_mod_env_t *env, const char *name, int pid)
                                "(see 'owns')\n");
     } else if (pid == -RV9_PE_NODEV) {
         m_say(env, RV9_STDOUT, ": this machine has no such device\n");
+    } else if (pid == -RV9_PE_NOPUB) {
+        m_say(env, RV9_STDOUT, ": it watches a publication nothing on this "
+                               "machine provides\n");
     } else {
         m_say(env, RV9_STDOUT, ": cannot start as real-time\n");
     }

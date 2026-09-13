@@ -147,10 +147,37 @@ typedef struct __attribute__((packed)) {
 #define RV9_MTAG_COMPILER     0x000E  /* string: what built it             */
 #define RV9_MTAG_RUNTIME      0x000F  /* string: language runtime version  */
 #define RV9_MTAG_ON_DEADLINE  0x0010  /* u8:  RV9_ON_DEADLINE_*            */
+#define RV9_MTAG_PUBLISHES    0x0011  /* string: a cell it writes; repeats */
+#define RV9_MTAG_WATCHES      0x0012  /* string: a cell it reads; repeats  */
 
 /* The highest tag this build understands. Anything above it is unknown,
    and unknown plus mandatory is a refusal. */
-#define RV9_MTAG_MAX          0x0010
+#define RV9_MTAG_MAX          0x0012
+
+/*
+ * Publications, declared rather than conventional.
+ *
+ * Without these, two components agree on a cell by both happening to
+ * spell `CONTROL` the same way. Nothing checks the spelling, nothing stops
+ * a third program writing into it, and a supervisor watching a name no
+ * component will ever publish waits forever for a value.
+ *
+ *   PUBLISHES "/pub0/CONTROL"   the cell is made, if need be, and reserved
+ *                               for this program at fork. Another program
+ *                               declaring it is refused at fork; another
+ *                               process opening it to write is refused at
+ *                               open. The reservation ends with the process.
+ *
+ *   WATCHES   "/pub0/CONTROL"   refused at fork when nothing on the machine
+ *                               provides the cell: it does not exist, and
+ *                               no module in the directory declares that
+ *                               it publishes it. A publisher that simply
+ *                               has not started yet is not a refusal --
+ *                               start order is not a contract.
+ *
+ * Both are full paths, the same as DEVICE and EXCLUSIVE, so the device a
+ * publication lives on is not assumed.
+ */
 
 /*
  * What a missed deadline means for this program.
@@ -499,6 +526,10 @@ typedef struct {
 #define RV9_PE_DEADLINE     13   /* missed a deadline it declared fatal */
 #define RV9_PE_RUNAWAY      14   /* a real-time loop stopped waiting */
 
+/* It watches a publication nothing on this machine provides. An admission
+   refusal like NODEV, and next to it for the same reason. */
+#define RV9_PE_NOPUB        15
+
 /*
  * Why a process stopped, as the process table reports it.
  *
@@ -656,9 +687,25 @@ typedef struct __attribute__((packed)) {
     uint16_t writer;       /* the publisher's pid; 0 when it is the system */
     uint16_t readers;
     uint8_t  held;         /* somebody has it open for writing */
-    uint8_t  reserved[3];
+
+    /*
+     * Why the program this cell belongs to stopped, if it stopped badly:
+     * RV9_FAULT_*, or 0. R9 §15.1 has a faulted component *publish* that it
+     * faulted, and this is where: the fault is itself a publication -- the
+     * sequence moves on by one, so a watcher blocked in RV9_PUB_GS_WAIT
+     * wakes -- while the value and its stamp stay exactly as the component
+     * last left them. Cleared when a process next opens the cell to write,
+     * which is the component coming back into service.
+     *
+     * Written after the component's failsafes are applied, never before.
+     */
+    uint8_t  fault;
+    uint16_t reserved_by;  /* pid that declared it in its manifest, or 0 */
     uint32_t torn;         /* reads abandoned mid-publication since boot */
 } rv9_pub_info_t;
+
+/* These bytes were `reserved[3]`; the record kept its size. */
+_Static_assert(sizeof(rv9_pub_info_t) == 56, "rv9_pub_info_t is frozen");
 
 /* ------------------------------------------------------------------ */
 /* Console settings                                                    */
@@ -1087,6 +1134,17 @@ const void *rv9_mod_manifest_find(const void *image, uint16_t tag,
    false when the tag is absent or the wrong size, leaving *out alone. */
 bool rv9_mod_manifest_u32(const void *image, uint16_t tag, uint32_t *out);
 bool rv9_mod_manifest_u8(const void *image, uint16_t tag, uint8_t *out);
+
+/*
+ * Does any program on this machine declare exactly `value` under `tag`?
+ *
+ * The whole directory, including modules not in memory: their manifests
+ * are read from the store, a kilobyte at most each. That is tens of
+ * milliseconds across a full store, which is why only admission asks, and
+ * only for a program that declares something it depends on another
+ * program providing.
+ */
+bool rv9_mod_any_declares(uint16_t tag, const char *value);
 
 /*
  * Add a module from an image in memory rather than from the store.

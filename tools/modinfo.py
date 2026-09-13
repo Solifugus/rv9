@@ -27,7 +27,7 @@ TAGS = {0x0000: "end", 0x0001: "desc", 0x0002: "stack", 0x0003: "static",
         0x0007: "deadline_us", 0x0008: "min_inter_us", 0x0009: "wcet_us",
         0x000A: "device", 0x000B: "exclusive", 0x000C: "failsafe",
         0x000D: "capability", 0x000E: "compiler", 0x000F: "runtime",
-        0x0010: "on_deadline"}
+        0x0010: "on_deadline", 0x0011: "publishes", 0x0012: "watches"}
 
 CLASSES = {0: "unspecified", 1: "proaction", 2: "reaction", 3: "realtime"}
 ON_DEADLINE = {0: "report", 1: "fault"}

@@ -191,6 +191,30 @@ typedef struct rv9_filemgr {
 
     /* Called once when the device is attached, so the manager can mount. */
     rv9_io_err_t (*mount)(struct rv9_dev *dev);
+
+    /*
+     * Ownership a file manager enforces itself, declared in a manifest.
+     *
+     * The claim table decides who may open a device at all. Some managers
+     * have a finer rule of their own -- PFM's one writer and many readers
+     * per cell -- that the claim table cannot express, and a manifest can
+     * still declare it. All three are optional; a manager that leaves them
+     * NULL is one whose names cannot be declared, and admission says so.
+     */
+
+    /* Reserve `rest` for writing by `pid`, at fork. BUSY if another has it. */
+    rv9_io_err_t (*reserve_writer)(struct rv9_dev *dev, const char *rest,
+                                   rv9_pid_t pid);
+
+    /* Does `rest` exist -- is it something a reader could open now? */
+    bool (*provided)(struct rv9_dev *dev, const char *rest);
+
+    /*
+     * A process has ended. Called with fault 0 from the exit path, where it
+     * drops what the process reserved, and again with its RV9_FAULT_* once
+     * the process table has recorded one -- after its failsafes.
+     */
+    void (*ended)(struct rv9_dev *dev, rv9_pid_t pid, int fault);
 } rv9_filemgr_t;
 
 /* ------------------------------------------------------------------ */

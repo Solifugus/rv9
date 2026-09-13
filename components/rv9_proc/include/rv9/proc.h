@@ -187,6 +187,9 @@ typedef enum {
     RV9_PROC_ERR_KILLED,     /* stopped from outside                     */
     RV9_PROC_ERR_DEADLINE,   /* missed a deadline it declared fatal      */
     RV9_PROC_ERR_RUNAWAY,    /* a real-time loop stopped waiting         */
+
+    /* Admission, again: it watches a publication nothing here provides. */
+    RV9_PROC_ERR_NOPUB,
 } rv9_proc_err_t;
 
 const char *rv9_proc_strerror(rv9_proc_err_t err);
@@ -299,6 +302,20 @@ typedef int (*rv9_proc_claim_hook_t)(rv9_pid_t pid, const void *image,
                                      const char *name);
 
 void rv9_proc_set_claim_hook(rv9_proc_claim_hook_t hook);
+
+/*
+ * Told that a process has ended and why, once the table says so.
+ *
+ * After the exit hook -- after the failsafes -- on every path a process
+ * ends by: returning, being collected after a stack fault, ending inside
+ * rt_wait, or being stopped from outside. `fault` is RV9_FAULT_*.
+ *
+ * The exit hook cannot carry this: it runs before the reason is written,
+ * which is R9 §15.1's order and not an accident of plumbing.
+ */
+typedef void (*rv9_proc_ended_hook_t)(rv9_pid_t pid, int fault);
+
+void rv9_proc_set_ended_hook(rv9_proc_ended_hook_t hook);
 
 #ifdef __cplusplus
 }

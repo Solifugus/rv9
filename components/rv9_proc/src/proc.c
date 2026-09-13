@@ -25,6 +25,7 @@ _Static_assert((int)RV9_PROC_ERR_BUSY     == RV9_PE_BUSY,     "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_KILLED   == RV9_PE_KILLED,   "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_DEADLINE == RV9_PE_DEADLINE, "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_RUNAWAY  == RV9_PE_RUNAWAY,  "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_NOPUB    == RV9_PE_NOPUB,    "ABI drift");
 
 /* The kernel's fault codes travel straight into the process table. */
 _Static_assert(RV9_TASK_FAULT_STACK  == RV9_FAULT_STACK,  "ABI drift");
@@ -66,6 +67,12 @@ static bool        s_running;
 static rv9_proc_fork_hook_t  s_on_fork;
 static rv9_proc_exit_hook_t  s_on_exit;
 static rv9_proc_claim_hook_t s_on_claim;
+static rv9_proc_ended_hook_t s_on_ended;
+
+void rv9_proc_set_ended_hook(rv9_proc_ended_hook_t hook)
+{
+    s_on_ended = hook;
+}
 
 void rv9_proc_set_hooks(rv9_proc_fork_hook_t on_fork,
                         rv9_proc_exit_hook_t on_exit)
@@ -97,6 +104,7 @@ const char *rv9_proc_strerror(rv9_proc_err_t err)
     case RV9_PROC_ERR_KILLED:   return "killed";
     case RV9_PROC_ERR_DEADLINE: return "missed its deadline";
     case RV9_PROC_ERR_RUNAWAY:  return "stopped waiting for its releases";
+    case RV9_PROC_ERR_NOPUB:    return "it watches something nothing publishes";
     default:                    return "unknown error";
     }
 }
@@ -333,6 +341,9 @@ static void finish(rv9_proc_t *p, int rc, int fault,
                  (unsigned)p->pid, p->name, rc);
     }
 
+    /* Third in R9's order: published, now that the table says it. */
+    if (s_on_ended) s_on_ended(p->pid, fault);
+
     /* Release the module link and the private storage. The descriptor stays
        so that a parent can still wait on it and see the status. */
     rv9_mod_unlink(p->module);
@@ -553,6 +564,8 @@ static void collect_faulted(rv9_proc_t *p)
                  fault == RV9_FAULT_STACK ? "stack overflow" : "faulted");
     }
 
+    if (s_on_ended) s_on_ended(p->pid, p->fault);
+
     if (mod) rv9_mod_unlink(mod);
     rv9_free(st);
     rv9_task_reap(tk);      /* the slot may be reused now */
@@ -687,6 +700,8 @@ static bool rt_overrun(rv9_task_t task, int why)
                       "waiting: stopped from outside, not released again",
                  (unsigned)p->pid, p->name, RV9_RT_RUNAWAY_MS);
     }
+
+    if (s_on_ended) s_on_ended(p->pid, fault);
 
     rv9_task_delete(task);
     if (mod) rv9_mod_unlink(mod);

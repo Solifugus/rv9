@@ -19,6 +19,9 @@
 
 #include "esp_log.h"
 
+#include <stddef.h>
+#include <string.h>
+
 static const char *TAG = "fault-test";
 
 static int s_passed;
@@ -41,6 +44,17 @@ static int pin_read(void)
     rv9_io_err_t err = rv9_io_read(p, &v, sizeof(v), &done);
     rv9_io_close(p);
     return (err == RV9_IO_OK && done == sizeof(v)) ? (int)v : -1;
+}
+
+#define CELL "/pub0/LATELOOP"
+
+static bool cell_info(const char *name, rv9_pub_info_t *out)
+{
+    int p = rv9_io_open(name, RV9_MODE_READ);
+    if (p < 0) return false;
+    rv9_io_err_t err = rv9_io_getstat(p, RV9_PUB_GS_INFO, out);
+    rv9_io_close(p);
+    return err == RV9_IO_OK;
 }
 
 static bool pin_write(uint32_t v)
@@ -170,6 +184,10 @@ static void a_loop_killed_between_activations(void)
     rv9_task_delay_ms(300);
     check(rv9_rt_slots_used() == slots + 1, "the loop holds a release slot");
 
+    rv9_pub_info_t info;
+    check(cell_info(CELL, &info) && info.reserved_by == pid && info.held &&
+          info.seq > 0, "and publishes into the cell its manifest reserved");
+
     uint64_t t0 = rv9_time_ms();
     rv9_proc_err_t err = rv9_proc_kill(pid);
     uint32_t took = (uint32_t)(rv9_time_ms() - t0);
@@ -182,6 +200,10 @@ static void a_loop_killed_between_activations(void)
           status == -RV9_PROC_ERR_KILLED, "its status says killed");
     check(rv9_rt_slots_used() == slots, "and its release is gone");
     check(pin_read() == 0, "its failsafe was applied, as for any exit");
+
+    check(cell_info(CELL, &info) && info.fault == RV9_FAULT_KILLED &&
+          info.reserved_by == 0 && !info.held,
+          "its cell says it was killed, and is no longer reserved");
 }
 
 /* ------------------------------------------------------------------ */
@@ -195,6 +217,10 @@ static void a_loop_killed_between_activations(void)
 static void a_loop_that_misses_its_deadline(void)
 {
     check(pin_write(1) && pin_read() == 1, "the pin is 1 again");
+
+    /* The cell persists from the last loop; count from where it stands. */
+    rv9_pub_info_t info;
+    uint32_t seq0 = cell_info(CELL, &info) ? info.seq : 0;
 
     int slots = rv9_rt_slots_used();
     rv9_pid_t pid = 0;
@@ -215,6 +241,143 @@ static void a_loop_that_misses_its_deadline(void)
           "the process table says DEADLINE");
     check(pin_read() == 0, "its pin was parked at 0");
     check(rv9_rt_slots_used() == slots, "it will not be released again");
+
+    /*
+     * And the fault is published where the loop's values are. Periods 0 to
+     * 20 were published -- 20 being the late one -- and then the fault,
+     * which is a publication of its own that leaves the value alone.
+     */
+    struct { rv9_pub_t head; int32_t n; } m = { 0 };
+    int r = rv9_io_open(CELL, RV9_MODE_READ);
+    size_t done = 0;
+    bool got = (r >= 0) &&
+               rv9_io_read(r, &m, sizeof(m), &done) == RV9_IO_OK &&
+               rv9_io_getstat(r, RV9_PUB_GS_INFO, &info) == RV9_IO_OK;
+
+    check(got && info.fault == RV9_FAULT_DEADLINE, "its cell says DEADLINE");
+    check(got && m.n == 20, "and still holds the last value it published");
+    check(got && info.seq == seq0 + 22,
+          "21 publications and then the fault, which is one more");
+
+    /* A watcher that had seen the last value sees the fault as a change. */
+    rv9_pub_wait_t w = { .seq = seq0 + 21, .timeout_ms = 0 };
+    check(r >= 0 && rv9_io_getstat(r, RV9_PUB_GS_WAIT, &w) == RV9_IO_OK &&
+          w.seq == seq0 + 22,
+          "a watcher that saw the last value is told something changed");
+    if (r >= 0) rv9_io_close(r);
+
+    int again = rv9_io_open(CELL, RV9_MODE_WRITE);
+    check(again >= 0 && cell_info(CELL, &info) && info.fault == 0,
+          "and opening it to publish again clears the fault");
+    if (again >= 0) rv9_io_close(again);
+}
+
+/* ------------------------------------------------------------------ */
+
+/*
+ * A module that is nothing but a manifest and a return.
+ *
+ * Built here and added to the directory from memory, because what is being
+ * tested is admission: whether a declaration is accepted or refused before
+ * any code runs. Two of these would otherwise be modules in the store that
+ * exist only to be refused.
+ */
+static bool make_module(const char *name, uint16_t tag, const char *value)
+{
+    static uint8_t buf[160];
+    memset(buf, 0, sizeof(buf));
+
+    uint32_t len = RV9_MODULE_HDR_LEN;
+    size_t nl = strlen(name) + 1;
+    memcpy(buf + len, name, nl);
+    len += (uint32_t)nl;
+    len += (4 - (len % 4)) % 4;
+
+    uint32_t manifest_off = len;
+    rv9_mod_tlv_t e = { .tag = tag, .len = (uint16_t)strlen(value) };
+    memcpy(buf + len, &e, sizeof(e));
+    len += sizeof(e);
+    memcpy(buf + len, value, e.len);
+    len += e.len;
+    len += (4 - (len % 4)) % 4;
+    len += sizeof(rv9_mod_tlv_t);           /* RV9_MTAG_END, zeroed */
+
+    /* jalr zero, 0(ra): return. It is run, after all, once admitted. */
+    uint32_t entry_off = len;
+    static const uint8_t ret[4] = { 0x67, 0x80, 0x00, 0x00 };
+    memcpy(buf + len, ret, sizeof(ret));
+    len += sizeof(ret);
+
+    rv9_mod_header_t h;
+    memset(&h, 0, sizeof(h));
+    h.magic           = RV9_MODULE_MAGIC;
+    h.header_len      = RV9_MODULE_HDR_LEN;
+    h.abi_version     = 1;
+    h.module_len      = len;
+    h.name_offset     = RV9_MODULE_HDR_LEN;
+    h.entry_offset    = entry_off;
+    h.type            = RV9_MOD_PROGRAM;
+    h.revision        = 1;
+    h.manifest_offset = manifest_off;
+    memcpy(buf, &h, sizeof(h));
+
+    uint32_t crc = rv9_crc32(0, buf, len);
+    memcpy(buf + offsetof(rv9_mod_header_t, crc32), &crc, sizeof(crc));
+
+    return rv9_mod_register_image(buf, len) == RV9_MOD_OK;
+}
+
+static void declared_publications(void)
+{
+    ESP_LOGI(TAG, "--- publications declared in the manifest ---");
+
+    rv9_pid_t a = 0, b = 0;
+    check(rv9_proc_fork_rt("control", 0, NULL, &a) == RV9_PROC_OK,
+          "control is admitted, declaring /pub0/CONTROL");
+    rv9_task_delay_ms(100);
+
+    rv9_pub_info_t info;
+    check(cell_info("/pub0/CONTROL", &info) && info.reserved_by == a,
+          "the cell is reserved for it");
+
+    int w = rv9_io_open("/pub0/CONTROL", RV9_MODE_WRITE);
+    check(w == -RV9_IO_ERR_BUSY, "nothing else may publish into it");
+    if (w >= 0) rv9_io_close(w);
+
+    check(rv9_proc_fork_rt("control", 0, NULL, &b) == RV9_PROC_ERR_BUSY,
+          "a second copy declaring it too is refused at fork");
+
+    check(rv9_proc_kill(a) == RV9_PROC_OK, "stop control");
+    check(cell_info("/pub0/CONTROL", &info) &&
+          info.fault == RV9_FAULT_KILLED && info.reserved_by == 0,
+          "its cell says it was killed and is free");
+    check(rv9_io_remove("/pub0/CONTROL") == RV9_IO_OK,
+          "and can be cleared, leaving nothing called CONTROL at all");
+
+    /*
+     * Watching. With the cell gone, what admits a watcher of CONTROL is
+     * that a program on this machine declares it -- control's manifest, in
+     * the store and not running.
+     */
+    rv9_pid_t c = 0;
+    int status = 0;
+    check(make_module("st-watch-control", RV9_MTAG_WATCHES, "/pub0/CONTROL")
+          && rv9_proc_fork("st-watch-control", RV9_PRIO_NORMAL, NULL, &c)
+             == RV9_PROC_OK,
+          "a program watching CONTROL is admitted: control declares it");
+    if (c) rv9_proc_wait(c, &status, 1000);
+
+    check(make_module("st-watch-nobody", RV9_MTAG_WATCHES, "/pub0/STNOBODY")
+          && rv9_proc_fork("st-watch-nobody", RV9_PRIO_NORMAL, NULL, &c)
+             == RV9_PROC_ERR_NOPUB,
+          "one watching a cell nothing provides is refused at fork");
+
+    c = 0;
+    check(make_module("st-pub-nobody", RV9_MTAG_PUBLISHES, "/pub0/STNOBODY")
+          && rv9_proc_fork("st-watch-nobody", RV9_PRIO_NORMAL, NULL, &c)
+             == RV9_PROC_OK,
+          "and admitted once a program that publishes it is on the machine");
+    if (c) rv9_proc_wait(c, &status, 1000);
 }
 
 /* ------------------------------------------------------------------ */
@@ -292,6 +455,12 @@ bool rv9_fault_selftest(void)
     stopped_from_outside("runaway", "syscalls", -RV9_PROC_ERR_RUNAWAY,
                          RV9_FAULT_RUNAWAY,
                          "a loop that stops waiting, through system calls");
+
+    declared_publications();
+
+    /* Cells outlive their publishers by design, so a test leaves them
+       behind unless it clears them. */
+    rv9_io_remove(CELL);
 
     if (s_failed == 0) {
         ESP_LOGI(TAG, "fault: %d/%d passed", s_passed, s_passed);

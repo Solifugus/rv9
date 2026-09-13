@@ -23,6 +23,15 @@ typedef struct {
     char         path[48];
 } pubs_statics_t;
 
+static const char *fault_word(uint8_t f)
+{
+    if (f == RV9_FAULT_STACK)    return "STACK";
+    if (f == RV9_FAULT_KILLED)   return "killed";
+    if (f == RV9_FAULT_DEADLINE) return "DEADLINE";
+    if (f == RV9_FAULT_RUNAWAY)  return "RUNAWAY";
+    return "faulted";
+}
+
 static void build_path(char *out, uint32_t cap, const char *name)
 {
     const char *dev = DEV;
@@ -58,7 +67,8 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     }
 
     m_say(env, RV9_STDOUT,
-          "name                 seq   bytes   cap  age_ms  by   rdrs  torn\n");
+          "name                 seq   bytes   cap  age_ms  by   rdrs  torn  "
+          "note\n");
 
     uint64_t now = env->time_us();
 
@@ -85,7 +95,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
          * one" if both print the same number. R9 §18 calls this the
          * validity indication, and this is where it becomes visible.
          */
-        if (info.seq == 0) {
+        if (info.seq == 0 || info.stamp_us == 0) {
             m_pad(env, RV9_STDOUT, "-", 8);
         } else {
             m_numpad(env, RV9_STDOUT, (int32_t)m_age_ms(now, info.stamp_us), 8);
@@ -104,6 +114,15 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         m_numpad(env, RV9_STDOUT,
                  (int32_t)((info.readers > 0) ? info.readers - 1 : 0), 6);
         m_numpad(env, RV9_STDOUT, (int32_t)info.torn, 6);
+
+        /* Why its publisher stopped, which outranks who has reserved it:
+           a faulted cell is the first thing an operator needs to see. */
+        if (info.fault) {
+            m_say(env, RV9_STDOUT, fault_word(info.fault));
+        } else if (info.reserved_by) {
+            m_say(env, RV9_STDOUT, "declared by ");
+            m_num(env, RV9_STDOUT, (int32_t)info.reserved_by);
+        }
         m_say(env, RV9_STDOUT, "\n");
     }
 

@@ -25,6 +25,15 @@ typedef struct {
     uint8_t snap[sizeof(rv9_pub_t) + MAX_WORDS * sizeof(int32_t)];
 } watch_statics_t;
 
+static const char *fault_word(uint8_t f)
+{
+    if (f == RV9_FAULT_STACK)    return "STACK";
+    if (f == RV9_FAULT_KILLED)   return "killed";
+    if (f == RV9_FAULT_DEADLINE) return "DEADLINE";
+    if (f == RV9_FAULT_RUNAWAY)  return "RUNAWAY";
+    return "faulted";
+}
+
 static void show(const rv9_mod_env_t *env, const rv9_pub_t *head,
                  const int32_t *val, uint64_t now_us)
 {
@@ -92,6 +101,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     env->getstat(p, RV9_PUB_GS_WAIT, &w);
 
     uint32_t seen = 0;
+    bool faulted = false;
     for (;;) {
         if (env->signals_take() & RV9_SIG_STOP) break;
 
@@ -99,6 +109,23 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         int r = env->getstat(p, RV9_PUB_GS_WAIT, &w);
         if (r == -RV9_IOE_TIMEOUT) continue;    /* nothing new; look again */
         if (r < 0) break;
+
+        /*
+         * A change that is not a new value: the publisher stopped, and the
+         * cell says why. Said once, then keep watching -- a component that
+         * is restarted publishes again, and that is worth seeing too.
+         */
+        rv9_pub_info_t info;
+        if (env->getstat(p, RV9_PUB_GS_INFO, &info) == 0) {
+            if (info.fault && !faulted) {
+                m_say(env, RV9_STDOUT, "  publisher stopped: ");
+                m_say(env, RV9_STDOUT, fault_word(info.fault));
+                m_say(env, RV9_STDOUT, " (the value above was its last)\n");
+                faulted = true;
+                continue;
+            }
+            if (!info.fault) faulted = false;
+        }
 
         int got = env->read(p, st->snap, sizeof(st->snap));
         if (got == -RV9_IOE_WOULDBLOCK) {

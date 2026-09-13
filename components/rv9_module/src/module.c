@@ -154,6 +154,72 @@ bool rv9_mod_manifest_u8(const void *image, uint16_t tag, uint8_t *out)
     return true;
 }
 
+/* A manifest longer than this is not one anybody wrote by hand, and one a
+   compiler wrote that long is not being scanned from flash on every fork. */
+#define MANIFEST_SCAN_MAX 1024
+
+bool rv9_mod_any_declares(uint16_t tag, const char *value)
+{
+    if (value == NULL) return false;
+    size_t want = strlen(value);
+    bool found = false;
+
+    /* Held throughout, so no image is freed from under the walk. The flash
+       reads keep a concurrent link waiting a few milliseconds; admission
+       is not a hot path and a link is not a deadline. */
+    rv9_lock_acquire(s_lock);
+
+    for (rv9_mod_entry_t *e = s_dir; e != NULL && !found; e = e->next) {
+        if (e->type != RV9_MOD_PROGRAM) continue;
+
+        const void *image = e->image;
+        uint8_t *buf = NULL;
+
+        if (image == NULL) {
+            if (s_store == NULL) continue;
+
+            rv9_mod_header_t h;
+            if (esp_partition_read(s_store, e->store_offset, &h,
+                                   sizeof(h)) != ESP_OK) {
+                continue;
+            }
+            if (h.manifest_offset == 0 || h.manifest_offset >= h.module_len) {
+                continue;
+            }
+
+            uint32_t n = h.module_len;
+            if (n > h.manifest_offset + MANIFEST_SCAN_MAX) {
+                n = h.manifest_offset + MANIFEST_SCAN_MAX;
+            }
+            buf = rv9_alloc(n);
+            if (buf == NULL) continue;
+            if (esp_partition_read(s_store, e->store_offset, buf, n) != ESP_OK) {
+                rv9_free(buf);
+                continue;
+            }
+
+            /* The walk is bounded by the header's length, so the header in
+               the copy says how much was copied. Nothing runs past it. */
+            ((rv9_mod_header_t *)buf)->module_len = n;
+            image = buf;
+        }
+
+        const void *v = NULL;
+        uint16_t len = 0;
+        while ((v = rv9_mod_manifest_find(image, tag, v, &len)) != NULL) {
+            if (len == want && memcmp(v, value, want) == 0) {
+                found = true;
+                break;
+            }
+        }
+
+        if (buf) rv9_free(buf);
+    }
+
+    rv9_lock_release(s_lock);
+    return found;
+}
+
 /*
  * Is there anything in here we have agreed to without understanding?
  *

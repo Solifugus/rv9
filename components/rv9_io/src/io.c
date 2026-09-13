@@ -894,6 +894,32 @@ static void apply_failsafes(const rv9_claim_fs_t *fs, int n)
     }
 }
 
+/*
+ * Tell every file manager that cares that a process has ended.
+ *
+ * Devices are only ever added, at the head, so the list can be walked
+ * without the I/O lock once its head is read -- and must be, because a
+ * manager being told takes locks of its own.
+ */
+static void notify_ended(rv9_pid_t pid, int fault)
+{
+    rv9_lock_acquire(s_lock);
+    rv9_dev_t *list = s_devs;
+    rv9_lock_release(s_lock);
+
+    for (rv9_dev_t *d = list; d != NULL; d = d->next) {
+        if (d->fmgr != NULL && d->fmgr->ended != NULL) {
+            d->fmgr->ended(d, pid, fault);
+        }
+    }
+}
+
+/* From the process manager, once the table says how a process ended. */
+static void io_on_ended(rv9_pid_t pid, int fault)
+{
+    if (fault != RV9_FAULT_NONE) notify_ended(pid, fault);
+}
+
 static void io_on_exit(rv9_pid_t pid)
 {
     /* Devices this process was the last user of. Told after the lock goes,
@@ -958,6 +984,11 @@ static void io_on_exit(rv9_pid_t pid)
      * that almost never runs.
      */
     if (nfs > 0) apply_failsafes(fs, nfs);
+
+    /* And what it reserved inside file managers -- a declared publication.
+       On every path out, including a fork refused halfway through
+       admission, which is also how a partial reservation is undone. */
+    notify_ended(pid, RV9_FAULT_NONE);
 }
 
 /*
@@ -1106,6 +1137,95 @@ static int io_claim_for_fork(rv9_pid_t pid, const void *image,
         }
     }
 
+    /*
+     * Publications it says it makes, and those it says it reads.
+     *
+     * After the devices, so that a publication on a device the machine
+     * lacks is refused as the device it is; before the failsafes, which
+     * are about actuators and have nothing to do with these.
+     */
+    const void *v = NULL;
+    uint16_t len = 0;
+
+    while ((v = rv9_mod_manifest_find(image, RV9_MTAG_PUBLISHES, v, &len))
+           != NULL) {
+        char res[RV9_CLAIM_NAME_MAX];
+        size_t n = (len < sizeof(res) - 1) ? len : sizeof(res) - 1;
+        memcpy(res, v, n);
+        res[n] = '\0';
+        if (n == 0) continue;
+
+        char devname[16];
+        const char *rest = "";
+        split_path(res, devname, sizeof(devname), &rest);
+
+        rv9_lock_acquire(s_lock);
+        rv9_dev_t *dev = find_dev(devname);
+        rv9_lock_release(s_lock);
+
+        if (dev == NULL) {
+            ESP_LOGE(TAG, "admit '%s': it publishes %s, on a device this "
+                          "machine does not have", progname, res);
+            return RV9_PROC_ERR_NODEV;
+        }
+        if (dev->fmgr->reserve_writer == NULL) {
+            ESP_LOGE(TAG, "admit '%s': %s is not something that can be "
+                          "published", progname, res);
+            return RV9_PROC_ERR_CONTRACT;
+        }
+
+        rv9_io_err_t err = dev->fmgr->reserve_writer(dev, rest, pid);
+        if (err == RV9_IO_ERR_BUSY)  return RV9_PROC_ERR_BUSY;
+        if (err == RV9_IO_ERR_NOMEM) return RV9_PROC_ERR_NOMEM;
+        if (err != RV9_IO_OK) {
+            ESP_LOGE(TAG, "admit '%s': cannot publish %s: %s", progname, res,
+                     rv9_io_strerror(err));
+            return RV9_PROC_ERR_CONTRACT;
+        }
+    }
+
+    v = NULL;
+    while ((v = rv9_mod_manifest_find(image, RV9_MTAG_WATCHES, v, &len))
+           != NULL) {
+        char res[RV9_CLAIM_NAME_MAX];
+        size_t n = (len < sizeof(res) - 1) ? len : sizeof(res) - 1;
+        memcpy(res, v, n);
+        res[n] = '\0';
+        if (n == 0) continue;
+
+        char devname[16];
+        const char *rest = "";
+        split_path(res, devname, sizeof(devname), &rest);
+
+        rv9_lock_acquire(s_lock);
+        rv9_dev_t *dev = find_dev(devname);
+        rv9_lock_release(s_lock);
+
+        if (dev == NULL) {
+            ESP_LOGE(TAG, "admit '%s': it watches %s, on a device this "
+                          "machine does not have", progname, res);
+            return RV9_PROC_ERR_NODEV;
+        }
+        if (dev->fmgr->provided == NULL) {
+            ESP_LOGE(TAG, "admit '%s': %s is not something that can be "
+                          "watched", progname, res);
+            return RV9_PROC_ERR_CONTRACT;
+        }
+
+        /*
+         * Provided now, or provided by something that could be started.
+         * The second is the check that matters: a supervisor started before
+         * its control loop is ordinary, and one naming a control loop that
+         * does not exist on this machine will wait forever.
+         */
+        if (dev->fmgr->provided(dev, rest)) continue;
+        if (rv9_mod_any_declares(RV9_MTAG_PUBLISHES, res)) continue;
+
+        ESP_LOGE(TAG, "admit '%s': it watches %s, and nothing on this "
+                      "machine publishes it", progname, res);
+        return RV9_PROC_ERR_NOPUB;
+    }
+
     return claim_failsafes(pid, image, progname);
 }
 
@@ -1206,6 +1326,7 @@ rv9_io_err_t rv9_io_init(void)
 
     rv9_proc_set_hooks(io_on_fork, io_on_exit);
     rv9_proc_set_claim_hook(io_claim_for_fork);
+    rv9_proc_set_ended_hook(io_on_ended);
     rv9_mod_set_io_ops(&s_mod_io_ops);
     ESP_LOGI(TAG, "I/O manager up");
     return RV9_IO_OK;

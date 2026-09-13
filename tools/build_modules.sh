@@ -103,6 +103,8 @@ for dir in "$ROOT"/modules/*/; do
     devices=""          # space separated, shared access
     exclusives=""       # space separated, wanted alone
     capabilities=""     # space separated
+    publishes=""        # space separated cells it writes, e.g. "/pub0/CONTROL"
+    watches=""          # space separated cells it reads
     mandatory=""        # space separated key names, e.g. "heap_max class"
 
     [[ -f "$dir/build.conf" ]] && source "$dir/build.conf"
@@ -156,6 +158,8 @@ for dir in "$ROOT"/modules/*/; do
     for d in $exclusives;   do add_tag exclusive  "$d"; done
     for f in $failsafes;    do add_tag failsafe   "$f"; done
     for c in $capabilities; do add_tag capability "$c"; done
+    for c in $publishes;    do add_tag publishes  "$c"; done
+    for c in $watches;      do add_tag watches    "$c"; done
 
     python3 "$ROOT/tools/mkmodule.py" \
         --name "$name" \

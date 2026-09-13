@@ -98,6 +98,18 @@ typedef struct {
     uint32_t readers;
     uint32_t torn;                     /* snapshots abandoned, since boot */
 
+    /*
+     * Who the cell belongs to, beyond whoever has it open.
+     *
+     * reserved_by is a manifest's claim, for the life of that process.
+     * last_writer is the process that most recently reserved or opened it
+     * to write, and it is kept after they are gone, because that is the
+     * question asked when a process has faulted: which cells were its.
+     */
+    uint32_t reserved_by;
+    uint32_t last_writer;
+    uint32_t fault;                    /* RV9_FAULT_* of last_writer, or 0 */
+
     uint32_t seq;                      /* odd while writing; 0 = never */
     uint32_t len;
     uint64_t stamp_us;
@@ -314,6 +326,20 @@ static rv9_io_err_t pfm_open(rv9_path_t *path, const char *rest)
      * lives here, where the discipline is.
      */
     if (path->mode & RV9_MODE_WRITE) {
+        rv9_pid_t me = rv9_proc_current_pid();
+
+        /* Declared by somebody else's manifest: theirs for as long as they
+           run, whether or not they have opened it yet. */
+        if (c->reserved_by != 0 && c->reserved_by != me) {
+            uint32_t owner = c->reserved_by;
+            rv9_lock_release(d->lock);
+            rv9_free(st);
+            ESP_LOGW(TAG, "%s/%s is declared by pid %lu; pid %u may not "
+                          "publish it", dev->name, rest,
+                     (unsigned long)owner, (unsigned)me);
+            return RV9_IO_ERR_BUSY;
+        }
+
         if (c->held) {
             rv9_lock_release(d->lock);
             rv9_free(st);
@@ -323,9 +349,13 @@ static rv9_io_err_t pfm_open(rv9_path_t *path, const char *rest)
                      (unsigned)rv9_proc_current_pid());
             return RV9_IO_ERR_BUSY;
         }
-        c->held   = 1;
-        c->writer = rv9_proc_current_pid();
-        st->is_writer = true;
+        c->held        = 1;
+        c->writer      = me;
+        c->last_writer = me;
+        /* Somebody publishing into it again is the component back in
+           service, which is what clears a fault. */
+        c->fault       = 0;
+        st->is_writer  = true;
     }
     if (path->mode & RV9_MODE_READ) c->readers++;
 
@@ -648,6 +678,8 @@ static rv9_io_err_t pfm_getstat(rv9_path_t *path, uint32_t code, void *arg)
         out->writer  = (uint16_t)c->writer;
         out->readers = (uint16_t)c->readers;
         out->torn    = c->torn;
+        out->fault       = (uint8_t)c->fault;
+        out->reserved_by = (uint16_t)c->reserved_by;
         rv9_lock_release(d->lock);
 
         /* Outside the lock, and read the way an observer reads it: the
@@ -692,7 +724,7 @@ static rv9_io_err_t pfm_remove(rv9_dev_t *dev, const char *name)
 
     if (c == NULL) {
         err = RV9_IO_ERR_NOTFOUND;
-    } else if (c->held || c->readers) {
+    } else if (c->held || c->readers || c->reserved_by) {
         err = RV9_IO_ERR_BUSY;
     } else {
         memset(c, 0, d->stride);
@@ -715,7 +747,131 @@ static rv9_io_err_t pfm_seek(rv9_path_t *path, int64_t offset, int whence)
     return RV9_IO_OK;
 }
 
+/* ---- declared in a manifest ---- */
+
+/*
+ * Reserve a cell for a program that has not started yet.
+ *
+ * The cell is made now if it does not exist, so that a watcher admitted
+ * after this can open it -- and read "never published", which is the true
+ * state of a component that is admitted and initialising.
+ */
+static rv9_io_err_t pfm_reserve_writer(rv9_dev_t *dev, const char *rest,
+                                       rv9_pid_t pid)
+{
+    pub_dev_t *d = (pub_dev_t *)dev->fmgr_state;
+    if (d == NULL) return RV9_IO_ERR_IO;
+    if (!name_ok(rest)) return RV9_IO_ERR_INVAL;
+
+    rv9_lock_acquire(d->lock);
+
+    pub_cell_t *c = find_cell(d, rest);
+    if (c == NULL) c = make_cell(d, rest);
+    if (c == NULL) {
+        rv9_lock_release(d->lock);
+        ESP_LOGE(TAG, "%s: all %lu cells are taken; %s cannot be reserved",
+                 dev->name, (unsigned long)d->count, rest);
+        return RV9_IO_ERR_NOMEM;
+    }
+
+    uint32_t other = 0;
+    if (c->reserved_by != 0 && c->reserved_by != pid) {
+        other = c->reserved_by;
+    } else if (c->held && c->writer != pid) {
+        other = c->writer;
+    }
+    if (other == 0 && c->held && c->writer == 0) other = UINT32_MAX;
+
+    if (other != 0) {
+        rv9_lock_release(d->lock);
+        if (other == UINT32_MAX) {
+            ESP_LOGE(TAG, "%s/%s is being published by the system; pid %u "
+                          "cannot declare it", dev->name, rest, (unsigned)pid);
+        } else {
+            ESP_LOGE(TAG, "%s/%s belongs to pid %lu; pid %u cannot declare "
+                          "it too", dev->name, rest, (unsigned long)other,
+                     (unsigned)pid);
+        }
+        return RV9_IO_ERR_BUSY;
+    }
+
+    c->reserved_by = pid;
+    c->last_writer = pid;
+    rv9_lock_release(d->lock);
+    return RV9_IO_OK;
+}
+
+static bool pfm_provided(rv9_dev_t *dev, const char *rest)
+{
+    pub_dev_t *d = (pub_dev_t *)dev->fmgr_state;
+    if (d == NULL || !name_ok(rest)) return false;
+
+    rv9_lock_acquire(d->lock);
+    bool yes = (find_cell(d, rest) != NULL);
+    rv9_lock_release(d->lock);
+    return yes;
+}
+
+/* If/else rather than a table: this file is linked into the firmware, but
+   the habit is cheap and the strings are few. */
+static const char *fault_word(uint32_t f)
+{
+    if (f == RV9_FAULT_STACK)    return "STACK";
+    if (f == RV9_FAULT_KILLED)   return "killed";
+    if (f == RV9_FAULT_DEADLINE) return "DEADLINE";
+    if (f == RV9_FAULT_RUNAWAY)  return "RUNAWAY";
+    return "faulted";
+}
+
+/*
+ * A process has ended.
+ *
+ * Its reservations go, always. And if it ended with a fault, every cell it
+ * was the writer of says so -- published, as R9 §15.1 has it: the sequence
+ * moves on and watchers wake, while the value and its stamp are left
+ * exactly as the component last published them. The last thing a failed
+ * control loop measured is the most useful thing it left behind, and a
+ * fault that erased it would destroy the evidence.
+ *
+ * Skipped for a cell somebody else has since opened to write: that is the
+ * component, or its replacement, already back in service.
+ */
+static void pfm_ended(rv9_dev_t *dev, rv9_pid_t pid, int fault)
+{
+    pub_dev_t *d = (pub_dev_t *)dev->fmgr_state;
+    if (d == NULL || pid == RV9_PID_NONE) return;
+
+    rv9_lock_acquire(d->lock);
+
+    for (uint32_t i = 0; i < d->count; i++) {
+        pub_cell_t *c = cell_at(d, i);
+        if (c->name[0] == '\0') continue;
+
+        if (c->reserved_by == pid) c->reserved_by = 0;
+
+        if (fault == RV9_FAULT_NONE || c->last_writer != pid) continue;
+        if (c->held || c->fault != 0) continue;
+
+        c->fault = (uint32_t)fault;
+
+        /* No writer holds it, so the sequence is even and nobody else is
+           moving it. Two, as every publication is. */
+        uint32_t seq = __atomic_load_n(&c->seq, __ATOMIC_ACQUIRE);
+        __atomic_store_n(&c->seq, seq + 2, __ATOMIC_RELEASE);
+        wake_watchers(d, c);
+
+        ESP_LOGW(TAG, "%s/%s: its publisher, pid %u, stopped (%s); the cell "
+                      "says so and keeps its last value", dev->name, c->name,
+                 (unsigned)pid, fault_word((uint32_t)fault));
+    }
+
+    rv9_lock_release(d->lock);
+}
+
 static const rv9_filemgr_t pfm = {
+    .reserve_writer = pfm_reserve_writer,
+    .provided       = pfm_provided,
+    .ended          = pfm_ended,
     .name    = "pfm",
     .mount   = pfm_mount,
     .open    = pfm_open,

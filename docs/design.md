@@ -3560,6 +3560,152 @@ RISC-V port saves context would need it checked again.
 **The watchdog costs a 500 Hz interrupt** from the first real-time
 declaration onward, whether or not anything is running.
 
+## 31. A publication with a contract
+
+§28 built publications and left two things open. Cells were named by
+convention — two components agreed on `CONTROL` by both spelling it that
+way, with nothing checking and nothing stopping a third program writing
+into it. And when a component stopped badly, §29 and §30 recorded the
+reason in the process table, which is not where anything watching the
+component is looking.
+
+Both are the same missing idea: a publication is a contract between two
+programs, and neither end had a way to state it.
+
+### Declared, not conventional
+
+Two manifest tags, both full paths like every other resource:
+
+```
+publishes="/pub0/CONTROL"      # control's build.conf
+watches="/pub0/CONTROL"        # a supervisor's
+```
+
+`publishes` reserves the cell at fork, making it if it does not exist. The
+reservation belongs to that process for its lifetime, and while it stands:
+a second program declaring the same cell is refused at fork
+(`RV9_PROC_ERR_BUSY`), and any other process opening it to write is refused
+at open. RV-9 already had one-writer-at-a-time; what it did not have was
+*which* writer, decided before anybody runs.
+
+`watches` is refused at fork when nothing on this machine provides the
+cell: `RV9_PE_NOPUB`. "Provides" means either the cell exists now, or some
+module in the directory declares that it publishes it — which is the
+decidable form of "will never publish". A publisher that has not started
+yet is not a refusal: start order is not a contract, and a supervisor
+started before its control loop is ordinary.
+
+That check reads manifests out of the store for modules that are not in
+memory, at most a kilobyte each, with the walk bounded by patching the
+copied header's length to however much was actually read. It costs tens of
+milliseconds across a full store, which is why only admission does it, and
+only for a program that declares a dependency on another program.
+
+### The fault, published where the values are
+
+R9 §15.1's second step is that a faulted component *publishes* that it has
+faulted. The process table is published state, but `watch MOTOR_CONTROL`
+does not read the process table — it reads the cell. So the cell now
+carries the reason:
+
+- `rv9_pub_info_t.fault` is `RV9_FAULT_*`, in bytes that used to be
+  `reserved`, so the record kept its size;
+- the fault is itself a publication: the sequence advances by one, so a
+  watcher blocked in `RV9_PUB_GS_WAIT` wakes, and one that had seen the
+  last value is told something changed;
+- **the value and its stamp are left exactly as the component published
+  them.** The last thing a failed control loop measured is the most useful
+  thing it leaves behind, and a fault that erased it would destroy the
+  evidence;
+- opening the cell to write again clears it. That is the component, or its
+  replacement, back in service.
+
+The ordering R9 requires is why this needed a second hook rather than the
+existing exit hook: the exit hook runs *before* the process table knows the
+reason — it is what applies the failsafes. So the process manager now tells
+the I/O manager once more, after the table is written, on every path a
+process ends by. Failsafe, then table, then cell.
+
+### What a cell says now
+
+```
+rv9> rt lateloop ontime &
+rt: started lateloop as pid 58
+rv9> watch LATELOOP 300 &
+seq    age_ms values...
+270    0      269
+271    0      270
+rv9> kill -f 58
+W rv9-io: failsafe: /gpio/2 left at 0
+W rv9-proc: pid 58 ('lateloop') killed between activations
+W rv9-pfm: /pub0/LATELOOP: its publisher, pid 58, stopped (killed); the cell
+           says so and keeps its last value
+  publisher stopped: killed (the value above was its last)
+rv9> pubs
+name                 seq   bytes   cap  age_ms  by   rdrs  torn  note
+LATELOOP             272   4       64   3002    -    1     0     killed
+```
+
+The three log lines are in R9's order, and the watcher learned from the
+cell rather than from the log. `pubs` gains a note: the fault if there is
+one, otherwise who declared the cell.
+
+### Tested
+
+`fault-test` is 66 checks. The new ones, on real modules:
+
+- `lateloop`'s cell is reserved for it at fork and published into;
+- killed, its cell says `killed` and is no longer reserved;
+- late, its cell says `DEADLINE`, still holds the last period number it
+  published, and its sequence is exactly one past that value — 21
+  publications, then the fault;
+- a watcher that had seen the last value is told something changed;
+- opening the cell to write again clears the fault;
+- `control` reserves `/pub0/CONTROL`; nothing else may write it; a second
+  `control` is refused at fork;
+- with the cell removed entirely, a program watching `/pub0/CONTROL` is
+  still admitted, because control's manifest declares it — the store scan;
+- one watching a cell nothing provides is refused, and admitted once a
+  module that publishes it is on the machine.
+
+The last three fork modules built in memory by the test: what is under test
+is admission, and the alternative is modules in the store that exist only
+to be refused.
+
+### What the tests exposed, which is not about publication
+
+Driving this from a shell over SSH, `procs` failed to start with "no
+memory", and `sshd` exited. Measured afterwards: ten forks cost about 2.5
+KB that never comes back, some 250 bytes each, which is the process
+descriptor RV-9 keeps for every process that has ever exited. It is kept so
+that a parent can still ask how its child ended, and nothing ever decides
+that nobody will ask again.
+
+So the process table grows for as long as the machine runs. On a machine
+meant to run for months that is the wrong shape, and it is not a leak in
+the ordinary sense — it is a lifetime nobody has defined. Deciding when a
+process may be forgotten is the next thing worth doing here.
+
+### What this does not do
+
+**A cell's size is not declared.** Capacity is a property of the device (64
+bytes on `/pub0`), so a component publishing a larger set fails at write
+rather than at admission.
+
+**`watches` reserves nothing.** There are four waiter slots on the device,
+handed out when an observer first blocks; a fifth watcher is refused then
+rather than at fork.
+
+**"Provides" is a question about the machine, not about the running
+system.** A cell declared by a module nobody ever starts admits its
+watchers, which then wait forever — correctly, because that is what a
+supervisor does while its component is down.
+
+**The fault's publication moves the sequence without changing the value.**
+A reader that only compares sequences sees "something changed" and reads
+the same numbers. That is deliberate: the change is the component's state,
+not its value, and `RV9_PUB_GS_INFO` says which.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

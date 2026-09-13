@@ -30,7 +30,7 @@ TAGS = {
     "deadline_us": 0x0007, "min_inter_us": 0x0008, "wcet_us": 0x0009,
     "device": 0x000A, "exclusive": 0x000B, "failsafe": 0x000C,
     "capability": 0x000D, "compiler": 0x000E, "runtime": 0x000F,
-    "on_deadline": 0x0010,
+    "on_deadline": 0x0010, "publishes": 0x0011, "watches": 0x0012,
 }
 
 CLASSES = {"unspecified": 0, "proaction": 1, "reaction": 2, "realtime": 3}
@@ -45,7 +45,7 @@ U32_TAGS = {"stack", "static", "heap_max", "period_us", "deadline_us",
             "min_inter_us", "wcet_us"}
 U8_TAGS = {"class", "on_deadline"}
 STR_TAGS = {"desc", "device", "exclusive", "capability",
-            "compiler", "runtime"}
+            "compiler", "runtime", "publishes", "watches"}
 
 # A failsafe is a constant and a device, written PATH=VALUE. It encodes as
 # the u32 value followed by the path, because that is the only shape RV-9
@@ -53,7 +53,8 @@ STR_TAGS = {"desc", "device", "exclusive", "capability",
 # nothing to call and nothing to read.
 FS_TAGS = {"failsafe"}
 
-REPEATABLE = {"device", "exclusive", "capability", "failsafe"}
+REPEATABLE = {"device", "exclusive", "capability", "failsafe",
+              "publishes", "watches"}
 
 
 def encode_manifest(entries):
