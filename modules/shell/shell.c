@@ -99,7 +99,7 @@ static void help(const rv9_mod_env_t *env)
           "  <module> [arg] [> dev]  fork it, optionally redirected\n"
           "  <module> &        run it without waiting; see it in 'procs'\n"
           "\n"
-          "try: mdir, procs, owns, free, dir, filetest, netstat\n"
+          "try: mdir, procs, owns, pubs, free, dir, filetest, netstat\n"
           "     dir /r0        echo > /term\n"
           "     fetch host /path > /r0/file\n"
           "     load /r0/file.mod     then run it by name\n");

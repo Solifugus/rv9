@@ -504,6 +504,99 @@ typedef struct {
 #define RV9_PIO_GS_EVENT      21   /* event id, or 0 if not armed */
 
 /* ------------------------------------------------------------------ */
+/* Publication cells                                                   */
+/*                                                                     */
+/* One process computes a value; another has to see it. RV-9 had no    */
+/* answer to that at all -- paths and signals, and neither carries an   */
+/* observation -- which is the gap under R9's reactive layer: `watch`,  */
+/* `state` and `transition` all read values a real-time component in    */
+/* another process produced.                                           */
+/*                                                                     */
+/* The answer is a device. A publication is a named, fixed-size cell    */
+/* on a device that serves them, and publishing is one write of one     */
+/* struct to one path -- atomic because it is one call and one copy.    */
+/* Naming, ownership, lifetime and the RT-safe transfer path all come   */
+/* from the I/O system rather than being invented alongside it.         */
+/*                                                                     */
+/*     /pub0/MOTOR_CONTROL      the cell                               */
+/*                                                                     */
+/* See components/rv9_io/src/pfm.c for how it is done, and             */
+/* docs/design.md for why it is a device rather than shared memory.     */
+/* ------------------------------------------------------------------ */
+
+#define RV9_PUB_MAX_NAME 24
+
+/*
+ * The head of every publication, read and written.
+ *
+ * A read fills this and as much of the value as the caller's buffer will
+ * hold; a write supplies it and the value together. The same object goes
+ * both ways deliberately -- what comes out of one cell can be written into
+ * another unchanged, which is what a bridge or a recorder needs.
+ *
+ * seq is R9 §18's validity indication and its publication sequence in one
+ * number: zero means never published, and it counts up by one per
+ * publication thereafter. A watcher remembers the last it saw.
+ *
+ * stamp_us is when the *observation* was made, not when it was published.
+ * Those differ by however long the computing took, and a reactive layer
+ * deciding how stale a reading is needs the first. A publisher that passes
+ * zero is saying "now", and gets the time of the write.
+ *
+ * On a write, seq is ignored: the cell owns it. len is the bytes of value
+ * following this struct.
+ */
+typedef struct __attribute__((packed)) {
+    uint32_t seq;
+    uint32_t len;
+    uint64_t stamp_us;
+} rv9_pub_t;
+
+_Static_assert(sizeof(rv9_pub_t) == 16, "publication head must be 16 bytes");
+
+/*
+ * Wait until a cell changes. getstat, arg is an rv9_pub_wait_t.
+ *
+ * R9 §21 asks that a watcher re-evaluate when a value changes rather than
+ * polling, so this blocks: pass the sequence last seen, and it returns
+ * when the cell has moved past it, with the current sequence in its place.
+ * A publication that arrives while nobody is waiting is not lost -- the
+ * comparison is against the sequence, not against an edge -- and several
+ * that arrive together coalesce into one wakeup, which is what §21 wants.
+ *
+ * timeout_ms bounds the wait. RV9_WAIT_FOREVER blocks indefinitely; zero
+ * makes it a poll that never blocks, which is what a real-time observer
+ * should use.
+ */
+#define RV9_PUB_GS_WAIT  48
+#define RV9_PUB_GS_INFO  49   /* rv9_pub_info_t: what this cell is */
+
+typedef struct __attribute__((packed)) {
+    uint32_t seq;          /* in: last seen. out: current */
+    uint32_t timeout_ms;
+} rv9_pub_wait_t;
+
+typedef struct __attribute__((packed)) {
+    char     name[RV9_PUB_MAX_NAME];
+    uint32_t seq;
+    uint32_t len;          /* bytes in the last publication */
+    uint32_t cap;          /* bytes this cell can hold */
+    uint64_t stamp_us;
+
+    /*
+     * `held` and `writer` are two questions, not one. A cell opened for
+     * writing by the system rather than by a process has no pid, and
+     * reporting that as writer == 0 would make "nobody is publishing this"
+     * and "RV-9 itself is" the same answer.
+     */
+    uint16_t writer;       /* the publisher's pid; 0 when it is the system */
+    uint16_t readers;
+    uint8_t  held;         /* somebody has it open for writing */
+    uint8_t  reserved[3];
+    uint32_t torn;         /* reads abandoned mid-publication since boot */
+} rv9_pub_info_t;
+
+/* ------------------------------------------------------------------ */
 /* Console settings                                                    */
 /*                                                                     */
 /* Addressing the cursor, colour and attributes -- for every character */

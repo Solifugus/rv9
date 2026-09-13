@@ -148,6 +148,23 @@ typedef struct rv9_driver {
                                uint32_t value);
     rv9_io_err_t (*unit_stat)(struct rv9_dev *dev, void *unit_state,
                               bool set, uint32_t code, uint32_t *value);
+
+    /*
+     * Where this device's memory is. A fourth shape, and the smallest.
+     *
+     * The publication file manager needs somewhere to keep cells that
+     * outlives every process touching them, and nothing else: no
+     * registers, no interrupts, no transfer. So its driver has one job --
+     * say where the store is and how big -- and the whole discipline of
+     * naming, sequencing and coherence stays above it, in the file
+     * manager, where discipline belongs.
+     *
+     * It is a driver entry point rather than a malloc in the file manager
+     * because the store is the part that will vary: a cell in a PMP region
+     * shared with an isolated process, or one in memory that survives a
+     * restart, is a different driver answering the same call.
+     */
+    rv9_io_err_t (*arena)(struct rv9_dev *dev, void **base, uint32_t *size);
 } rv9_driver_t;
 
 /* ------------------------------------------------------------------ */
@@ -168,7 +185,8 @@ typedef struct rv9_filemgr {
     rv9_io_err_t (*getstat)(struct rv9_path *path, uint32_t code, void *arg);
     rv9_io_err_t (*setstat)(struct rv9_path *path, uint32_t code, void *arg);
 
-    /* Remove a file. Block file managers only. */
+    /* Remove a named thing: a file on a volume, a cell on a publication
+       device. Managers whose names are not removable leave it NULL. */
     rv9_io_err_t (*remove)(struct rv9_dev *dev, const char *name);
 
     /* Called once when the device is attached, so the manager can mount. */

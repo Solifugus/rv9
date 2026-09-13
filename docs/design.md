@@ -2891,6 +2891,214 @@ detects overruns and counts them; it does not yet stop a component for
 them. That is the next piece of §15.3, and it needs the component to be
 stoppable from outside, which is `RV9_SIG_STOP` with nothing to send it.
 
+## 28. A published value
+
+One process computes something; another has to see it. RV-9 had no answer
+to that at all — paths, signals and events, and none of them carries an
+observation.
+
+That is the gap under the whole of R9's reactive layer. §16.1 maps a
+real-time component onto one RV-9 process and the reactive supervisor onto
+*another*, so `MOTOR_CONTROL.speed` in a `watch` block crosses a process
+boundary. `watch`, `state` and `transition` all read values produced
+somewhere else. Without this they have nothing to observe.
+
+R9 §18 states the contract:
+
+> The R9 runtime representation of an exposed set should be fixed-size and
+> preallocated. Each atomic publication should carry at least: a validity
+> indication for first publication; a monotonically increasing publication
+> sequence; a timestamp associated with the physical observation; the
+> coherent set of exposed values. […] It must work with RV-9 process
+> isolation and must not require allocation or blocking locks on a
+> real-time path.
+
+### A publication is a device
+
+The obvious answer is shared memory, and it dies at phase 7: PMP isolation
+exists precisely to stop one process handing another a pointer. The second
+answer is a message queue, and it has the wrong semantics — `watch` wants
+*the current value*, not every value, and a queue must either grow without
+bound or throw things away. Both are wrong answers to "what is the speed
+now".
+
+So a publication is a cell on a device:
+
+```
+/pub0/CONTROL      pfm over pubmem, 16 cells of 64 bytes
+```
+
+A path survives isolation, because a read and a write go through the I/O
+manager, which sits above the seam. And it arrives with naming, ownership,
+`owns`, lifetime tied to the process, a directory, `del`, and an already
+RT-resident transfer path — none of which a new mechanism would have had.
+R9 §16.1's own instruction is that R9 should use RV-9's native mechanisms
+"rather than recreate an operating system inside its runtime"; this is that,
+taken literally.
+
+`expose speed, error, output` becomes one `write` of one struct to one
+path. Atomic because it is one call and one copy.
+
+### The four layers, again
+
+| layer | what it does |
+|---|---|
+| PFM | the discipline: names, sequence, coherence, one writer |
+| pubmem | one job — where the store is. Forty lines |
+| `/pub0` | the binding, as a descriptor module |
+
+The driver is that small on purpose. A cell in a PMP region shared with an
+isolated process, or one in memory that survives a restart, is a different
+driver answering the same `arena` call and nothing above it changes.
+
+### Coherence without a lock
+
+One write is atomic on its own. Seeing half of a *set* — the new speed with
+the old current — is the harder problem and the one §18 is about. A
+seqlock solves it, and the asymmetry falls the right way round:
+
+- the writer bumps a counter to odd, copies, bumps it to even. It never
+  waits, never allocates, and never takes a lock.
+- a reader takes the counter, copies, takes it again, and retries if they
+  differ.
+
+The entire cost of contention lands on the observer, which is the process
+that can afford it. That is the reason for choosing this over a mutex, and
+it is what makes the real-time half of §18's contract keepable.
+
+Retries are bounded at eight and then counted, not waited out. On one core
+a preempted reader needs exactly one; more means publications are arriving
+faster than a snapshot can be taken, which is a fact about the system worth
+having in `pubs` rather than a reason to sit in the I/O manager with a
+deadline running.
+
+### What every publication carries
+
+```c
+typedef struct {
+    uint32_t seq;        /* 0 = never published; then one per publication */
+    uint32_t len;
+    uint64_t stamp_us;   /* when the observation was made */
+} rv9_pub_t;             /* the value follows */
+```
+
+`seq` is §18's validity indication and its publication sequence in one
+number: zero means the first `expose` has not happened, which is exactly
+"not yet externally available" and needs no `unknown` type.
+
+`stamp_us` is when the reading was *taken*, not when it was handed over.
+Those differ by however long the computing took, and a reactive layer
+deciding how stale a value is needs the first. A publisher passing zero is
+saying "now".
+
+The same struct goes both ways, deliberately: what comes out of one cell
+can be written into another unchanged, which is what a bridge or a recorder
+needs.
+
+### One writer, many readers — and not by the claim table
+
+Two processes publishing one value is not a race to be won; it is two
+answers to a question with one reader. But the claim table cannot express
+this. `RV9_MODE_EXCL` shuts out *everybody*, and one writer with many
+readers is the entire shape of a publication. So the rule lives in PFM,
+which is where the discipline belongs, and a second publisher gets
+`RV9_IO_ERR_BUSY` at open.
+
+### Cells outlive their publishers
+
+A cell is not freed when the process that declared it exits. That is the
+property that makes publication worth having *after* a failure and not only
+during normal running: whatever investigates a stopped machine reads the
+last thing the stopped component said, and when it said it.
+
+Not automatic is not never — `del /pub0/NAME` clears a cell nobody has
+open, so a component that will not run again does not hold one until the
+next reboot.
+
+### Not polling
+
+R9 §21 asks that a watcher re-evaluate when a value changes rather than
+poll. `RV9_PUB_GS_WAIT` blocks until the cell moves past a given sequence.
+
+It waits on a *sequence*, not on an edge, so a publication that lands while
+nobody is waiting is still seen afterwards — and several that arrive
+together coalesce into one wakeup, which is also what §21 wants.
+
+The wake costs the publisher almost nothing. Each waiter has an `armed`
+flag, cleared by the wake, so a loop publishing at 1 kHz into a cell whose
+observer works at 50 Hz makes fifty semaphore calls a second and reads a
+word the other nine hundred and fifty times. The publication itself is
+resident; the wake is not, and cannot be — so a control loop with the flash
+cache off still publishes and simply does not wake anybody until the cache
+is back. That is the right way round.
+
+### Demonstrated
+
+`control` now publishes what it measured every period, as one write:
+
+```
+rv9> pub CONTROL 0 0 0
+/pub0/CONTROL <- 0 0 0
+
+rv9> watch CONTROL 5 &
+[9] watch
+
+rv9> rt control
+rt: started control as pid 11
+seq    age_ms values...
+3      0      123       1000      123
+4      0      218       877       110
+5      0      292       782       101
+6      0      351       708       95
+7      0      397       649       89
+control: 2000 activations at 1000 us
+  worst jitter   10 us
+  worst execute  38 us
+  overruns       0
+
+rv9> pubs
+name                 seq   bytes   cap  age_ms  by   rdrs  torn
+CONTROL              2002  12      64   3001    -    0     0
+```
+
+Two processes, one publishing at 1 kHz and one observing, with the observer
+seeing coherent triples: 13 µs worst execution warm, 30–38 µs on the first
+run of a boot, no overruns, against a declared 50.
+
+`pubs` shows the cell still holding its last value with nobody publishing
+it, which is the state an operator arriving after the fact actually wants.
+
+### The measurement that changed the code
+
+It did not start there. Publishing straight from inside the loop reached
+**49–50 µs** on the first run of every boot — the entire declared budget,
+three times running, and not a fluctuation. Warm it was 20 µs.
+
+The difference is the first call through a path: the write that pulls the
+I/O manager's code into cache. Thirty microseconds of a control loop's
+budget, spent once, on warming up.
+
+The fix is one throwaway write before `rt_declare`, and it is not a trick.
+It is the initialisation-versus-execution split RV-9 has always had (§10,
+and alignment note 8) applied to the thing that had just been added to the
+loop: *anything a real-time loop will touch should be touched once before
+the loop makes a promise about how long it takes.* With it, cold drops to
+30–38 µs and warm to 13.
+
+Worth recording because the declaration was never wrong — 50 was always the
+number, and 50 was always reached. Only measurement said which side of it
+the loop was on.
+
+### What this does not do
+
+R9 §19's inputs — the supervisor writing `MOTOR_CONTROL.target_speed` — are
+this same object with the ownership reversed, and need nothing added. What
+is genuinely missing is a *name* R9 can rely on: cells are created by
+whoever opens one for writing, so two components agreeing on `CONTROL` do
+so by convention. Declaring published cells in the manifest, the way
+devices are declared, would let admission catch a watcher naming a
+component that will never publish. That is the next thing here.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

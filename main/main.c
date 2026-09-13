@@ -17,6 +17,7 @@
 #include "kernel_test.h"
 #include "module_test.h"
 #include "io_test.h"
+#include "pub_test.h"
 #include "conformance.h"
 
 #define RV9_RUN_KERNEL_TEST 1
@@ -208,6 +209,7 @@ static void io_bringup(void)
     REGISTER(rv9_rbf_register());
     REGISTER(rv9_nfm_register());
     REGISTER(rv9_pio_register());
+    REGISTER(rv9_pfm_register());
     REGISTER(rv9_drv_uart_register());
     REGISTER(rv9_drv_lcdcon_register());
     REGISTER(rv9_drv_ramdisk_register());
@@ -218,6 +220,7 @@ static void io_bringup(void)
     REGISTER(rv9_drv_adc_register());
     REGISTER(rv9_drv_tsens_register());
     REGISTER(rv9_drv_svgwin_register());
+    REGISTER(rv9_drv_pubmem_register());
     REGISTER(rv9_drv_ssh_register());
 
     #undef REGISTER
@@ -704,8 +707,10 @@ static void rv9_init_task(void *arg)
     io_bringup();
 
     /* After bringup: the claim table comes up with the I/O manager, and
-       testing it before then would test nothing. */
+       testing it before then would test nothing. The same goes for
+       publication, which needs /pub0 attached. */
     rv9_io_selftest();
+    rv9_pub_selftest();
 
     run_module("hello");
 

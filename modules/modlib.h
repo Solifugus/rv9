@@ -54,6 +54,25 @@ static inline uint32_t m_num_parse(const char *s, const char **end)
     return v;
 }
 
+/*
+ * How long ago, in milliseconds, from two microsecond timestamps.
+ *
+ * Narrowed to 32 bits before the divide, and not for tidiness: dividing a
+ * uint64_t calls __udivdi3, which lives in libgcc, which a module has no
+ * way to link against -- the build fails at the link, which is the good
+ * case. The difference fits in 32 bits for any age under about 71 minutes,
+ * and anything older is reported as that ceiling rather than wrapping into
+ * a small and plausible lie.
+ */
+static inline uint32_t m_age_ms(uint64_t now_us, uint64_t then_us)
+{
+    if (then_us == 0 || now_us <= then_us) return 0;
+
+    uint64_t delta = now_us - then_us;
+    if (delta > 0xFFFFFFFFull) return 0xFFFFFFFFull / 1000u;
+    return (uint32_t)delta / 1000u;
+}
+
 /* Split "a b" into the first word and the rest. */
 static inline const char *m_word(const char *s, char *out, uint32_t cap)
 {

@@ -151,13 +151,13 @@ Measured or checked against the running system, 2026-09-12.
 | 5. heap policy by class | see below — the situation is the reverse of what is assumed |
 | 6. device ownership | **done** — a claim table above the drivers, keyed by the full path (`/gpio/2`, not `/gpio`), one record per owner. `exclusive` in the manifest is claimed at fork and released at exit however the process ends; `RV9_MODE_EXCL` does the same at runtime; `device` is checked for existence. `owns` lists who has what, and what each device is to be parked at |
 | 7. RT-safe marked machine-readably | documented in prose, `RV9_RT_CODE` in source; not readable |
-| 8. init separate from execution | **already exactly this** |
+| 8. init separate from execution | **already exactly this**, and it earns its keep: publishing from a control loop cost 30 us of first-call warm-up until one throwaway write was moved before `rt_declare` |
 | 9. failsafe below the process | **done for process failure** — `RV9_MTAG_FAILSAFE` is a constant and a device path, repeated per actuator, applied by RV-9 after the process is gone and validated at admission against what the program claimed to own. `hold crash` drives a pin high, dies of a stack overflow, and the pin reads 0 afterwards. Not yet applied for a *deadline* miss, which R9 §15.3 also calls a fault: RV-9 counts overruns but does not stop a component for them |
 | 10. timing as state | **done**, `RV9_SYS_RT` |
-| 11. no POSIX assumptions | **already true** and worth defending |
+| 11. no POSIX assumptions | **already true** and worth defending. The unified path model has now paid for itself twice over: publication between processes (R9 §18) needed no new mechanism, only a fourth file manager |
 | 12. extensible manifest | **done** — `rv9_mod_header_t.manifest_offset` points at a TLV list; sixteen tags registered, `build.conf` emits them, `tools/modinfo.py` reads them back |
 | 13. resource certificate | **begun** — admission checks the declaration against itself (deadline within period, WCET within deadline) and against the machine. `control` declares 50 us and reports 26-30 us observed, which is a claim RV-9 can check rather than believe |
-| 14. measurement | **established practice**: `free`, `stacks`, `procs`, `rt`, `owns`, `docs/memory.md`. It earns its keep: `stacks` reporting a 34 MB stack is what exposed the KAL casting host task handles to kernel threads |
+| 14. measurement | **established practice**: `free`, `stacks`, `procs`, `rt`, `owns`, `pubs`, `docs/memory.md`. It earns its keep: `stacks` reporting a 34 MB stack is what exposed the KAL casting host task handles to kernel threads |
 | 15. no language semantics in the OS | held so far |
 
 ### Three corrections
@@ -202,6 +202,31 @@ A program claiming 736 bytes and touching 900 is caught by measurement, not
 by trust. The same shape — *declare, measure, compare, report* — applies to
 execution time (`RV9_SYS_RT` already does it), to heap once there is one, and
 to device use.
+
+### Publication, which is not in these notes but should have been
+
+These fifteen items are about what a program *declares* and what RV-9
+enforces. They do not mention how two of those programs exchange a value —
+and R9 §16.1 puts the real-time component and the reactive supervisor in
+separate RV-9 processes, so `MOTOR_CONTROL.speed` crosses a process
+boundary. RV-9 had no mechanism for that at all.
+
+It does now: a publication is a device, `/pub0/NAME`, and `expose` is one
+write of one struct to one path. See docs/design.md §28 for the reasoning
+and R9 §18.1 for the settled ABI. Two properties are worth naming here
+because they belong with the rest of these notes:
+
+- **It cost the control loop nothing, once measured.** `control`
+  publishing every period at 1 kHz runs at 13 us worst execution warm and
+  30-38 us cold, against a declared 50. The writer takes no lock and does
+  not allocate -- a seqlock, with the whole cost of contention on the
+  observer. But the first version reached 49-50 us on every boot's first
+  run, all of it the first call through a path, and only §14's measurement
+  discipline caught it. The fix was §8's initialisation phase: one
+  throwaway write before the period is declared.
+- **A published value outlives its publisher.** Which makes it the natural
+  companion to §9's failsafe: a device left in its safe state, and beside
+  it the last thing the dead component observed and when.
 
 ### What would foreclose options if left alone
 
