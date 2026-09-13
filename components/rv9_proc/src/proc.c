@@ -586,13 +586,29 @@ static void finish(rv9_proc_t *p, int rc, int fault,
     } else if (fault == RV9_FAULT_KILLED) {
         ESP_LOGW(TAG, "pid %u ('%s') killed between activations",
                  (unsigned)p->pid, p->name);
-    } else {
-        ESP_LOGI(TAG, "pid %u ('%s') exited, status %d",
-                 (unsigned)p->pid, p->name, rc);
     }
 
     /* Third in R9's order: published, now that the table says it. */
     if (s_on_ended) s_on_ended(p->pid, fault);
+
+    /*
+     * How deep this stack went, measured here because nothing later can:
+     * the stack goes with the task. Last of the work done on it, so the
+     * exit hook, the failsafes and the publication are counted -- they
+     * ran on this stack and a stack cut from the figure must hold them.
+     */
+    size_t size = 0, unused = 0;
+    uint32_t used = 0;
+    if (rv9_task_stack(rv9_task_self(), &size, &unused) == RV9_OK) {
+        if (size == 0) size = p->stack_bytes;      /* a host task: see stacks */
+        used = (size > unused) ? (uint32_t)(size - unused) : 0;
+        rv9_mod_note_stack(p->module, (uint32_t)size, used);
+    }
+    if (fault == RV9_FAULT_NONE) {
+        ESP_LOGI(TAG, "pid %u ('%s') exited, status %d, stack %lu of %u",
+                 (unsigned)p->pid, p->name, rc, (unsigned long)used,
+                 (unsigned)size);
+    }
 
     /* Release the module link and the private storage. The descriptor stays
        so that a parent can still wait on it and see the status -- for a

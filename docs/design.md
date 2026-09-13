@@ -4437,7 +4437,132 @@ log says `(declared)`.
 the radio. It does not make routine bounds include the host's work, which
 remains true of every routine loop as §33 says.
 
-## 9. Migration to a native kernel
+## 37. Stacks, sized by what they were seen to do
+
+§35 ended on the number that mattered: inside an SSH session with one
+command running, 3.4 KB was left for programs, and a second command was
+refused. The cheapest memory on the board was stacks. Thirty-five modules
+still took the 8 KB default because nobody had measured them, and
+`stacks` could not measure them either: it sees only the living, and most
+commands are gone within milliseconds.
+
+### Measuring the ones that do not stay
+
+A process's stack is scanned where nothing later can reach it: at the
+end of `finish()`, on its own thread, after the exit hook, the failsafes
+and the publication have run on that same stack. The figure goes on the
+module's directory entry as a peak since boot. `RV9_SYS_STACK_PEAKS` (11)
+returns one 22-byte record per module that has run, and `stacks` prints
+them under the live table:
+
+```
+since boot       given   peak  runs
+chart           3584   2144     4
+control         2560   1368     3
+echo            2560   1032    82
+gauge           4096   2748     2
+pic             3584   2096     4
+rt              2560   1240     1
+...
+```
+
+The record is small on purpose. `stacks` is a command you want to run
+when memory is short, and 64 records cost it 1,408 bytes.
+
+### The rule
+
+A module's stack is its measured peak plus a kilobyte, rounded up to 512
+bytes, with 2,048 as the floor. The margin exists because a peak covers
+only the paths that were exercised. About 900 bytes of every peak is RV-9
+ending the process, so no command's stack can be smaller than that
+however little it does. Where a module's real work could not be
+exercised safely, it keeps a larger stack and its `build.conf` says why:
+`wifi` and `scan` (4 KB, ESP-IDF WiFi calls on the caller's stack),
+`passwd` and `authkey` (3 KB, hashing and flash writes).
+
+### What the first rule got wrong
+
+The first pass measured every command with its usual arguments and cut
+`gauge` to 2,560. The verification pass then stopped it:
+
+```
+gauge: started a 50 Hz control loop to watch
+E (127794) rv9-proc: pid 106 ('gauge') killed: stack overflow
+gauge: stopped by the scheduler (see the log)
+```
+
+On its first measurement `gauge` had not reached the work it does. Run
+bare on an idle board it does two things that land on its own stack:
+
+- **It admits a control loop.** `fork_rt` runs response-time analysis on
+  the *forking* process's stack. From `rt` that path peaks at 1,240.
+- **It draws.** `/w0` renders when the path is closed, on the writer's
+  stack. `pic > /w0` peaks at 2,096 against about 1,000 for `pic` alone.
+
+Measured doing both, `gauge` peaked at 2,748, and it now has 3,840. The
+guard and pad from §22 did what they were built for: one process was
+stopped, named in the log, and nothing else was touched.
+
+Measuring it properly hit a second trap. Opening `/w0` allocates about
+12 KB of buffers, so with `gauge` held at 8 KB for measurement the window
+could not be opened, `gauge` returned early, and the peak described the
+failure path. The measurement size had to be small enough for the real
+path to run.
+
+### Tested
+
+After the final sizes, every command was run twice over serial, and once
+more over SSH with the same list. There were no stack faults, and every
+boot suite passes: kal 45, conform 23, mod 17, io 44, pub 38, fault 76,
+proc 11, sched 15, mem 13. Two full command passes left the heap 132
+bytes lower, which is the process history rather than a leak.
+
+### What it bought, and what it did not
+
+Across the 39 modules whose stacks changed, the stacks given went from
+293,376 bytes to 99,072. Thirty-five are smaller, and four are larger
+because they had been cut too thin by hand: `control` had 164 bytes
+spare, `lateloop` 228, `tiny` 8, and `rt` had never been measured
+admitting a loop. A typical command now costs 5.6 KB less each time it
+runs. That figure is exact: it is stack given, not a heap reading.
+
+The heap readings cannot show it. Free memory on this board swings by
+several kilobytes with WiFi and lwIP buffers. In one run, memory for
+programs after an SSH session closed was 3.4 KB *higher* than before it
+opened. Differences between readings are noise at the scale being
+measured, so no before-and-after heap figure is claimed here.
+
+What can be shown is which commands start inside an SSH session. Before
+resizing, `pic`, `chart`, `screen`, `edgegen` and others were refused
+there. Now they run. Still refused in a session:
+
+- **`ed`**, whose 9 KB is statics, not stack
+- **drawing to `/w0`** (`pic > /w0`, `gauge`, `evlat`'s window): opening
+  the window allocates about 12 KB of buffers
+- **`downloaded`**, loaded from flash into RAM to run
+- **anything at all beside two background jobs**: with two `deaf &`
+  running, even `free` was refused. The shell's own `procs` from §35
+  still answered.
+
+So stacks were the cheapest memory, and they are now spent carefully.
+They were not the whole of the problem. What is left in a session is
+the session itself, the window's buffers and large statics, and those
+are the next places to look.
+
+### What this does not do
+
+**A peak is a floor.** It covers the paths a script exercised. The margin
+is a judgment, and the guard is what makes being wrong survivable rather
+than silent.
+
+**The caller pays for the system.** Drawing, admission and ending a
+process all use the calling process's stack. For a compiler sizing a
+generated program from its call graph, those are costs outside the
+program that it must still add in. Rendering `/w0` on its own task would
+remove one of them, and is not done.
+
+**Peaks are not kept across a reboot**, and measuring again after a change
+means running the commands again.
 
 The point of the KAL. When the personality layer is working and the design has
 been validated by use:

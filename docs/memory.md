@@ -55,7 +55,7 @@ rather than 53 KB — more than double.
 |---|---|---|
 | process descriptor | 192 | `sizeof(rv9_proc_t)` |
 | CPU context | 56 | 14 words, saved on the thread's own stack |
-| **stack** | **8,192 default** | the whole story; see below |
+| **stack** | **1,024–4,096 measured** | 8,192 only when a module says nothing; see below |
 | statics (heap/data) | declared per module | 8 to 3,840 across the current set |
 | module image | 200–3,000 | copied into executable RAM to run |
 | path table | ~44 | 8 slots, `RV9_MAX_PATHS` |
@@ -109,6 +109,28 @@ which is the last step of phase 7.
 For a language whose programs are processes, this is the number that
 decides concurrency. At 8 KB, 53 KB of free heap holds six. At 2 KB it
 holds twenty-four.
+
+### Right-sized (2026-09-13)
+
+Every module now declares its stack, sized from what it was *seen* to use
+rather than guessed (design.md §37). A process's peak is measured as it
+ends, on its own stack, so the short-lived commands that `stacks` could
+never catch alive are counted, and `stacks` lists every module's peak
+since boot. Most commands peak between 900 and 1,400 bytes, of which
+about 900 is RV-9's own exit path. They get their peak plus a kilobyte,
+rounded up to 512 bytes, with 2,048 as the floor.
+
+Two costs land on the caller's stack and are easy to miss:
+- **Drawing.** `/w0` renders when a path is closed, on the stack of
+  whoever wrote to it: `pic > /w0` peaks at 2,096, twice `pic` alone.
+- **Admission.** `fork_rt` runs its analysis on the forking process's
+  stack. `gauge`, which starts a control loop and then draws, peaks at
+  2,748. At 2,560 it overflowed, and the guard stopped it without harming
+  anything else.
+
+WiFi calls, and passwords that hash and write flash, were not measured on
+their real paths and keep 3–4 KB. The eight-kilobyte default remains for
+a module that declares nothing.
 
 ## Dynamic / shared RAM
 
@@ -193,8 +215,10 @@ Still missing:
   a 240 MHz core — 0.01% of its budget — while the panel redraws thirteen
   times a second beside it without disturbing it.
 - **Memory is, and it is mostly stacks and WiFi.** Both are choices.
-- **Concurrency density is a stack-size decision**, and the measurement to
-  size it by now exists.
+- **Concurrency density is a stack-size decision**, and every module is now
+  sized by measurement. A compiler should size from the call graph, and
+  must count what RV-9 does on the caller's stack: drawing to `/w0`,
+  admitting a real-time loop, and about 900 bytes to end a process.
 - **Over-allocating now fails rather than reboots.** A runtime that asks for
   too much gets NULL and a process that will not start, not an abort from
   underneath. That is a floor, not a budget: it stops RV-9 taking ESP-IDF's

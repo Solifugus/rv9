@@ -271,7 +271,8 @@
     "CLAIM": 7,
     "DEVICES": 8,
     "LIMITS": 9,
-    "BUDGETS": 10
+    "BUDGETS": 10,
+    "STACK_PEAKS": 11
   },
   "calls": [
     {

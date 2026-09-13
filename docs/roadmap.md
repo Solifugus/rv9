@@ -460,17 +460,17 @@ admission control has nothing to protect). Everything else can wait.
 
 ## Memory
 
-Measured, not estimated: **docs/memory.md**. The short version is that WiFi
-is 52 KB, the RAM disk 17 KB, and stacks are eight times larger than
-anything uses — 26.6 KB given across four processes, 3.9 KB touched. A
-module can now declare `stack_size`, and `stacks` reports what each process
-was given against what it has ever used.
+Measured, not estimated: **docs/memory.md**. WiFi is 52 KB and the RAM
+disk 17 KB. **Stacks are right-sized**: every module declares one, sized
+from its measured peak (design §37), and `stacks` reports each module's
+peak since boot.
 
-The gap that matters: **there is no memory reserve of any kind.** Running
-the window, an SSH session and a control loop together exhausts the heap
-and ESP-IDF aborts inside the WiFi PHY — a reboot, from a layer RV-9 does
-not own. A floor below which ordinary allocation is refused is the first
-thing to build before anything depends on this machine staying up.
+**Memory has a floor, a real-time reserve and per-process budgets**
+(design §23, §35). Ordinary work is refused before a control loop is, and
+a failsafe can still be applied with the reserve spent.
+
+What remains is headroom inside an SSH session, which is still the
+tightest place on the board.
 
 ## Immediate next step
 

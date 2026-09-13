@@ -11,12 +11,20 @@
  * kernel guards the floor and kills the thread -- but being caught is a
  * dead process, not a warning, so this is the number to cut a stack down
  * by. Spare of nearly zero means the next branch taken kills it.
+ *
+ * Below the living, every module that has run since boot and the deepest
+ * any run of it went. Most commands end before anybody could look at them
+ * live, so that second table is the one to size a command's stack from.
  */
 #include "modlib.h"
 
-#define MAX 16
+#define MAX   16
+#define PEAKS 64
 
-typedef struct { rv9_sys_stack_t s[MAX]; } stacks_t;
+typedef struct {
+    rv9_sys_stack_t      s[MAX];
+    rv9_sys_stack_peak_t p[PEAKS];
+} stacks_t;
 
 __attribute__((section(".text.entry")))
 int rv9_module_entry(const rv9_mod_env_t *env)
@@ -56,5 +64,19 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     m_say(env, RV9_STDOUT, ", spare ");
     m_num(env, RV9_STDOUT, (int32_t)(total - used_total));
     m_say(env, RV9_STDOUT, "\n");
+
+    /* A system that predates the record answers nothing, and that is not
+       an error worth a word. */
+    int m = env->sysinfo(RV9_SYS_STACK_PEAKS, st->p, sizeof(st->p));
+    if (m <= 0) return 0;
+
+    m_say(env, RV9_STDOUT, "\nsince boot       given   peak  runs\n");
+    for (int i = 0; i < m && i < PEAKS; i++) {
+        m_pad(env, RV9_STDOUT, st->p[i].name, 15);
+        m_numpad(env, RV9_STDOUT, (int32_t)st->p[i].given, 7);
+        m_numpad(env, RV9_STDOUT, (int32_t)st->p[i].peak, 7);
+        m_numpad(env, RV9_STDOUT, (int32_t)st->p[i].runs, 6);
+        m_say(env, RV9_STDOUT, "\n");
+    }
     return 0;
 }

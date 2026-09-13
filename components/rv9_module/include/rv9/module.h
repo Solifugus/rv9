@@ -856,6 +856,7 @@ _Static_assert(sizeof(rv9_pub_info_t) == 56, "rv9_pub_info_t is frozen");
 #define RV9_SYS_DEVICES  8     /* rv9_sys_device_t, one per device       */
 #define RV9_SYS_LIMITS   9     /* rv9_sys_limits_t, one record           */
 #define RV9_SYS_BUDGETS 10     /* rv9_sys_budget_t, one per live process */
+#define RV9_SYS_STACK_PEAKS 11 /* rv9_sys_stack_peak_t, one per module run */
 
 /* What each running process is charged, and what it is allowed. */
 typedef struct __attribute__((packed)) {
@@ -1075,6 +1076,27 @@ typedef struct __attribute__((packed)) {
     uint32_t stack_unused;
 } rv9_sys_stack_t;
 
+/*
+ * The deepest stack each module has needed, over every process that ran it
+ * since boot, measured as each one ended.
+ *
+ * `rv9_sys_stack_t` only sees the living, and most commands are gone
+ * within milliseconds of starting, so without this a stack could be sized
+ * only for the programs that stay long enough to be watched. A peak is
+ * the evidence to cut by -- for the paths that were exercised, which is
+ * why sizes cut from it keep a margin.
+ */
+typedef struct __attribute__((packed)) {
+    char     name[16];         /* truncated: a command's name is short */
+    uint16_t given;            /* the stack the last run had */
+    uint16_t peak;             /* the most any run used */
+    uint16_t runs;             /* stops at 65535 */
+} rv9_sys_stack_peak_t;
+
+/* Small on purpose: `stacks` holds one per module, and it is a command
+   you want to be able to run when memory is short. */
+_Static_assert(sizeof(rv9_sys_stack_peak_t) == 22, "stack peak record size");
+
 typedef int (*rv9_mod_entry_fn)(const rv9_mod_env_t *env);
 
 /*
@@ -1140,6 +1162,13 @@ typedef struct rv9_mod_entry {
     void                 *image;        /* RAM image, NULL when not loaded */
     bool                  resident;     /* image is permanent, not from store */
     rv9_mod_entry_fn      entry;        /* valid while loaded */
+
+    /* The deepest any process running it has gone, measured at its end --
+       RV-9's own work on that stack included. Since boot; not stored. */
+    uint32_t              stack_given;
+    uint32_t              stack_peak;
+    uint32_t              stack_runs;
+
     struct rv9_mod_entry *next;
 } rv9_mod_entry_t;
 
@@ -1262,6 +1291,9 @@ const void *rv9_mod_manifest_find(const void *image, uint16_t tag,
    false when the tag is absent or the wrong size, leaving *out alone. */
 bool rv9_mod_manifest_u32(const void *image, uint16_t tag, uint32_t *out);
 bool rv9_mod_manifest_u8(const void *image, uint16_t tag, uint8_t *out);
+
+/* Record how much stack a run of this module used; see RV9_SYS_STACK_PEAKS. */
+void rv9_mod_note_stack(rv9_mod_entry_t *entry, uint32_t given, uint32_t used);
 
 /*
  * Does any program on this machine declare exactly `value` under `tag`?

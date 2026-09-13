@@ -158,6 +158,16 @@ bool rv9_mod_manifest_u8(const void *image, uint16_t tag, uint8_t *out)
    compiler wrote that long is not being scanned from flash on every fork. */
 #define MANIFEST_SCAN_MAX 1024
 
+void rv9_mod_note_stack(rv9_mod_entry_t *entry, uint32_t given, uint32_t used)
+{
+    if (entry == NULL) return;
+    rv9_lock_acquire(s_lock);
+    entry->stack_given = given;
+    if (used > entry->stack_peak) entry->stack_peak = used;
+    entry->stack_runs++;
+    rv9_lock_release(s_lock);
+}
+
 bool rv9_mod_any_declares(uint16_t tag, const char *value)
 {
     if (value == NULL) return false;
@@ -710,6 +720,25 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
             out[n].size     = e->size;
             out[n].links    = e->link_count;
         }
+        return (int)n;
+    }
+
+    case RV9_SYS_STACK_PEAKS: {
+        uint32_t max = len / sizeof(rv9_sys_stack_peak_t);
+        rv9_sys_stack_peak_t *out = (rv9_sys_stack_peak_t *)buf;
+        uint32_t n = 0;
+
+        rv9_lock_acquire(s_lock);
+        for (rv9_mod_entry_t *e = s_dir; e && n < max; e = e->next) {
+            if (e->stack_runs == 0) continue;
+            memset(&out[n], 0, sizeof(out[n]));
+            strncpy(out[n].name, e->name, sizeof(out[n].name) - 1);
+            out[n].given = (uint16_t)(e->stack_given > 0xFFFF ? 0xFFFF : e->stack_given);
+            out[n].peak  = (uint16_t)(e->stack_peak  > 0xFFFF ? 0xFFFF : e->stack_peak);
+            out[n].runs  = (uint16_t)(e->stack_runs  > 0xFFFF ? 0xFFFF : e->stack_runs);
+            n++;
+        }
+        rv9_lock_release(s_lock);
         return (int)n;
     }
 
