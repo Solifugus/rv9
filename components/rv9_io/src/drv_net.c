@@ -18,6 +18,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -41,6 +42,16 @@ typedef struct {
     uint8_t         last_reason;
     uint8_t         band_opt;
     uint8_t  ps_opt;
+
+    /* Keeping a link, not just making one. See "A link that stays up". */
+    rv9_net_creds_t creds;          /* what the current attempt is using */
+    bool            wanted;         /* someone asked for a link; a manual
+                                       disconnect clears it */
+    uint64_t        attempt_ms;     /* when the current attempt began */
+    bool            kicked;         /* a stalled attempt was restarted */
+    uint64_t        leave_ms;       /* when we disconnected on purpose */
+    uint32_t        backoff_ms;     /* wait before trying again after failing */
+    uint64_t        retry_at_ms;
 } net_t;
 
 static net_t *s_net;      /* the event handlers need it; one device only */
@@ -98,6 +109,60 @@ static void creds_forget(void)
 
 #define MAX_RETRIES 5
 
+/*
+ * A link that stays up.
+ *
+ * Association used to be driven only by events: a disconnect started a
+ * retry, five of them gave up, and nothing else ever looked. That is right
+ * when the events come. On one boot they did not. The attempt stalled with
+ * the state at "connecting", no disconnect ever arrived, and the board sat
+ * off the network until it was reset -- the failure a machine in a field
+ * cannot have, since nobody is there to reset it.
+ *
+ * The first explanation was two connects at once -- the radio's start event
+ * called esp_wifi_connect() while net_connect() was about to, and one was
+ * refused ("sta is connecting"). That did happen, and both ways of doing it
+ * are gone: the start-event connect, and net_connect()'s own disconnect
+ * arriving as an event and retrying on top of the new attempt. But it was
+ * not why the attempt never finished. The WiFi driver runs its scan and
+ * connect on esp_timer's task timers, and those had stopped for good -- see
+ * tick_hook() in kal_native.c and the guard in kal_rt.c. The same fault left
+ * `scan` finding nothing, and made the first version of this watch useless:
+ * it lived on the very timers that had died.
+ *
+ * With that fixed, a tick watches anyway:
+ *
+ *   an attempt with no answer for CONNECT_STALL_MS is restarted with a
+ *   disconnect, whose event starts the retry; if even that brings nothing,
+ *   the next tick connects directly.
+ *
+ *   after giving up, it tries again after BACKOFF_FIRST_MS, doubling to
+ *   BACKOFF_MAX_MS -- and tries the remembered network, if the one that
+ *   failed was only being tried. An access point that was off comes back;
+ *   a wrong password costs one attempt every five minutes.
+ *
+ * The tick is an esp_timer that only posts an event, so everything that
+ * changes this state runs on the event task, beside the handlers it would
+ * otherwise race. Only a setstat from a process runs elsewhere, and it
+ * sets the attempt up before starting it.
+ */
+#define TICK_MS           5000
+#define CONNECT_STALL_MS  20000
+#define BACKOFF_FIRST_MS  30000
+#define BACKOFF_MAX_MS    300000
+
+/* Our own disconnect, as an event, within this long, is ours. */
+#define LEAVE_WINDOW_MS   2000
+
+ESP_EVENT_DEFINE_BASE(RV9_NET_EVENT);
+#define RV9_NET_EVENT_TICK 1
+
+static void begin_attempt(net_t *n)
+{
+    n->attempt_ms = rv9_time_ms();
+    n->kicked = false;
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id,
                           void *data)
 {
@@ -105,33 +170,47 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id,
 
     if (s_net == NULL) return;
 
-    if (id == WIFI_EVENT_STA_START) {
-        /* Only chase an access point if someone has named one. The radio
-           also gets started for scanning, and a scan must not trigger an
-           association attempt. */
-        if (s_net->ssid[0]) esp_wifi_connect();
-    } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
+    /*
+     * WIFI_EVENT_STA_START deliberately does nothing. It used to connect
+     * when a network was named, and net_connect() connects too: whichever
+     * came second was refused mid-attempt, and on one boot the attempt
+     * never finished. net_connect() is the one place that starts one.
+     */
+    if (id == WIFI_EVENT_STA_DISCONNECTED) {
+        net_t *n = s_net;
         wifi_event_sta_disconnected_t *d =
             (wifi_event_sta_disconnected_t *)data;
         uint8_t reason = d ? d->reason : 0;
 
-        s_net->ip = 0;
-        s_net->last_reason = reason;
+        n->ip = 0;
+
+        /* Leaving the old network on the way to a new one: not a failure,
+           and a retry here would be a second connect on top of the new
+           attempt. */
+        if (n->leave_ms != 0 && rv9_time_ms() - n->leave_ms < LEAVE_WINDOW_MS) {
+            n->leave_ms = 0;
+            return;
+        }
+        n->last_reason = reason;
 
         /* The reason code is the difference between "wrong password" and
            "no such network", which are very different problems. */
-        if (s_net->ssid[0] == '\0') {
-            s_net->state = RV9_NET_DOWN;
-        } else if (s_net->retries < MAX_RETRIES) {
-            s_net->retries++;
-            s_net->state = RV9_NET_CONNECTING;
+        if (!n->wanted || n->ssid[0] == '\0') {
+            n->state = RV9_NET_DOWN;
+        } else if (n->retries < MAX_RETRIES) {
+            n->retries++;
+            n->state = RV9_NET_CONNECTING;
             ESP_LOGW(TAG, "disconnected: reason %u, retry %d",
-                     (unsigned)reason, s_net->retries);
+                     (unsigned)reason, n->retries);
+            begin_attempt(n);
             esp_wifi_connect();
         } else {
-            s_net->state = RV9_NET_FAILED;
-            ESP_LOGE(TAG, "giving up on '%s': reason %u",
-                     s_net->ssid, (unsigned)reason);
+            n->state = RV9_NET_FAILED;
+            if (n->backoff_ms == 0) n->backoff_ms = BACKOFF_FIRST_MS;
+            n->retry_at_ms = rv9_time_ms() + n->backoff_ms;
+            ESP_LOGE(TAG, "giving up on '%s' for now: reason %u; trying again "
+                          "in %lu s", n->ssid, (unsigned)reason,
+                     (unsigned long)(n->backoff_ms / 1000));
         }
     }
 }
@@ -146,6 +225,8 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
     s_net->ip = e->ip_info.ip.addr;
     s_net->state = RV9_NET_UP;
     s_net->retries = 0;
+    s_net->kicked = false;
+    s_net->backoff_ms = 0;
 
     /* The supplicant's running commentary was only wanted while we were
        trying to associate. */
@@ -157,6 +238,59 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 static rv9_io_err_t net_connect(net_t *n, const rv9_net_creds_t *creds,
                                 bool remember);
+
+/* The watch. Runs on the event task; see "A link that stays up". */
+static void on_tick(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg; (void)base; (void)id; (void)data;
+
+    net_t *n = s_net;
+    if (n == NULL || !n->wanted || n->ssid[0] == '\0') return;
+
+    uint64_t now = rv9_time_ms();
+
+    if (n->state == RV9_NET_CONNECTING &&
+        now - n->attempt_ms > CONNECT_STALL_MS) {
+        if (!n->kicked) {
+            ESP_LOGW(TAG, "no answer from '%s' in %u s; restarting the attempt",
+                     n->ssid, CONNECT_STALL_MS / 1000);
+            n->attempt_ms = now;
+            n->kicked = true;
+            esp_wifi_disconnect();          /* its event starts the retry */
+        } else {
+            ESP_LOGW(TAG, "still no answer from '%s'; connecting directly",
+                     n->ssid);
+            begin_attempt(n);
+            esp_wifi_connect();
+        }
+        return;
+    }
+
+    if (n->state == RV9_NET_FAILED && now >= n->retry_at_ms) {
+        rv9_net_creds_t use = n->creds;
+
+        /* A network only being tried does not get to strand the board. */
+        rv9_net_creds_t saved;
+        if (creds_load(&saved) && strcmp(saved.ssid, n->creds.ssid) != 0) {
+            ESP_LOGW(TAG, "'%s' failed; going back to remembered '%s'",
+                     n->ssid, saved.ssid);
+            use = saved;
+        } else {
+            ESP_LOGW(TAG, "trying '%s' again", n->ssid);
+        }
+
+        uint32_t next = n->backoff_ms * 2;
+        n->backoff_ms = (next > BACKOFF_MAX_MS) ? BACKOFF_MAX_MS : next;
+        net_connect(n, &use, false);
+    }
+}
+
+static void tick_cb(void *arg)
+{
+    (void)arg;
+    /* Only a note to the event task; never block the timer task for it. */
+    esp_event_post(RV9_NET_EVENT, RV9_NET_EVENT_TICK, NULL, 0, 0);
+}
 
 static rv9_io_err_t net_init(rv9_dev_t *dev)
 {
@@ -246,6 +380,20 @@ static rv9_io_err_t net_wifi_up(net_t *n)
                                             on_wifi_event, NULL, NULL);
         esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                             on_got_ip, NULL, NULL);
+        esp_event_handler_instance_register(RV9_NET_EVENT, RV9_NET_EVENT_TICK,
+                                            on_tick, NULL, NULL);
+
+        const esp_timer_create_args_t targs = {
+            .callback = tick_cb,
+            .name     = "rv9-net",
+        };
+        esp_timer_handle_t tick = NULL;
+        if (esp_timer_create(&targs, &tick) != ESP_OK ||
+            esp_timer_start_periodic(tick, (uint64_t)TICK_MS * 1000) != ESP_OK) {
+            /* The link still works without the watch; it just is not
+               watched. Worth saying, not worth refusing the radio for. */
+            ESP_LOGW(TAG, "no link watch: stalled attempts will not recover");
+        }
 
         TRY(esp_wifi_set_mode(WIFI_MODE_STA));
 
@@ -354,6 +502,11 @@ static rv9_io_err_t net_connect(net_t *n, const rv9_net_creds_t *creds,
     rv9_io_err_t err = net_wifi_up(n);
     if (err != RV9_IO_OK) return err;
 
+    /* Leaving whatever we were on. Marked first, so its event is known
+       for ours and does not start a retry on top of this attempt. */
+    if (n->state == RV9_NET_UP || n->state == RV9_NET_CONNECTING) {
+        n->leave_ms = rv9_time_ms();
+    }
     esp_wifi_disconnect();
 
     wifi_config_t wc;
@@ -392,9 +545,13 @@ static rv9_io_err_t net_connect(net_t *n, const rv9_net_creds_t *creds,
     esp_log_level_set("wifi", ESP_LOG_INFO);
     esp_log_level_set("wifi_init", ESP_LOG_INFO);
 
+    memset(n->ssid, 0, sizeof(n->ssid));
     strncpy(n->ssid, creds->ssid, sizeof(n->ssid) - 1);
+    n->creds   = *creds;
+    n->wanted  = true;
     n->retries = 0;
-    n->state = RV9_NET_CONNECTING;
+    n->state   = RV9_NET_CONNECTING;
+    begin_attempt(n);
 
     TRY(esp_wifi_connect());
 
@@ -412,13 +569,24 @@ static rv9_io_err_t net_setstat(rv9_dev_t *dev, uint32_t code, void *arg)
     switch (code) {
     case RV9_NET_SS_CONNECT:
         if (arg == NULL) return RV9_IO_ERR_INVAL;
+        n->backoff_ms = 0;
         return net_connect(n, (const rv9_net_creds_t *)arg, true);
+
+    case RV9_NET_SS_TRY:
+        /* The same, without saving: a network being tried must not replace
+           the one that works, and after failing the board goes back. */
+        if (arg == NULL) return RV9_IO_ERR_INVAL;
+        n->backoff_ms = 0;
+        return net_connect(n, (const rv9_net_creds_t *)arg, false);
 
     case RV9_NET_SS_FORGET:
         creds_forget();
         return RV9_IO_OK;
 
     case RV9_NET_SS_DISCONNECT:
+        /* Wanted no more, before the call, so its event does not retry --
+           which it used to, making a disconnect last about a second. */
+        n->wanted = false;
         if (n->wifi_started) {
             esp_wifi_disconnect();
             n->state = RV9_NET_DOWN;

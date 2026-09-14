@@ -38,6 +38,7 @@
  * gets a background job's read to let go.
  */
 #define RV9_NET_SS_SHUTDOWN  (RV9_SS_DRIVER_BASE + 6)
+#define RV9_NET_SS_TRY       (RV9_SS_DRIVER_BASE + 7)   /* rv9_net_creds_t, not saved */
 
 #define RV9_NET_MAX_APS 12
 

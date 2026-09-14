@@ -4564,6 +4564,162 @@ remove one of them, and is not done.
 **Peaks are not kept across a reboot**, and measuring again after a change
 means running the commands again.
 
+## 38. The timers that stopped
+
+One boot in §37 never joined the network. Its state said "connecting"
+forever, with no error, and the next reset connected normally. It looked
+like a missing timeout, and the first fix was one. That fix did not
+work, and finding out why turned up a fault underneath all of WiFi.
+
+### What it looked like
+
+- A boot that sat at "connecting" with no disconnect reason. The warning
+  that came with it appeared on 2 of 28 captured boots.
+- `scan` answering "no networks found" with the home network in range,
+  and the board unreachable for the rest of that session.
+- The first link watch below, tested with `wifi try` on a network that
+  does not exist: 150 seconds at "connecting", no retries, and not one
+  line from the watch that was meant to catch exactly that.
+
+### Finding it
+
+Each wrong theory was cheap to kill on the board, and each is recorded
+here because each was plausible:
+
+- **Two connects at once.** The radio's start event and `net_connect()`
+  both called `esp_wifi_connect()`, and one was refused. That was real,
+  and both ways of doing it are gone. With it gone, the stall stayed.
+- **The WiFi driver's INFO logging blocking.** Not one `wifi:` line
+  appeared after `wifi try`. Removing the log level change changed
+  nothing.
+- **Real-time work.** The watch's timer died at different moments on
+  different boots, often during the fault and memory tests. But a control
+  boot with no real-time activity, no test suites and no watchdog lost it
+  after the first callback too.
+
+Debug counters, not logs, gave the decisive facts. The `esp_timer`
+task's callbacks stopped for good while the task sat *blocked*, neither
+suspended nor starved: the shell, at a lower priority, kept answering,
+and loopback TCP kept working. Nothing was waking it.
+
+### Why
+
+ESP-IDF's `esp_timer` keeps two lists, ISR-dispatched and task-
+dispatched, on one hardware alarm. From `timer_alarm_handler()` in
+`esp_timer.c`:
+
+```c
+esp_timer_impl_try_to_set_next_alarm();
+isr_timers_processed = timer_process_alarm(ESP_TIMER_ISR);
+...
+if (isr_timers_processed == false) {
+    vTaskNotifyGiveFromISR(s_timer_task, &xHigherPriorityTaskWoken);
+}
+```
+
+`esp_timer_impl_try_to_set_next_alarm()` treats the earlier of the two
+alarms as the one being serviced and discards it. When the interrupt is
+serviced late, so that a task timer and an ISR timer are both due, the
+task's alarm is the earlier one. It is discarded, the ISR timer runs, and
+because an ISR timer ran the task is not woken. The task is the only
+thing that re-arms its own alarm, so from then on no task-dispatched
+timer on the board runs again. The WiFi driver's scan and connect timers
+are task-dispatched.
+
+RV-9's kernel tick was an ISR-dispatched `esp_timer` at 1 kHz, so an ISR
+timer was due within a millisecond of every alarm. Any interrupt held
+off that long could lose the wake-up: a flash write, a long critical
+section, the stress tests at boot. That is why the time of death varied.
+
+### The fix
+
+- **The kernel tick left `esp_timer`.** It is now a FreeRTOS tick hook,
+  at the same 1 kHz, from the host's own tick interrupt.
+  `xPortSysTickHandler` calls the hooks unconditionally, so it still
+  fires while the scheduler is suspended. A static assert holds
+  `RV9K_TICK_HZ` to `CONFIG_FREERTOS_HZ`.
+- **A guard for what remains.** The real-time release timers and the
+  watchdog still dispatch from the ISR, because they need its precision,
+  so the loss is still possible. A 100 ms task-dispatched heartbeat is
+  watched from the FreeRTOS tick. If it goes 300 ms without beating, the
+  tick wakes `esp_timer`'s task directly. A wake with nothing due costs
+  one empty pass, so a false alarm is harmless. Each wake is logged with
+  a running count.
+- **`esp_timer`'s own yield API.** The ISR-dispatched callbacks in
+  `kal_rt.c` used `portYIELD_FROM_ISR()`. They now call
+  `esp_timer_isr_dispatch_need_yield()`, which is what ESP-IDF specifies
+  for them.
+
+### A link that stays up
+
+The watch that started this now works, because the timers it depends on
+do:
+
+- An attempt with no answer for 20 s is restarted. If even that brings
+  nothing, the next tick connects directly.
+- After five failures it gives up for 30 s, doubling to 5 minutes, then
+  tries again. When the failed network was only being tried, it goes
+  back to the remembered one.
+- `wifi try <ssid> <password>` connects without saving
+  (`RV9_NET_SS_TRY`), so a network being tried cannot replace the one
+  that works.
+- A manual disconnect now stays disconnected. Its own event used to
+  start a retry.
+
+### Tested
+
+One boot, driven over serial:
+
+```
+suites: kal 45, conform 23, mod 17, io 44, pub 38,
+        fault 76, proc 11, sched 15, mem 13
+scan after the suites:          networks found, link still up
+scan after a real-time loop:    networks found, link still up
+wifi try rv9-no-such-network:
+  disconnected: reason 201, retry 1 ... retry 5
+  giving up on 'rv9-no-such-network' for now: reason 201; trying again in 30 s
+  'rv9-no-such-network' failed; going back to remembered '<home network>'
+  up after 94 s; SSH answers
+panics: 0
+```
+
+Before the fix, the same sequence left `scan` finding nothing and the
+fallback never happening. Eight consecutive resets on the watch firmware
+all joined the network in about 2.1 s. That alone proves little, since
+the old warning had appeared on only 2 of 28 boots.
+
+On a later boot the guard woke the task twice:
+
+- **At 1.0 s**, during WiFi start-up and before any real-time work. Most
+  likely a false alarm: start-up can keep the task off the CPU that long.
+- **At 26.8 s**, five seconds after services came up, with no real-time
+  loop running. This one is probably real. The watchdog's 2 ms
+  ISR-dispatched timer starts at the first real-time declaration (2.9 s
+  into boot) and never stops, so it is a standing trigger for the loss
+  whether or not any loop is running.
+
+### What this does not do
+
+**The underlying ESP-IDF behaviour is not fixed.** Any ISR-dispatched
+`esp_timer` can still trigger it, and the watchdog's runs permanently.
+The guard recovers from the loss; it does not prevent it. Stopping the
+watchdog's timer while no real-time task exists would remove the standing
+trigger, and is not done.
+
+**Recovery takes up to about 300 ms.** A task timer due in that window
+runs late, once.
+
+**It may explain more than it was found for.** The roadmap's open item,
+short SSH sessions losing their output on a poor link, has not been
+retested. lwIP does not use `esp_timer`, but the WiFi driver does, and
+retransmission on a poor link leans on it.
+
+**Fallback is slow.** Five retries at about ten seconds each, each a full
+scan of both bands, plus the first 30 s of backoff, is about a minute and
+a half before the board returns to the network that works.
+
+## 9. Migration to a native kernel
+
 The point of the KAL. When the personality layer is working and the design has
 been validated by use:
 

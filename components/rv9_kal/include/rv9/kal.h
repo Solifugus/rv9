@@ -130,6 +130,7 @@ void      rv9_task_delete(rv9_task_t task);
  */
 rv9_err_t rv9_task_stack(rv9_task_t task, size_t *size, size_t *unused);
 
+
 /*
  * Why a task stopped, if it stopped for a reason worth naming.
  *

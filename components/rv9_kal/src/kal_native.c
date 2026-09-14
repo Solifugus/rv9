@@ -28,6 +28,7 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_freertos_hooks.h"
 #include "esp_timer.h"
 
 /*
@@ -55,13 +56,32 @@ static const char *TAG = "rv9-kal";
 static volatile uint32_t *s_tick_ref;
 
 /*
+ * The kernel's tick, on the host's own tick interrupt.
+ *
  * IRAM, and it calls nothing. An interrupt here can arrive while the flash
  * cache is disabled -- the WiFi driver writes NVS -- and anything living
  * in flash is unreachable then.
+ *
+ * It used to be a 1 kHz esp_timer with ISR dispatch, and that quietly broke
+ * every task-dispatched esp_timer on the board, the WiFi driver's included.
+ * esp_timer's alarm handler wakes its task only when the same interrupt ran
+ * no ISR-dispatched timer; when the interrupt is serviced late enough that
+ * a task timer and this tick are both due, it drops the task's alarm on
+ * entry, runs the tick, and never wakes the task -- which is the only thing
+ * that would have re-armed that alarm. From then on no task timer ever ran:
+ * scans never finished, connects never completed, and nothing said so.
+ * With this interrupt at 1 kHz, "late enough" was a matter of seconds.
+ *
+ * The FreeRTOS tick runs the same rate from its own timer, calls this hook
+ * whether or not the scheduler is suspended, and involves esp_timer not at
+ * all. See also rv9_kal_timer_guard_start(), for the esp_timer ISR users
+ * that remain.
  */
-static void IRAM_ATTR tick_isr(void *arg)
+_Static_assert(RV9K_TICK_HZ == CONFIG_FREERTOS_HZ,
+               "the kernel tick rides the FreeRTOS tick: the rates must agree");
+
+static void IRAM_ATTR tick_hook(void)
 {
-    (void)arg;
     if (s_tick_ref) (*s_tick_ref)++;
 }
 
@@ -156,17 +176,10 @@ rv9_err_t rv9_kal_start(rv9_task_fn fn, const char *name, size_t stack_bytes,
     rv9k_heap_init(region, KERNEL_HEAP_BYTES);
 
     s_tick_ref = rv9k_tick_ref();
-
-    const esp_timer_create_args_t tick = {
-        .callback        = tick_isr,
-        .dispatch_method = ESP_TIMER_ISR,
-        .name            = "rv9k-tick",
-    };
-    esp_timer_handle_t h = NULL;
-    if (esp_timer_create(&tick, &h) != ESP_OK) return RV9_ERR_NOMEM;
-    if (esp_timer_start_periodic(h, 1000000 / RV9K_TICK_HZ) != ESP_OK) {
+    if (esp_register_freertos_tick_hook(tick_hook) != ESP_OK) {
         return RV9_ERR_NOMEM;
     }
+    rv9_kal_timer_guard_start();
 
     rv9k_set_idle_hook(host_idle);
 

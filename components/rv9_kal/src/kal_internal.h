@@ -25,3 +25,6 @@
  * arrangement worth keeping.
  */
 rv9k_thread_t *rv9_kal_self_thread(void);
+
+/* kal_rt.c: keeps esp_timer's task timers alive; see there. Idempotent. */
+void rv9_kal_timer_guard_start(void);

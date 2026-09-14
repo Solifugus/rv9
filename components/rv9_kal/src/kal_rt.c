@@ -51,6 +51,7 @@
 
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_freertos_hooks.h"
 #include "esp_timer.h"
 
 #include "riscv/rvruntime-frames.h"
@@ -448,7 +449,9 @@ static void IRAM_ATTR release_isr(void *arg)
     BaseType_t woken = pdFALSE;
 
     xSemaphoreGiveFromISR(rt->release, &woken);
-    if (woken) portYIELD_FROM_ISR();
+    /* esp_timer's own way to ask for a switch from an ISR-dispatched
+       callback: it yields once, after every timer due has run. */
+    if (woken) esp_timer_isr_dispatch_need_yield();
 }
 
 /* ------------------------------------------------------------------ */
@@ -534,7 +537,7 @@ static void IRAM_ATTR watch_isr(void *arg)
     if (wake) {
         BaseType_t woken = pdFALSE;
         xSemaphoreGiveFromISR(s_watch_wake, &woken);
-        if (woken) portYIELD_FROM_ISR();
+        if (woken) esp_timer_isr_dispatch_need_yield();
     }
 }
 
@@ -593,9 +596,103 @@ static void report_host_priorities(void)
     }
 }
 
+/*
+ * Keeping esp_timer's task timers alive.
+ *
+ * esp_timer can lose its task's wake-up for good when an ISR-dispatched
+ * timer and a task timer fall due in the same late interrupt: the task's
+ * alarm is dropped on entry, the ISR timer runs, and the task -- the only
+ * thing that re-arms that alarm -- is never woken. Every task-dispatched
+ * timer on the board then stops: the WiFi driver's scan and connect timers
+ * among them. See tick_hook() in kal_native.c for how it was found.
+ *
+ * The kernel tick no longer uses esp_timer, which was the constant trigger.
+ * The real-time release timers and the watchdog above still dispatch from
+ * the ISR, because they need its precision, so the loss is still possible
+ * while real-time work runs. So: a task-dispatched heartbeat, and a check
+ * on the FreeRTOS tick -- which does not depend on esp_timer -- that wakes
+ * esp_timer's task if the heartbeat stops. A wake with nothing due costs
+ * the task one empty pass, so a false alarm is harmless; the task says so
+ * in the log when it was woken this way.
+ */
+#define GUARD_BEAT_US       100000
+#define GUARD_CHECK_TICKS   100
+#define GUARD_STALE_CHECKS  3        /* 300 ms without a beat */
+
+static volatile uint32_t s_beat;
+static uint32_t          s_beat_seen;
+static uint32_t          s_guard_ticks;
+static uint32_t          s_guard_stale;
+static volatile uint32_t s_guard_wakes;
+static uint32_t          s_guard_wakes_told;
+static TaskHandle_t      s_esp_timer_task;
+static int               s_guard_started;
+
+static void guard_beat(void *arg)
+{
+    (void)arg;
+    s_beat++;
+    uint32_t wakes = s_guard_wakes;
+    if (wakes != s_guard_wakes_told) {
+        s_guard_wakes_told = wakes;
+        /* Not "it was stuck": a busy boot can keep the task off the CPU
+           for as long. The wake is harmless either way; the count is what
+           to watch, and one that keeps rising is the fault coming back. */
+        ESP_LOGW(TAG, "esp_timer's task ran no timer for %d ms; the tick guard "
+                      "woke it (%lu time%s since boot)",
+                 GUARD_STALE_CHECKS * GUARD_CHECK_TICKS,
+                 (unsigned long)wakes, wakes == 1 ? "" : "s");
+    }
+}
+
+static void IRAM_ATTR guard_tick(void)
+{
+    if (++s_guard_ticks < GUARD_CHECK_TICKS) return;
+    s_guard_ticks = 0;
+
+    uint32_t beat = s_beat;
+    if (beat != s_beat_seen) {
+        s_beat_seen = beat;
+        s_guard_stale = 0;
+        return;
+    }
+    if (++s_guard_stale < GUARD_STALE_CHECKS) return;
+    s_guard_stale = 0;
+
+    s_guard_wakes++;
+    BaseType_t woken = pdFALSE;
+    vTaskNotifyGiveFromISR(s_esp_timer_task, &woken);
+    if (woken) portYIELD_FROM_ISR();
+}
+
+void rv9_kal_timer_guard_start(void)
+{
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&s_guard_started, &expected, 1, false,
+                                     __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+        return;
+    }
+
+    s_esp_timer_task = xTaskGetHandle("esp_timer");
+    const esp_timer_create_args_t args = {
+        .callback = guard_beat,
+        .name     = "rv9-beat",
+    };
+    esp_timer_handle_t beat = NULL;
+    if (s_esp_timer_task == NULL ||
+        esp_timer_create(&args, &beat) != ESP_OK ||
+        esp_timer_start_periodic(beat, GUARD_BEAT_US) != ESP_OK ||
+        esp_register_freertos_tick_hook(guard_tick) != ESP_OK) {
+        ESP_LOGE(TAG, "no esp_timer guard: a lost timer wake-up will not be "
+                      "recovered");
+    }
+}
+
 /* Once, at the first declaration: nothing to watch before that. */
 static void watch_start(void)
 {
+    rv9_kal_timer_guard_start();
+
     int expected = 0;
     if (!__atomic_compare_exchange_n(&s_watch_started, &expected, 1, false,
                                      __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
