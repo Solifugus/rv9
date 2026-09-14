@@ -4852,15 +4852,42 @@ because the listener is now kept on purpose. The test waits out the grace
 period and lets NFM reap before it measures. On three boots it passed 76
 of 76 with the heap slightly higher than before.
 
-### Still open: one session in thirty with no output
+### Output lost after it was sent
 
-One session in a run of thirty still gets no output at all, not even the
-shell's banner. Its client trace at `-vv` is line for line the same as a
-session that worked: channel opened, shell accepted, exit status, EOF,
-close, "session ended". The board logs only "session ended". The traces
-show that the session ran and closed cleanly. They do not show where its
-output went, and that is being chased with per-session byte counts in
-the driver.
+With refusals gone, about one session in thirty still got no output at
+all, not even the shell's banner. Its client trace at `-vv` matched a
+session that worked, line for line.
+
+Temporary per-session counters in the driver settled where the bytes
+went. For the empty sessions they were identical to the good ones: the
+10 input bytes received, 274 bytes written by the shell, 257 sent on the
+wire before close and the last 17 at close, nothing refused, no flag set
+early. The board had sent everything.
+
+It was the goodbye. `ssh_close` sent exit status, channel EOF, channel
+close, and then straight away `SSH_MSG_DISCONNECT`. When the last channel
+data and that disconnect arrive in one read, the OpenSSH client queues
+the data for its stdout, handles the disconnect, and exits before the
+queue is written. That is the roadmap's "short sessions lose their
+output". A slow link bunches packets together, which is why it was
+first seen on one. The same disconnect made every session exit 255 rather
+than with its status.
+
+The channel close is what ends a session. A client whose only channel is
+closed closes the connection itself, and `ssh_close` already drains and
+waits for exactly that. The disconnect is now sent only if the client is
+still there when that wait runs out.
+
+```
+60 sessions:  ok 59, exit 0: 59, one empty (exit 255, unexplained)
+60 sessions:  ok 60, exit 0: 60   (serial log and client messages kept)
+```
+
+A long session and the §35 budget demo behave as before. The one empty
+session in the first run came while the client was logging errors only
+and the serial log was not captured, so its cause is not known. An earlier
+run did show one session lost to a real WiFi dropout ("disconnected:
+reason 1"), which the §38 link watch recovered.
 
 ### Also seen: a real-time release skipped
 

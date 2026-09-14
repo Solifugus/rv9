@@ -564,6 +564,7 @@ static rv9_io_err_t ssh_close(rv9_dev_t *dev)
     ssh_t *s = (ssh_t *)dev->drv_state;
     if (s == NULL) return RV9_IO_OK;
 
+
     if (!s->eof && s->chan_open) {
         ssh_flush(s);
 
@@ -580,28 +581,29 @@ static rv9_io_err_t ssh_close(rv9_dev_t *dev)
 
         send_chan_reply(s, SSH_MSG_CHANNEL_EOF);
         send_chan_reply(s, SSH_MSG_CHANNEL_CLOSE);
-        ssh_disconnect(s, SSH_DISCONNECT_BY_APPLICATION, "session ended");
     }
 
     /*
      * Wait for the client to hang up before we do.
      *
-     * This is the difference between a session that works and one that
-     * appears never to have run. Closing immediately after the last write
-     * loses that write: the bytes are still in flight, the client has not
-     * read them, and tearing the connection down throws them away. Over a
-     * link with a couple of hundred milliseconds of round trip, that is
-     * every session short enough to finish in one -- which is every
-     * scripted one.
+     * Closing immediately after the last write loses that write: the bytes
+     * are still in flight, and tearing the connection down throws them
+     * away. So the client is left to close first, which proves everything
+     * before it arrived, and we drain while we wait -- a socket closed with
+     * data unread is reset, and a reset discards the same bytes for a
+     * different reason.
      *
-     * The client closes once it has read our disconnect, so its hang-up is
-     * proof that everything before it arrived. Waiting for that is both
-     * the simplest correct rule and the only one that does not involve
-     * guessing at a delay.
-     *
-     * Draining as we wait matters too: a socket closed with data still
-     * unread is reset rather than finished, and a reset discards the same
-     * bytes for a different reason.
+     * What ends the session is the channel close above, not a DISCONNECT.
+     * This used to send SSH_MSG_DISCONNECT straight after it, and that lost
+     * output on its own: when the last channel data and the disconnect
+     * arrive in one read, OpenSSH queues the data for its stdout, handles
+     * the disconnect, and exits before the queue is written. One short
+     * session in thirty lost everything that way on a good link, with the
+     * driver's own counts showing every byte sent -- and on a slow link,
+     * where packets bunch up, it is most of them. It also made every
+     * session exit 255 instead of with its status. A client closes the
+     * connection by itself once its only channel is closed; the disconnect
+     * is kept for a client that has not done so by the deadline.
      */
     if (s->net != NULL) {
         uint32_t on = 1;
@@ -609,12 +611,18 @@ static rv9_io_err_t ssh_close(rv9_dev_t *dev)
             uint64_t deadline = rv9_time_us() + 3000000;
             uint8_t  sink[64];
 
+            bool gone = false;
             while (rv9_time_us() < deadline) {
                 size_t got = 0;
                 rv9_io_err_t err = rv9_io_read_path(s->net, sink, sizeof(sink),
                                                     &got);
                 if (err == RV9_IO_ERR_WOULDBLOCK) { rv9_task_delay_ms(10); continue; }
-                if (err != RV9_IO_OK || got == 0) break;   /* it has gone */
+                if (err != RV9_IO_OK || got == 0) { gone = true; break; }
+            }
+
+            /* Still there: now say goodbye explicitly, and go regardless. */
+            if (!gone && !s->eof) {
+                ssh_disconnect(s, SSH_DISCONNECT_BY_APPLICATION, "session ended");
             }
         }
     }

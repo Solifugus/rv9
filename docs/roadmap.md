@@ -485,8 +485,11 @@ attention as RBF.
 
 ### Waiting on a normal network
 
-- **Short SSH sessions lose their output on a poor link** (phase 9). A
-  packet capture is the first move.
+- ~~**Short SSH sessions lose their output on a poor link**~~ (phase 9).
+  Found without one: the server sent a DISCONNECT straight after closing
+  the channel, and OpenSSH exits on it before writing output that arrived
+  in the same read. Fixed, with sessions also stopped being refused
+  between connections (design §40). Worth re-checking on a poor link.
 
 ### Ready whenever
 
