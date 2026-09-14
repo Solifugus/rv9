@@ -704,7 +704,7 @@ static rv9_io_err_t ssh_send_data(ssh_t *s, const void *buf, size_t len)
         size_t n = len - sent;
         if (n > s->peer_maxpkt)   n = s->peer_maxpkt;
         if (n > s->peer_window)   n = s->peer_window;
-        if (n > SSH_BUF_MAX - 64) n = SSH_BUF_MAX - 64;
+        if (n > sizeof(s->out) - 64) n = sizeof(s->out) - 64;
 
         ssh_buf_t p;
         ssh_packet_begin(s, &p);

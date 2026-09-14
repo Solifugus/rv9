@@ -4726,6 +4726,85 @@ retransmission on a poor link leans on it.
 scan of both bands, plus the first 30 s of backoff, is about a minute and
 a half before the board returns to the network that works.
 
+## 39. What a session costs
+
+§35 found that inside an SSH session, with one command running, 3.4 KB
+was left for programs. §37 made commands cheaper. This section makes the
+session itself cheaper.
+
+### Where a session's memory goes
+
+Three things exist for as long as a session lasts:
+
+- **The driver's session state**, `ssh_t`, allocated when `/ssh0` is
+  opened. It is mostly buffers: `in` and `frame` at 2,560 bytes and more,
+  `out` at 2,560, the window's `pend` at 2,048, `obuf` at 1,024, and the
+  key exchange's copies `v_c` and `i_s` at 768. That is about 12 KB, and
+  budgets do not see it, because a driver allocates it rather than a fork.
+- **The session's shell**: its stack, statics and descriptor.
+- **`sshd`'s own stack**, which is paid once, session or not.
+
+### What was cut
+
+- **`out` went from 2,560 to 1,280 bytes.** Incoming packets can be large,
+  such as an OpenSSH KEXINIT full of post-quantum names or an RSA-4096 key
+  offer, so `in` and `frame` stay as they were. `frame` also holds incoming
+  ciphertext. Outgoing packets never are large: channel data goes out in
+  chunks of at most 1,024 bytes, and the largest other thing sent is the
+  server's own KEXINIT, at most 512. `ssh_send_data` now caps chunks to
+  `out` itself rather than to `SSH_BUF_MAX`. Static asserts hold both
+  facts, and a packet that did not fit would fail `ssh_packet_send()`
+  cleanly rather than overrun.
+- **Stacks, measured inside a live session.**
+
+  | | used | was | now |
+  |---|---|---|---|
+  | session shell | 1,440 | 4,096 | 2,560 |
+  | `sshd` (handshake included) | 2,520 | 4,096 | 3,584 |
+  | `rshd` | 1,136 | 3,072 | 2,560 |
+
+  The session shell's figure includes its output being encrypted on its
+  own stack, since `ssh_flush` runs there when `obuf` fills.
+
+A session now costs about 2.8 KB less, and the daemons 1 KB less at all
+times.
+
+### Tested
+
+All boot suites pass. In a live session, with ordinary commands, drawing
+and `stacks` run inside it:
+
+```
+pid  name     size  used  spare
+34   shell    2560  1448  1112    (the session's)
+32   sshd     3584  2520  1064
+31   rshd     2560  1148  1412
+```
+
+`budgets` shows `sshd` holding 11,504 bytes, against 13,552 before, and
+the session's shell 4,200 against 5,736. Those are exact figures, unlike
+heap readings.
+
+The §35 demonstration, re-run: background `deaf` jobs are started inside
+a session until one is refused. It used to stop at five. It now stops at
+**eight**. The shell's own `procs` and `kill` then answered with memory
+exhausted, on the smaller stack, and the serial log shows no stack fault.
+
+### What this does not do
+
+**`in` and `frame` are still 5 KB between them.** Decrypting in place
+would remove one, and depends on how the PSA implementation handles
+overlapping buffers.
+
+**The key exchange's copies (768 bytes) live for the whole session.**
+They are needed only during the handshake.
+
+**Drawing to `/w0` still cannot run in a session.** Opening the window
+allocates about 12 KB, and a session does not have that.
+
+**`ed` still cannot run in a session.** Its 9 KB is statics, the text
+buffer itself.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

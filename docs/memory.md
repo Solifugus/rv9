@@ -132,13 +132,23 @@ WiFi calls, and passwords that hash and write flash, were not measured on
 their real paths and keep 3–4 KB. The eight-kilobyte default remains for
 a module that declares nothing.
 
+### A session (2026-09-14)
+
+An SSH session costs its driver state (`ssh_t`, about 12 KB of buffers,
+not charged to any budget), its shell, and nothing else. Its outgoing
+buffer is now sized to what is actually sent, and the shell's, `sshd`'s
+and `rshd`'s stacks to what they were measured using inside a live
+session, which saves about 2.8 KB per session. A session now holds eight
+background jobs before memory runs out, against five before. See
+design.md §39.
+
 ## Dynamic / shared RAM
 
 Taken while in use and returned afterwards.
 
 | item | bytes | when |
 |---|---|---|
-| SSH session | ~10,500 | while connected; one at a time |
+| SSH session | ~9,200 | while connected; one at a time. Its send buffer was cut by 1,280 bytes to what is actually sent (design.md §39) |
 | window buffers (`/w0`) | ~11,900 | while open: document 4,096, band 5,120, coverage 640, points 2,048 |
 | filesystem buffers | in the mount | RBF holds its structures at mount |
 | network packets | lwIP's pools | inside the 52 KB above |

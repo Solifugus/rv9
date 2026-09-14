@@ -80,6 +80,20 @@
 #define SSH_MAX_PAYLOAD   1024u
 #define SSH_PEND_MAX      (SSH_WINDOW_INIT + SSH_MAX_PAYLOAD)
 
+/*
+ * The largest packet this server sends, plaintext.
+ *
+ * Incoming packets can be large -- an OpenSSH KEXINIT with every post-
+ * quantum name, or an RSA-4096 key offer -- so `in` and `frame` stay at
+ * SSH_BUF_MAX. Outgoing ones never are: channel data goes out in chunks of
+ * at most SSH_MAX_PAYLOAD (ssh_send_data caps them to this buffer), and the
+ * largest other thing sent is the server's own KEXINIT, which is kept in
+ * `i_s` and so is at most its 512 bytes. `out` was SSH_BUF_MAX anyway, and
+ * every session paid 1.3 KB for room nothing used. A packet that did not
+ * fit fails ssh_packet_send() cleanly rather than overrunning.
+ */
+#define SSH_OUT_MAX       (SSH_MAX_PAYLOAD + 256u)
+
 /* ------------------------------------------------------------------ */
 /* Message numbers                                                     */
 /* ------------------------------------------------------------------ */
@@ -357,13 +371,18 @@ typedef struct {
      * so a payload is built where it will be framed and encrypted rather
      * than copied there afterwards.
      */
-    uint8_t  out[SSH_BUF_MAX];
+    uint8_t  out[SSH_OUT_MAX];
 
     /* On the wire: length, ciphertext and tag. Big enough for either
        direction, and here rather than on the stack because a process
        running the shell does not have four kilobytes to spare. */
     uint8_t  frame[SSH_BUF_MAX + 64];
 } ssh_t;
+
+_Static_assert(SSH_OUT_MAX >= SSH_MAX_PAYLOAD + 64,
+               "a full chunk of channel data must fit a packet");
+_Static_assert(SSH_OUT_MAX >= sizeof(((ssh_t *)0)->i_s) + 64,
+               "the server's KEXINIT must fit a packet");
 
 #define SSH_PAYLOAD(s) ((s)->in + 1)
 
