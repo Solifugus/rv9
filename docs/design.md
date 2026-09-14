@@ -4693,18 +4693,26 @@ On a later boot the guard woke the task twice:
 - **At 1.0 s**, during WiFi start-up and before any real-time work. Most
   likely a false alarm: start-up can keep the task off the CPU that long.
 - **At 26.8 s**, five seconds after services came up, with no real-time
-  loop running. This one is probably real. The watchdog's 2 ms
-  ISR-dispatched timer starts at the first real-time declaration (2.9 s
-  into boot) and never stops, so it is a standing trigger for the loss
-  whether or not any loop is running.
+  loop running. This one was probably real. The watchdog's 2 ms
+  ISR-dispatched timer started at the first real-time declaration (2.9 s
+  into boot) and never stopped, so it was a standing trigger for the loss
+  whether or not any loop was running.
+
+So the watchdog's timer now runs only while a real-time slot is claimed.
+`claim_slot()` arms it and `release_slot()` stops it when none is left.
+Both take one lock, and the idle count is of claimed slots rather than
+active ones, so a release cannot stop the timer between a claim and its
+arming. On the next boot, every suite passed, five idle minutes after
+services brought no guard wake at all (the only wake was the start-up
+one at 1.0 s), and `rt fastloop` then ran normally, the watchdog re-armed
+for it.
 
 ### What this does not do
 
-**The underlying ESP-IDF behaviour is not fixed.** Any ISR-dispatched
-`esp_timer` can still trigger it, and the watchdog's runs permanently.
-The guard recovers from the loss; it does not prevent it. Stopping the
-watchdog's timer while no real-time task exists would remove the standing
-trigger, and is not done.
+**The underlying ESP-IDF behaviour is not fixed.** The release timers and
+the watchdog still dispatch from the ISR while real-time work runs, and
+can trigger the loss then. The guard recovers from it within about
+300 ms; it does not prevent it.
 
 **Recovery takes up to about 300 ms.** A task timer due in that window
 runs late, once.

@@ -688,6 +688,48 @@ void rv9_kal_timer_guard_start(void)
     }
 }
 
+/*
+ * The watchdog's timer runs only while some real-time task exists.
+ *
+ * It dispatches from the ISR every 2 ms, and every ISR-dispatched esp_timer
+ * is a chance for esp_timer to lose its task's wake-up (see the guard
+ * above). Left running from the first declaration onwards it was a
+ * standing trigger on an idle board: the guard had to recover a lost wake
+ * 27 s into one boot with no loop in sight. Nothing to watch, no timer.
+ *
+ * Counted by claimed slots rather than active ones, and under one lock, so
+ * a release cannot stop the timer between a claim and its arming: the claim
+ * is visible before it asks, and the release counts after it lets go.
+ */
+static SemaphoreHandle_t s_watch_lock;
+static bool              s_watch_running;
+
+static void watch_arm(void)
+{
+    if (s_watch_lock == NULL || s_watch_timer == NULL) return;
+    xSemaphoreTake(s_watch_lock, portMAX_DELAY);
+    if (!s_watch_running &&
+        esp_timer_start_periodic(s_watch_timer, WATCH_US) == ESP_OK) {
+        s_watch_running = true;
+    }
+    xSemaphoreGive(s_watch_lock);
+}
+
+static void watch_disarm_if_idle(void)
+{
+    if (s_watch_lock == NULL || s_watch_timer == NULL) return;
+    xSemaphoreTake(s_watch_lock, portMAX_DELAY);
+    int claimed = 0;
+    for (int i = 0; i < MAX_RT_TASKS; i++) {
+        if (s_rt[i].task != NULL) claimed++;
+    }
+    if (claimed == 0 && s_watch_running) {
+        esp_timer_stop(s_watch_timer);
+        s_watch_running = false;
+    }
+    xSemaphoreGive(s_watch_lock);
+}
+
 /* Once, at the first declaration: nothing to watch before that. */
 static void watch_start(void)
 {
@@ -713,9 +755,13 @@ static void watch_start(void)
         .dispatch_method = ESP_TIMER_ISR,
         .name            = "rv9-rtwatch",
     };
-    if (esp_timer_create(&args, &s_watch_timer) != ESP_OK ||
-        esp_timer_start_periodic(s_watch_timer, WATCH_US) != ESP_OK) {
+    /* Created here, run only while there is something to watch: see
+       watch_arm(). */
+    s_watch_lock = xSemaphoreCreateMutex();
+    if (s_watch_lock == NULL ||
+        esp_timer_create(&args, &s_watch_timer) != ESP_OK) {
         ESP_LOGE(TAG, "no watchdog timer");
+        s_watch_timer = NULL;
         return;
     }
 
@@ -781,6 +827,7 @@ static rt_task_t *claim_slot(TaskHandle_t self)
             memset(&s_rt[i], 0, sizeof(s_rt[i]));
             s_rt[i].task = self;
             s_rt[i].min_interval_us = UINT32_MAX;
+            watch_arm();
             return &s_rt[i];
         }
     }
@@ -1124,6 +1171,8 @@ static void release_slot(rt_task_t *rt)
     rt->task   = NULL;
     rt->event  = NULL;
     xTaskResumeAll();
+
+    watch_disarm_if_idle();
 
     /* An event-driven task borrowed its release source; it did not make it,
        and the device it belongs to is still there. Only let go of it. */
