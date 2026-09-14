@@ -48,7 +48,7 @@ static void banner(void)
 
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "RV-9 %s", RV9_VERSION);
-    ESP_LOGI(TAG, "a modular OS for RISC-V, after OS-9");
+    ESP_LOGI(TAG, "a modular OS for RISC-V");
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "  core     RISC-V, %d core%s, rev v%d.%d",
              chip.cores, chip.cores == 1 ? "" : "s",
@@ -273,7 +273,7 @@ static void term_banner(void)
 
     /* The console is 30 columns wide. Keep lines short or they wrap. */
     rv9_io_puts(t, "RV-9 " RV9_VERSION "\n");
-    rv9_io_puts(t, "RISC-V, after OS-9\n");
+    rv9_io_puts(t, "a modular OS for RISC-V\n");
     rv9_io_puts(t, "\n");
 
     rv9_io_close(t);

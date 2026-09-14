@@ -1,7 +1,7 @@
 # RV-9
 
-**A small modular operating system for RISC-V, in the spirit of Microware
-OS-9 — built to run the machines that move.**
+**A small modular operating system for RISC-V, built to run the machines that
+move. Its design is inspired by the classic OS-9 architecture.**
 
 RV-9 runs on an ESP32-C5: one RISC-V core at 240 MHz, WiFi 6, 4 MB of flash,
 and about a quarter of a megabyte of RAM, with no PSRAM. Everything above
@@ -17,8 +17,11 @@ real-world systems such as drones and robots. R9 components declare their
 period, deadline, cost, memory and the devices they own, and RV-9 enforces
 those declarations.
 
-It is not an OS-9 clone. It has no binary compatibility and does not try to
-run old software. The ideas are worth stealing; the 1980s encodings are not.
+RV-9 is not OS-9. It is an independent project, not affiliated with or
+endorsed by the owner of OS-9, and it contains no OS-9 code. It has no
+binary compatibility and cannot run OS-9 software. It borrows general
+architectural ideas, credited below, and nothing else. See
+[Name and trademarks](#name-and-trademarks).
 
 From the board's boot log. A loop with 2 ms of work every 5 ms, which must
 answer within 3 ms, runs beside a loop with 15 ms of work every 100 ms:
@@ -50,7 +53,7 @@ At a single priority, the fast loop missed a deadline and was stopped
 ## What makes it different
 
 ### Code is a runtime object
-As in OS-9, programs, drivers, file managers and device descriptors are
+Programs, drivers, file managers and device descriptors are
 **position-independent memory modules**. Each is CRC-checked, versioned, and
 found by name in a module directory. A module can be fetched over WiFi,
 written to flash, and run after a reboot without the firmware ever being
@@ -222,6 +225,16 @@ Still to come:
   asynchronous preemption
 - **WiFi on RV-9's own primitives** (`wifi_osi_funcs_t`)
 - **PMP memory isolation between processes**
+
+## Name and trademarks
+
+OS-9 is a trademark of its respective owner. RV-9 is not OS-9, is not a
+version, port or derivative of it, and is not affiliated with, sponsored by
+or endorsed by the owner of OS-9. The name OS-9 appears in this repository
+only to acknowledge where some of RV-9's design ideas came from: memory
+modules, and the split between file managers, drivers and device
+descriptors. Occasionally it is also used for historical comparison. RV-9
+shares no code, file formats or binary interfaces with OS-9.
 
 ## Author
 

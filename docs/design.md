@@ -1,6 +1,6 @@
 # RV-9 — Design
 
-A small modular operating system for RISC-V, in the spirit of Microware OS-9.
+A small modular operating system for RISC-V, inspired by the classic OS-9 architecture.
 
 Status: phases 0-6 complete; phase 7 steps 1-2 done, and **the whole
 system now runs on RV-9's own kernel** — processes, I/O, storage,
@@ -12,18 +12,22 @@ priority aging, all verified on hardware. See docs/roadmap.md.
 
 ## 1. What this is
 
-RV-9 is an attempt to rebuild what made OS-9 pleasant — position-independent
-memory modules, a unified I/O model, real preemptive multitasking in a very
-small footprint — on a modern RISC-V microcontroller with WiFi.
+RV-9 is an independent operating system. Some of its design ideas come from
+the classic OS-9 architecture: position-independent memory modules, a
+unified I/O model, and real preemptive multitasking in a very small
+footprint. It rebuilds them on a modern RISC-V microcontroller with WiFi.
 
-It is **not** a clone. No binary compatibility with OS-9 modules, no attempt to
-run existing OS-9 software. The ideas are worth stealing; the 1980s encodings
-are not.
+It is **not** OS-9, and not a port, version or derivative of it. It is not
+affiliated with or endorsed by the owner of OS-9, and it contains no OS-9
+code. It has no binary compatibility with OS-9 modules and makes no attempt
+to run OS-9 software. OS-9 is a trademark of its respective owner. It is
+named in this document only to credit where ideas came from, and
+occasionally for historical comparison.
 
 ### Goals
 
 - A module format and module directory that make code a first-class runtime object
-- The OS-9 I/O model: file managers, drivers and device descriptors as separate,
+- An I/O model with file managers, drivers and device descriptors as separate,
   independently loadable pieces
 - Preemptive priority scheduling with aging
 - Networking that feels like the rest of the I/O system, not a bolted-on socket API
@@ -37,7 +41,8 @@ are not.
 
 ### The honest motivation
 
-The author likes RISC-V and liked OS-9. That is sufficient.
+The author likes RISC-V and admired the small modular systems of the 1980s.
+That is sufficient.
 
 ---
 
@@ -64,7 +69,7 @@ default, not weaker.
 
 The RAM figure is the dominant constraint in every decision below. It is
 measured on hardware with nothing but the KAL resident; WiFi and lwIP will
-take a large bite out of it. OS-9 ran well in 64 KB, so the kernel is not the
+take a large bite out of it. Systems of that era ran well in 64 KB, so the kernel is not the
 problem — the guest is.
 
 ---
@@ -273,7 +278,7 @@ while appearing to run together.
 
 ## 7. I/O — the good part
 
-The OS-9 I/O model, kept nearly intact, because it is better than what most
+An I/O model after the classic OS-9 structure, because it is better than what most
 small systems do:
 
 ```
@@ -376,7 +381,7 @@ line, and `echo` contains no code for either.
 
 Device **descriptors** are real loadable modules: `rv9_io_attach_from_modules()`
 scans the store for `RV9_MOD_DESCRIPTOR` modules and binds each one. Adding a
-device is adding a module — no kernel rebuild, exactly as OS-9 intended.
+device is adding a module — no kernel rebuild.
 
 File managers and drivers are *interfaces* but are still compiled in. The
 module ABI cannot yet express what a driver needs — register access,
@@ -1271,7 +1276,7 @@ and it belongs in a test rather than in a habit.
   obvious next thing, and it needs the periods and inter-arrival bounds that
   are already being declared and recorded.
 - **Non-real-time processes waiting on events.** An ordinary process should
-  be able to block in `read()` on an armed pin — the OS-9 shape, where a
+  be able to block in `read()` on an armed pin — the classic shape, where a
   blocking read is how you wait for a device. The event object is already
   the right rendezvous for it; what is missing is the cooperative kernel's
   side of the wait.
@@ -5021,7 +5026,7 @@ been validated by use:
 2. Satisfy the KAL with them; the personality layer does not change
 3. Implement `wifi_osi_funcs_t` against RV-9 primitives — the blobs never know
 4. Port lwIP `sys_arch` to RV-9 — one file
-5. Add PMP-based process isolation, which real OS-9 on a bare 6809 never had
+5. Add PMP-based process isolation, which the 8-bit systems of the 1980s never had
 
 Throughout, the FreeRTOS build stays alive as a reference: any behavioural
 divergence is a bug in the new kernel, and you have a working system to diff
@@ -5046,4 +5051,4 @@ with no oracle.
 - PIC modules or fixed load addresses?
 - Native filesystem on the SD card, or FAT forever?
 - Does the LP RISC-V core get a role, or stay unused?
-- Shell: OS-9-flavoured, or something new?
+- Shell: a traditional one, or something new?

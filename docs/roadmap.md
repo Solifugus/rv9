@@ -48,7 +48,7 @@ boot, verified, loaded, and its entry point called.
 
 ## Phase 2 — Processes  ✅ done
 
-**Goal:** more than one thing running, scheduled the way OS-9 did it.
+**Goal:** more than one thing running, with priority scheduling and aging.
 
 - Process descriptor, state machine, process table
 - `fork` from a module, `exit`, `wait`
@@ -248,8 +248,8 @@ build. That was the actual bug behind a fourteen-second boot.
 - KAL native backend, satisfying the same interface phases 0-6 proved correct
 - `wifi_osi_funcs_t` implemented against RV-9 primitives — the blobs never know
 - lwIP `sys_arch` ported — one file
-- **PMP-based process isolation** — hardware memory protection, the thing real
-  OS-9 on a 6809 could never do
+- **PMP-based process isolation** — hardware memory protection, the thing the
+  8-bit systems of that era could never do
 - Keep the FreeRTOS build alive as a reference oracle for behavioural diffs
 
 **Done when:** the same modules, unchanged, run on the native kernel with WiFi

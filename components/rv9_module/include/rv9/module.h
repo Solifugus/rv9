@@ -3,7 +3,7 @@
  *
  * A module is a self-contained, CRC-verified blob of position-independent
  * code that the system can find, verify, share and load at runtime. This is
- * the idea worth stealing from OS-9: code is a runtime object, not something
+ * the idea taken from the classic OS-9 design: code is a runtime object, not something
  * linked in at build time.
  *
  * Position independence is achieved by discipline rather than relocation:
@@ -15,7 +15,7 @@
  *   - no writable static data in the module image; per-instance state lives
  *     in a separate area allocated by the loader
  *
- * That last pair is straight OS-9: pure reentrant code shared between
+ * That last pair follows the classic OS-9 design: pure reentrant code shared between
  * processes, with static storage per process. The 6809 passed it in U and
  * the 68000 in A6; we pass it in the environment struct.
  */

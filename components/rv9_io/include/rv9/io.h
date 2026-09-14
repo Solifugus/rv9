@@ -1,7 +1,7 @@
 /*
  * RV-9 unified I/O.
  *
- * This is the part of OS-9 most worth keeping. Every I/O operation goes
+ * This is the part of the classic OS-9 design most worth learning from. Every I/O operation goes
  * through the same four layers, and each layer is replaceable without
  * touching the others:
  *
@@ -236,7 +236,7 @@ typedef struct rv9_filemgr {
 /*
  * On-media form of a device descriptor. This is the body of a
  * RV9_MOD_DESCRIPTOR module, so adding a device is loading a module --
- * no kernel rebuild, exactly as OS-9 intended.
+ * no kernel rebuild.
  */
 typedef struct __attribute__((packed)) {
     char     name[16];       /* "/term" */

@@ -1,7 +1,7 @@
 /*
  * RBF -- random block file manager.
  *
- * The structure is OS-9's, the encodings are not:
+ * The structure follows the classic OS-9 RBF; the encodings are RV-9's own:
  *
  *   LSN 0        identification sector: geometry and where everything is
  *   LSN 1..      allocation bitmap, one bit per sector
