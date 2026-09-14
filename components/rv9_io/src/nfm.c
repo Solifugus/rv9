@@ -86,6 +86,7 @@ typedef struct {
     int  fd;
     bool is_device;     /* "/n0" itself, with no endpoint behind it */
     bool nowait;        /* RV9_NET_SS_NOWAIT: do not wait for data */
+    int  listen_slot;   /* the listener this connection came from, or -1 */
 } nfm_path_t;
 
 /* Split "listen/8080" or "127.0.0.1/8080" at the last slash. */
@@ -167,30 +168,141 @@ static rv9_io_err_t connect_out(const char *host, uint16_t port, int *out_fd)
     return RV9_IO_ERR_TIMEOUT;
 }
 
-static rv9_io_err_t accept_in(uint16_t port, int *out_fd)
+/*
+ * Listeners that outlive one connection.
+ *
+ * A listener used to be made for each open of /n0/listen/<port> and closed
+ * as soon as it had accepted, so between one connection and the daemon's
+ * next open nothing listened at all. For sshd that gap is a whole session
+ * plus its close, and a client arriving in it was refused: 12 of 30 short
+ * sessions run back to back were, each just after the one before ended.
+ *
+ * Now the first open binds and listens, later opens of the same port accept
+ * from the same socket, and a connection arriving between them waits in
+ * the backlog to be accepted instead of being turned away. A listener is
+ * kept while anything uses it -- a connection it accepted is still open, or
+ * someone is waiting in accept -- and for LISTEN_GRACE_MS after the last
+ * use ends, which is time for a daemon to come back round: sshd opens again
+ * within milliseconds of closing a session, so two seconds is plenty, and
+ * longer only keeps a port nobody serves answering. After that it is
+ * closed, the next time NFM does anything; a port nobody serves any more
+ * refuses connections again rather than holding them.
+ */
+#define MAX_LISTENERS    4
+#define LISTEN_GRACE_MS  2000
+
+typedef struct {
+    uint16_t port;          /* 0: slot free */
+    int      fd;
+    int      users;         /* accepted connections still open, plus waiters */
+    uint64_t idle_since_ms; /* when users last reached zero */
+} listener_t;
+
+static listener_t s_listeners[MAX_LISTENERS];
+static rv9_lock_t s_listen_lock;
+
+/* With the lock held. */
+static void reap_listeners_locked(void)
 {
-    int listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listener < 0) return RV9_IO_ERR_NOMEM;
+    uint64_t now = rv9_time_ms();
+    for (int i = 0; i < MAX_LISTENERS; i++) {
+        listener_t *l = &s_listeners[i];
+        if (l->port == 0 || l->users > 0) continue;
+        if (now - l->idle_since_ms < LISTEN_GRACE_MS) continue;
+        ESP_LOGI(TAG, "no longer listening on %u", (unsigned)l->port);
+        close(l->fd);
+        memset(l, 0, sizeof(*l));
+    }
+}
 
-    int one = 1;
-    setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    set_nonblocking(listener);
+static void reap_listeners(void)
+{
+    if (s_listen_lock == NULL) return;
+    rv9_lock_acquire(s_listen_lock);
+    reap_listeners_locked();
+    rv9_lock_release(s_listen_lock);
+}
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port        = htons(port);
+/* One use of a listener has ended. */
+static void listener_put(int slot)
+{
+    if (slot < 0 || slot >= MAX_LISTENERS || s_listen_lock == NULL) return;
+    rv9_lock_acquire(s_listen_lock);
+    listener_t *l = &s_listeners[slot];
+    if (l->port != 0 && l->users > 0 && --l->users == 0) {
+        l->idle_since_ms = rv9_time_ms();
+    }
+    reap_listeners_locked();
+    rv9_lock_release(s_listen_lock);
+}
 
-    if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
-        listen(listener, ACCEPT_BACKLOG) != 0) {
-        ESP_LOGW(TAG, "cannot listen on %u: errno %d",
-                 (unsigned)port, errno);
-        close(listener);
-        return RV9_IO_ERR_IO;
+/* The listener for this port, made if there is none, with one more use. */
+static rv9_io_err_t listener_get(uint16_t port, int *out_slot)
+{
+    if (s_listen_lock == NULL && rv9_lock_create(&s_listen_lock) != RV9_OK) {
+        return RV9_IO_ERR_NOMEM;
     }
 
-    ESP_LOGI(TAG, "listening on %u", (unsigned)port);
+    rv9_lock_acquire(s_listen_lock);
+    reap_listeners_locked();
+
+    int slot = -1, free_slot = -1;
+    for (int i = 0; i < MAX_LISTENERS; i++) {
+        if (s_listeners[i].port == port) { slot = i; break; }
+        if (s_listeners[i].port == 0 && free_slot < 0) free_slot = i;
+    }
+
+    if (slot < 0) {
+        if (free_slot < 0) {
+            rv9_lock_release(s_listen_lock);
+            ESP_LOGW(TAG, "cannot listen on %u: all %d listeners in use",
+                     (unsigned)port, MAX_LISTENERS);
+            return RV9_IO_ERR_NOMEM;
+        }
+
+        int listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (listener < 0) {
+            rv9_lock_release(s_listen_lock);
+            return RV9_IO_ERR_NOMEM;
+        }
+
+        int one = 1;
+        setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        set_nonblocking(listener);
+
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family      = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        addr.sin_port        = htons(port);
+
+        if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+            listen(listener, ACCEPT_BACKLOG) != 0) {
+            ESP_LOGW(TAG, "cannot listen on %u: errno %d",
+                     (unsigned)port, errno);
+            close(listener);
+            rv9_lock_release(s_listen_lock);
+            return RV9_IO_ERR_IO;
+        }
+
+        slot = free_slot;
+        s_listeners[slot].port = port;
+        s_listeners[slot].fd   = listener;
+        ESP_LOGI(TAG, "listening on %u", (unsigned)port);
+    }
+
+    s_listeners[slot].users++;
+    *out_slot = slot;
+    rv9_lock_release(s_listen_lock);
+    return RV9_IO_OK;
+}
+
+static rv9_io_err_t accept_in(uint16_t port, int *out_fd, int *out_slot)
+{
+    int slot = -1;
+    rv9_io_err_t lerr = listener_get(port, &slot);
+    if (lerr != RV9_IO_OK) return lerr;
+    int listener = s_listeners[slot].fd;
 
     struct sockaddr_in peer;
     socklen_t peer_len = sizeof(peer);
@@ -217,13 +329,17 @@ static rv9_io_err_t accept_in(uint16_t port, int *out_fd)
         rv9_task_delay_ms(POLL_MS);
     }
 
-    /* The listener has done its job; only the connection is a path. */
-    close(listener);
-
-    if (fd < 0) return RV9_IO_ERR_TIMEOUT;
+    /* A waiter that got nothing gives its use back; the listener stays for
+       the grace period, so a daemon restarted in it finds the same socket.
+       A connection keeps its use until it is closed. */
+    if (fd < 0) {
+        listener_put(slot);
+        return RV9_IO_ERR_TIMEOUT;
+    }
 
     set_nonblocking(fd);
     *out_fd = fd;
+    *out_slot = slot;
     return RV9_IO_OK;
 }
 
@@ -236,6 +352,7 @@ static rv9_io_err_t nfm_open(rv9_path_t *path, const char *rest)
     nfm_path_t *st = rv9_calloc(1, sizeof(*st));
     if (st == NULL) return RV9_IO_ERR_NOMEM;
     st->fd = -1;
+    st->listen_slot = -1;
 
     if (rest == NULL || rest[0] == '\0') {
         st->is_device = true;
@@ -252,7 +369,7 @@ static rv9_io_err_t nfm_open(rv9_path_t *path, const char *rest)
 
     rv9_io_err_t err;
     if (strcmp(host, "listen") == 0) {
-        err = accept_in(port, &st->fd);
+        err = accept_in(port, &st->fd, &st->listen_slot);
     } else {
         ESP_LOGI(TAG, "connecting to %s:%u", host, (unsigned)port);
         err = connect_out(host, port, &st->fd);
@@ -274,6 +391,11 @@ static rv9_io_err_t nfm_close(rv9_path_t *path)
     if (st == NULL) return RV9_IO_OK;
 
     if (st->fd >= 0) close(st->fd);
+    if (st->listen_slot >= 0) {
+        listener_put(st->listen_slot);
+    } else {
+        reap_listeners();       /* any NFM activity lets an idle one go */
+    }
     rv9_free(st);
     path->fm_state = NULL;
     return RV9_IO_OK;

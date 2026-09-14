@@ -208,6 +208,17 @@ static void a_process_blocked_in_an_open(void)
     rv9_proc_kill(b);
     rv9_proc_wait(b, &status, 0);
 
+    /*
+     * The listener is kept for a grace period after its last use, so that a
+     * daemon coming straight back finds the port still answering (see
+     * nfm.c). Measured once that has passed and NFM has had a reason to let
+     * it go -- any open and close does -- or the test would count a socket
+     * kept on purpose as one leaked.
+     */
+    rv9_task_delay_ms(2500);
+    int n0 = rv9_io_open("/n0", RV9_MODE_READ);
+    if (n0 >= 0) rv9_io_close(n0);
+
     int32_t lost = (int32_t)heap0 - (int32_t)rv9_heap_free();
     ESP_LOGI(TAG, "  (heap %d bytes lower than before)", (int)lost);
     check(lost < 1024, "and nothing either open allocated stayed allocated");

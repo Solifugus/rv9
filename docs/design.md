@@ -4805,6 +4805,74 @@ allocates about 12 KB, and a session does not have that.
 **`ed` still cannot run in a session.** Its 9 KB is statics, the text
 buffer itself.
 
+## 40. A port that keeps answering
+
+The roadmap has carried an open item since phase 9: short SSH sessions
+sometimes lose their output. It was blamed on a poor link. A test on a
+good one found two separate things.
+
+### Refused between sessions
+
+Thirty short sessions run back to back (`free`, then `exit`, each):
+
+```
+before:  ok 18, refused 12, no output 0
+```
+
+Every refusal came just after the previous session ended. NFM made a
+listening socket for each open of `/n0/listen/<port>` and closed it as
+soon as it had accepted one connection. So between one connection and
+the daemon's next open, nothing listened on the port at all. For `sshd`
+that gap is the whole session, plus the up-to-three seconds `ssh_close`
+waits for the client to hang up, plus the loop back round. A client
+arriving then was refused.
+
+Now a listener outlives its connections. The first open of a port binds
+and listens. Later opens accept from the same socket, and a connection
+arriving between them waits in the backlog. A listener is kept while
+anything uses it: a connection it accepted is still open, or someone is
+waiting in accept. It stays for two seconds after the last use ends,
+which is ample, since `sshd` opens again within milliseconds of closing a
+session. After that it is closed at the next NFM open or close, so a port
+nobody serves goes back to refusing rather than holding connections
+forever. Four listeners at most.
+
+```
+after:   ok 29, refused 0, no output 1
+```
+
+Refusals went from 12 in 30 to none, across three runs.
+
+### The fault test, adjusted
+
+`fault-test` kills a process blocked in accept and checks that the port
+can be listened on again and that nothing stayed allocated. The first
+still holds; the second failed at 1,028 bytes against its 1,024 limit,
+because the listener is now kept on purpose. The test waits out the grace
+period and lets NFM reap before it measures. On three boots it passed 76
+of 76 with the heap slightly higher than before.
+
+### Still open: one session in thirty with no output
+
+One session in a run of thirty still gets no output at all, not even the
+shell's banner. Its client trace at `-vv` is line for line the same as a
+session that worked: channel opened, shell accepted, exit status, EOF,
+close, "session ended". The board logs only "session ended". The traces
+show that the session ran and closed cleanly. They do not show where its
+output went, and that is being chased with per-session byte counts in
+the driver.
+
+### Also seen: a real-time release skipped
+
+Two boots in this work failed real-time checks because a loop went more
+than one whole period without running ("1 releases skipped", "2 releases
+skipped"): the fault test's first `lateloop` once, and the scheduling
+test's derived pair once. It is not new. Counting every captured boot
+log, a nonzero skipped release appears in 3 of 32 boots before the §38
+timer fix and 2 of 10 after, too few to tell the rates apart. It is an
+intermittent latency spike of 10 ms or more under a priority-24 task, and
+its cause is not yet known.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has
