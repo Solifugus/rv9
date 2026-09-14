@@ -16,4 +16,4 @@ endif()
 # because RV-9's own is cooperative and cannot bound latency.
 idf_component_register(SRCS ${kal_backend} "src/kal_rt.c" "src/kal_mem.c"
                        INCLUDE_DIRS "include"
-                       REQUIRES rv9_kernel freertos esp_timer esp_system heap)
+                       REQUIRES rv9_kernel freertos esp_timer esp_system esp_driver_gptimer heap)

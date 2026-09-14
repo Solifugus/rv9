@@ -576,6 +576,13 @@ static void finish(rv9_proc_t *p, int rc, int fault,
                  (unsigned long)timing->deadline_us,
                  (unsigned long)timing->last_response_us,
                  (unsigned long)timing->overruns);
+        if (timing->overruns > 0) {
+            ESP_LOGE(TAG, "pid %u ('%s') worst stall: its release interrupt "
+                          "ran %lu us late, then it waited %lu us for the CPU",
+                     (unsigned)p->pid, p->name,
+                     (unsigned long)timing->stall_isr_late_us,
+                     (unsigned long)timing->stall_sched_late_us);
+        }
     } else if (fault == RV9_FAULT_DEADLINE) {
         ESP_LOGE(TAG, "pid %u ('%s') missed its deadline; stopped",
                  (unsigned)p->pid, p->name);

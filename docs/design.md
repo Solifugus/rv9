@@ -4709,10 +4709,11 @@ for it.
 
 ### What this does not do
 
-**The underlying ESP-IDF behaviour is not fixed.** The release timers and
-the watchdog still dispatch from the ISR while real-time work runs, and
-can trigger the loss then. The guard recovers from it within about
-300 ms; it does not prevent it.
+**The underlying ESP-IDF behaviour is not fixed.** It stopped mattering
+here when §41 moved the release timers and the watchdog off `esp_timer`
+too. RV-9 now puts no ISR-dispatched timers on it at all, which removes
+the trigger. The guard stays, recovering within about 300 ms if anything
+else ever pulls it.
 
 **Recovery takes up to about 300 ms.** A task timer due in that window
 runs late, once.
@@ -4897,8 +4898,119 @@ skipped"): the fault test's first `lateloop` once, and the scheduling
 test's derived pair once. It is not new. Counting every captured boot
 log, a nonzero skipped release appears in 3 of 32 boots before the §38
 timer fix and 2 of 10 after, too few to tell the rates apart. It is an
-intermittent latency spike of 10 ms or more under a priority-24 task, and
-its cause is not yet known.
+intermittent latency spike of 10 ms or more under a priority-24 task. Its
+cause turned out to be `esp_timer` again, and it is fixed; see §41.
+
+## 41. The clock a control loop is released by
+
+§40 recorded a real-time loop occasionally going a whole period or more
+without running: "2 releases skipped", "35 releases skipped", in 5 of 42
+boot logs. For a control loop that is the worst kind of fault. It is
+stopped for a deadline it would have met, and nothing it did caused it.
+
+### Reproducing it
+
+`rt lateloop ontime` runs a 100 Hz loop for a minute and stops it on any
+missed deadline. Run seven times back to back over SSH, four or five of
+the seven were stopped.
+
+### Measuring it
+
+A skipped release says the task ran late, not why. Two instruments were
+added, and both stay.
+
+- **The stall, split in two.** The release interrupt stamps the first
+  release since the task last woke. On waking, the task divides its
+  lateness into how late that interrupt ran against its due time, and
+  how long after it the task got the CPU. The worst stall is kept in the
+  real-time statistics and logged beside the deadline fault.
+- **Interrupts held off, caught in the act.** The FreeRTOS tick is an
+  interrupt at 1 kHz. A gap between two ticks well over a millisecond is a
+  window in which interrupts were masked, measured, and the task current
+  when the late tick runs is the one that closed it. Windows over 5 ms are
+  logged with that task's name.
+
+What they said, every time:
+
+```
+worst stall: its release interrupt ran 32884 us late, then it waited 67 us for the CPU
+worst stall: its release interrupt ran 88693 us late, then it waited 175 us for the CPU
+interrupt-off windows logged: 0
+```
+
+The task was never the problem: it had the CPU within a fraction of a
+millisecond of its interrupt. Interrupts were never masked, since the
+tick kept its millisecond throughout. Only the release interrupt was
+late, by 20 to 89 ms. And each stall was followed, exactly 300 ms later,
+by the §38 guard waking `esp_timer`'s task.
+
+### Why
+
+The same place as §38, from the other side. `esp_timer` keeps its two
+lists on one alarm, and `esp_timer_impl_try_to_set_next_alarm()` discards
+the alarm it was called for on entry. When that alarm belonged to an
+ISR-dispatched timer, the release, and nothing on the ISR list turns out
+to be quite due when checked, `timer_process_alarm()` does not arm the ISR
+list's alarm again. So the next hardware alarm is whatever the task list
+wants. The guard's own heartbeat is 100 ms, and WiFi's timers are
+similar. The release waits for that alarm. When it comes, the overdue
+release runs, and because an ISR timer ran, the task list's wake-up is
+skipped. That is the lost wake the guard found 300 ms later.
+
+It was tested before anything was rebuilt. With the heartbeat shortened
+from 100 ms to 20 ms, the worst stall fell from 88.7 ms to 12.4 ms.
+
+### The fix
+
+The releases and the watchdog no longer share a timer with anything.
+
+- **One GPTimer** counts microseconds, at interrupt priority 3, above the
+  level-1 interrupts `esp_timer` and most drivers use.
+- **A table of at most five entries**, one per real-time task and one for
+  the watchdog, holds when each is next due. The alarm handler runs
+  everything due, advances each past any whole periods already gone
+  (the task counts those from the clock when it wakes), and arms the
+  alarm for the soonest. It never arms one in the past: it reads the
+  count back and moves the alarm on if the count got there first.
+- **It keeps running with the flash cache off.** `GPTIMER_ISR_CACHE_SAFE`
+  and `GPTIMER_CTRL_FUNC_IN_IRAM` are on, so the handler and the re-arm
+  both work while the radio writes NVS.
+
+Event-driven tasks are unchanged: their releases were always the
+device's own interrupt. With this, RV-9 puts no ISR-dispatched timer on
+`esp_timer` at all.
+
+### Tested
+
+All boot suites pass: kal 45, conform 23, mod 17, io 44, pub 38,
+fault 76, proc 11, sched 15, mem 13. The same seven rounds:
+
+```
+before:  4 or 5 of 7 rounds stopped; a guard wake after every stall
+after:   6 of 7 ran their full minute; no deadline missed; no guard wake
+```
+
+The seventh round's loop also finished its minute: its failsafe was
+applied at the end, as for every round. The link then dropped ("reason
+1") before the SSH client had its output, and the client waited out its
+own timeout. The §38 watch reconnected.
+
+### What this does not do
+
+**Flash is not the cause, and was checked.** Before the measurements
+pointed at `esp_timer`, a loop was run beside repeated `/f0` writes. It
+survived them, and stopped in a quiet period with no writes at all.
+
+**The detector's floor is 5 ms.** A masked window shorter than that goes
+unreported. Nothing here needed it to be finer.
+
+**Priority 3 is not the top.** Interrupts at higher levels, and critical
+sections anywhere, can still delay a release. What is gone is a delay
+built into the timer service.
+
+**Five entries.** Four real-time tasks, the slot limit, and the watchdog.
+A fifth periodic task would need a larger table, as it would need a
+slot.
 
 ## 9. Migration to a native kernel
 

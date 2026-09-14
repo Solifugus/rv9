@@ -392,6 +392,12 @@ typedef struct {
 
     bool     urgent;          /* which of the two priorities it runs at */
     uint32_t bound_us;        /* admission's response bound, 0 if none */
+
+    /* The worst stall -- a release skipped -- split in two: how late the
+       release interrupt ran against its due time, then how long the task
+       waited for the CPU after it. Both 0 until a release is skipped. */
+    uint32_t stall_isr_late_us;
+    uint32_t stall_sched_late_us;
 } rv9_rt_stats_t;
 
 /*

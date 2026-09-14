@@ -64,3 +64,9 @@ CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y
 # Index 0 belongs to ESP-IDF's pthread support, so RV-9 uses index 1 and
 # there must be room for it.
 CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS=2
+
+# Real-time releases come from a GPTimer, re-armed from its own interrupt,
+# and must keep coming while the flash cache is off (WiFi writes NVS).
+# See kal_rt.c, "The release clock".
+CONFIG_GPTIMER_CTRL_FUNC_IN_IRAM=y
+CONFIG_GPTIMER_ISR_CACHE_SAFE=y

@@ -43,6 +43,7 @@
 #include "rv9/kernel.h"
 #include "kal_internal.h"
 
+#include <stddef.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -53,6 +54,7 @@
 #include "esp_log.h"
 #include "esp_freertos_hooks.h"
 #include "esp_timer.h"
+#include "driver/gptimer.h"
 
 #include "riscv/rvruntime-frames.h"
 
@@ -78,7 +80,7 @@ static portMUX_TYPE s_event_guard = portMUX_INITIALIZER_UNLOCKED;
 typedef struct {
     TaskHandle_t       task;
     SemaphoreHandle_t  release;
-    esp_timer_handle_t timer;
+    int                clock_slot;       /* this task's release-clock entry, -1: none */
     uint32_t           period_us;
 
     /* Non-NULL when this task is released by an event rather than a timer.
@@ -132,6 +134,21 @@ typedef struct {
     volatile bool      active;
     volatile uint32_t  samples;     /* watchdog ticks that found it running */
     volatile int       flagged;     /* 0, or the RV9_RT_* it must not pass */
+
+    /*
+     * Where a stall went.
+     *
+     * A skipped release says the task ran more than a period late, not
+     * why. The release interrupt stamps the first release since the task
+     * last woke; on waking the task splits its lateness in two -- how late
+     * that interrupt ran against its due time (interrupts held off), and
+     * how long after it the task got the CPU (the scheduler held off, or
+     * something above it running). Kept for the worst stall seen.
+     */
+    volatile uint64_t  first_isr_us;
+    uint32_t           worst_stall_missed;
+    uint32_t           stall_isr_late_us;
+    uint32_t           stall_sched_late_us;
 
     /* Recorded for reporting; decided by admission. */
     bool               urgent;
@@ -438,20 +455,191 @@ static RV9_RT_CODE rt_task_t *slot_for(TaskHandle_t t)
     return NULL;
 }
 
+/* ------------------------------------------------------------------ */
+/* The release clock                                                   */
+/* ------------------------------------------------------------------ */
+
 /*
- * IRAM, and it touches nothing that lives in flash: an interrupt can
- * arrive while the flash cache is disabled, and a release that faults
- * then would be a control loop that stops when the radio writes NVS.
+ * Periodic releases, and the watchdog, from a hardware timer of their own.
+ *
+ * They used to be ISR-dispatched esp_timers, and esp_timer loses those.
+ * Its alarm handler discards the alarm it was called for on entry; when
+ * nothing on the ISR list turns out to be quite due yet it does not arm
+ * that list's alarm again, so the next hardware alarm is whatever the task
+ * list wants -- up to a hundred milliseconds away -- and the release waits
+ * for it. Measured: release interrupts 20 to 89 ms late with the task
+ * getting the CPU within 100 us of them, interrupts never masked (the
+ * FreeRTOS tick kept its millisecond throughout), every stall followed by
+ * esp_timer losing its task's wake-up the way section 38 describes, and a
+ * 20 ms heartbeat on the task list capping the lateness at 12 ms. A
+ * control loop stopped for a deadline it would have met.
+ *
+ * So these no longer share a timer with anything. One GPTimer counts
+ * microseconds; a table of at most MAX_RT_TASKS + 1 entries holds when
+ * each is next due; the alarm is always set for the soonest, and never for
+ * a moment already past. At interrupt priority 3 a release also outranks
+ * the level-1 interrupts esp_timer and most drivers use.
  */
-static void IRAM_ATTR release_isr(void *arg)
+#define CLOCK_SLOTS    (MAX_RT_TASKS + 1)
+#define CLOCK_LEAD_US  50        /* never arm an alarm closer than this */
+#define CLOCK_PRIORITY 3
+
+typedef bool (*clock_fn_t)(void *arg);   /* returns: a task was woken */
+
+typedef struct {
+    bool       active;
+    uint64_t   next;       /* counts: microseconds since the clock started */
+    uint32_t   period;
+    clock_fn_t fn;
+    void      *arg;
+} clock_entry_t;
+
+static clock_entry_t          s_clock[CLOCK_SLOTS];
+static gptimer_handle_t       s_clock_timer;
+static portMUX_TYPE           s_clock_lock = portMUX_INITIALIZER_UNLOCKED;
+static gptimer_alarm_config_t s_clock_alarm;   /* static: IRAM-safe calls need it in RAM */
+static int                    s_clock_state;   /* 0 not tried, 1 running, -1 failed */
+
+static IRAM_ATTR uint64_t clock_now(void)
+{
+    uint64_t c = 0;
+    gptimer_get_raw_count(s_clock_timer, &c);
+    return c;
+}
+
+/* With s_clock_lock held. Arms the alarm for the soonest entry, never in
+   the past: if the count has already passed what was just set, set it
+   further out and look again. */
+static IRAM_ATTR void clock_program_locked(void)
+{
+    uint64_t soonest = UINT64_MAX;
+    for (int i = 0; i < CLOCK_SLOTS; i++) {
+        if (s_clock[i].active && s_clock[i].next < soonest) soonest = s_clock[i].next;
+    }
+    if (soonest == UINT64_MAX) {
+        gptimer_set_alarm_action(s_clock_timer, NULL);
+        return;
+    }
+
+    uint64_t lead = CLOCK_LEAD_US;
+    for (int tries = 0; tries < 8; tries++) {
+        uint64_t now = clock_now();
+        uint64_t at = (soonest > now + lead) ? soonest : now + lead;
+        s_clock_alarm.alarm_count = at;
+        s_clock_alarm.reload_count = 0;
+        s_clock_alarm.flags.auto_reload_on_alarm = 0;
+        gptimer_set_alarm_action(s_clock_timer, &s_clock_alarm);
+        if (clock_now() < at) return;
+        lead *= 2;
+    }
+}
+
+static IRAM_ATTR bool clock_isr(gptimer_handle_t timer,
+                                const gptimer_alarm_event_data_t *edata,
+                                void *ctx)
+{
+    (void)timer; (void)edata; (void)ctx;
+
+    clock_fn_t fns[CLOCK_SLOTS];
+    void      *args[CLOCK_SLOTS];
+    int        due = 0;
+
+    portENTER_CRITICAL_ISR(&s_clock_lock);
+    uint64_t now = clock_now();
+    for (int i = 0; i < CLOCK_SLOTS; i++) {
+        clock_entry_t *e = &s_clock[i];
+        if (!e->active || e->next > now) continue;
+        /* Due now; any whole periods already gone are gone -- the task
+           counts them from the clock when it wakes. */
+        uint64_t behind = (now - e->next) / e->period;
+        e->next += (behind + 1) * e->period;
+        fns[due] = e->fn;
+        args[due] = e->arg;
+        due++;
+    }
+    clock_program_locked();
+    portEXIT_CRITICAL_ISR(&s_clock_lock);
+
+    bool yield = false;
+    for (int i = 0; i < due; i++) {
+        if (fns[i](args[i])) yield = true;
+    }
+    return yield;
+}
+
+/* Once. The timer runs from then on; with no entry it has no alarm. */
+static bool clock_start(void)
+{
+    if (s_clock_state != 0) return s_clock_state > 0;
+
+    gptimer_config_t cfg = {
+        .clk_src       = GPTIMER_CLK_SRC_DEFAULT,
+        .direction     = GPTIMER_COUNT_UP,
+        .resolution_hz = 1000000,
+        .intr_priority = CLOCK_PRIORITY,
+    };
+    gptimer_event_callbacks_t cbs = { .on_alarm = clock_isr };
+
+    if (gptimer_new_timer(&cfg, &s_clock_timer) != ESP_OK ||
+        gptimer_register_event_callbacks(s_clock_timer, &cbs, NULL) != ESP_OK ||
+        gptimer_enable(s_clock_timer) != ESP_OK ||
+        gptimer_start(s_clock_timer) != ESP_OK) {
+        ESP_LOGE(TAG, "no release clock: periodic real-time tasks cannot run");
+        s_clock_state = -1;
+        return false;
+    }
+    s_clock_state = 1;
+    return true;
+}
+
+/* An entry first due one period from now. Returns its slot, or -1. */
+static int clock_add(uint32_t period_us, clock_fn_t fn, void *arg)
+{
+    if (period_us == 0 || !clock_start()) return -1;
+
+    int slot = -1;
+    portENTER_CRITICAL(&s_clock_lock);
+    for (int i = 0; i < CLOCK_SLOTS; i++) {
+        if (!s_clock[i].active) {
+            s_clock[i].period = period_us;
+            s_clock[i].fn     = fn;
+            s_clock[i].arg    = arg;
+            s_clock[i].next   = clock_now() + period_us;
+            s_clock[i].active = true;
+            slot = i;
+            break;
+        }
+    }
+    if (slot >= 0) clock_program_locked();
+    portEXIT_CRITICAL(&s_clock_lock);
+    return slot;
+}
+
+static void clock_remove(int slot)
+{
+    if (slot < 0 || slot >= CLOCK_SLOTS || s_clock_state <= 0) return;
+    portENTER_CRITICAL(&s_clock_lock);
+    s_clock[slot].active = false;
+    clock_program_locked();
+    portEXIT_CRITICAL(&s_clock_lock);
+}
+
+/*
+ * A periodic task's release. IRAM, and it touches nothing that lives in
+ * flash: an interrupt can arrive while the flash cache is disabled, and a
+ * release that faults then would be a control loop that stops when the
+ * radio writes NVS.
+ */
+static IRAM_ATTR bool release_fire(void *arg)
 {
     rt_task_t *rt = (rt_task_t *)arg;
     BaseType_t woken = pdFALSE;
 
+    /* esp_timer_get_time lives in IRAM, like this. */
+    if (rt->first_isr_us == 0) rt->first_isr_us = (uint64_t)esp_timer_get_time();
+
     xSemaphoreGiveFromISR(rt->release, &woken);
-    /* esp_timer's own way to ask for a switch from an ISR-dispatched
-       callback: it yields once, after every timer due has run. */
-    if (woken) esp_timer_isr_dispatch_need_yield();
+    return woken == pdTRUE;
 }
 
 /* ------------------------------------------------------------------ */
@@ -468,7 +656,7 @@ static void IRAM_ATTR release_isr(void *arg)
  */
 #define WATCH_US   2000
 
-static esp_timer_handle_t s_watch_timer;
+static int                s_watch_slot = -1;   /* its release-clock entry */
 static SemaphoreHandle_t  s_watch_wake;
 static TaskHandle_t       s_watch_task;
 static rv9_rt_overrun_fn  s_overrun;
@@ -494,7 +682,7 @@ extern TaskHandle_t volatile pxCurrentTCBs[];
  * a task means clearing up after it, and none of that belongs in an
  * interrupt.
  */
-static void IRAM_ATTR watch_isr(void *arg)
+static bool IRAM_ATTR watch_fire(void *arg)
 {
     (void)arg;
 
@@ -534,11 +722,13 @@ static void IRAM_ATTR watch_isr(void *arg)
         if (rt->flagged) wake = true;
     }
 
+    bool yield = false;
     if (wake) {
         BaseType_t woken = pdFALSE;
         xSemaphoreGiveFromISR(s_watch_wake, &woken);
-        if (woken) esp_timer_isr_dispatch_need_yield();
+        yield = (woken == pdTRUE);
     }
+    return yield;
 }
 
 /*
@@ -628,10 +818,70 @@ static uint32_t          s_guard_wakes_told;
 static TaskHandle_t      s_esp_timer_task;
 static int               s_guard_started;
 
+/*
+ * Interrupts held off, caught in the act.
+ *
+ * A stalled release turned out to be its interrupt running tens of
+ * milliseconds late, with the task getting the CPU within a hundred
+ * microseconds of it. So something held interrupts off. The FreeRTOS tick
+ * is an interrupt too, at 1 kHz, so a gap between two ticks well over a
+ * millisecond is that window, measured; and the task current when the
+ * late tick finally runs is the one that was running as the window
+ * closed -- the holder, if a task held them, or whoever an interrupt
+ * handler interrupted, if a handler did.
+ *
+ * The name is copied in the interrupt, from a TCB that is current and so
+ * cannot be freed under it, at an offset worked out once in task context:
+ * the functions that would find it are not all in IRAM.
+ */
+#define IRQOFF_REPORT_US 5000
+
+static uint64_t          s_tick_last_us;
+static volatile uint32_t s_irqoff_seen;
+static uint32_t          s_irqoff_told;
+static volatile uint32_t s_irqoff_gap_us;
+static volatile uint64_t s_irqoff_at_us;
+static char              s_irqoff_task[configMAX_TASK_NAME_LEN];
+static ptrdiff_t         s_tcb_name_off = -1;
+
+static void IRAM_ATTR irqoff_tick(void)
+{
+    uint64_t now = (uint64_t)esp_timer_get_time();
+    uint64_t last = s_tick_last_us;
+    s_tick_last_us = now;
+    if (last == 0 || now - last < IRQOFF_REPORT_US) return;
+
+    uint64_t gap = now - last;
+    s_irqoff_gap_us = (gap > UINT32_MAX) ? UINT32_MAX : (uint32_t)gap;
+    s_irqoff_at_us  = now;
+    s_irqoff_task[0] = '\0';
+    TaskHandle_t cur = pxCurrentTCBs[0];
+    if (cur != NULL && s_tcb_name_off >= 0) {
+        const char *name = (const char *)cur + s_tcb_name_off;
+        for (int i = 0; i < configMAX_TASK_NAME_LEN; i++) {
+            s_irqoff_task[i] = name[i];
+            if (name[i] == '\0') break;
+        }
+        s_irqoff_task[configMAX_TASK_NAME_LEN - 1] = '\0';
+    }
+    s_irqoff_seen++;
+}
+
 static void guard_beat(void *arg)
 {
     (void)arg;
     s_beat++;
+
+    uint32_t seen = s_irqoff_seen;
+    if (seen != s_irqoff_told) {
+        s_irqoff_told = seen;
+        ESP_LOGW(TAG, "interrupts held off for %lu us, ending at %llu ms; "
+                      "running then: %s (%lu such windows since boot)",
+                 (unsigned long)s_irqoff_gap_us,
+                 (unsigned long long)(s_irqoff_at_us / 1000),
+                 s_irqoff_task[0] ? s_irqoff_task : "?",
+                 (unsigned long)seen);
+    }
     uint32_t wakes = s_guard_wakes;
     if (wakes != s_guard_wakes_told) {
         s_guard_wakes_told = wakes;
@@ -647,6 +897,7 @@ static void guard_beat(void *arg)
 
 static void IRAM_ATTR guard_tick(void)
 {
+    irqoff_tick();
     if (++s_guard_ticks < GUARD_CHECK_TICKS) return;
     s_guard_ticks = 0;
 
@@ -674,6 +925,13 @@ void rv9_kal_timer_guard_start(void)
     }
 
     s_esp_timer_task = xTaskGetHandle("esp_timer");
+
+    /* Where a TCB keeps its name, found once from a TCB we know. */
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    const char *nm = pcTaskGetName(self);
+    if (self != NULL && nm != NULL) {
+        s_tcb_name_off = (const char *)nm - (const char *)self;
+    }
     const esp_timer_create_args_t args = {
         .callback = guard_beat,
         .name     = "rv9-beat",
@@ -706,25 +964,26 @@ static bool              s_watch_running;
 
 static void watch_arm(void)
 {
-    if (s_watch_lock == NULL || s_watch_timer == NULL) return;
+    if (s_watch_lock == NULL) return;
     xSemaphoreTake(s_watch_lock, portMAX_DELAY);
-    if (!s_watch_running &&
-        esp_timer_start_periodic(s_watch_timer, WATCH_US) == ESP_OK) {
-        s_watch_running = true;
+    if (!s_watch_running) {
+        s_watch_slot = clock_add(WATCH_US, watch_fire, NULL);
+        s_watch_running = (s_watch_slot >= 0);
     }
     xSemaphoreGive(s_watch_lock);
 }
 
 static void watch_disarm_if_idle(void)
 {
-    if (s_watch_lock == NULL || s_watch_timer == NULL) return;
+    if (s_watch_lock == NULL) return;
     xSemaphoreTake(s_watch_lock, portMAX_DELAY);
     int claimed = 0;
     for (int i = 0; i < MAX_RT_TASKS; i++) {
         if (s_rt[i].task != NULL) claimed++;
     }
     if (claimed == 0 && s_watch_running) {
-        esp_timer_stop(s_watch_timer);
+        clock_remove(s_watch_slot);
+        s_watch_slot = -1;
         s_watch_running = false;
     }
     xSemaphoreGive(s_watch_lock);
@@ -750,18 +1009,11 @@ static void watch_start(void)
         return;
     }
 
-    const esp_timer_create_args_t args = {
-        .callback        = watch_isr,
-        .dispatch_method = ESP_TIMER_ISR,
-        .name            = "rv9-rtwatch",
-    };
-    /* Created here, run only while there is something to watch: see
-       watch_arm(). */
+    /* The lock here; the watch itself is a release-clock entry, present
+       only while there is something to watch: see watch_arm(). */
     s_watch_lock = xSemaphoreCreateMutex();
-    if (s_watch_lock == NULL ||
-        esp_timer_create(&args, &s_watch_timer) != ESP_OK) {
+    if (s_watch_lock == NULL) {
         ESP_LOGE(TAG, "no watchdog timer");
-        s_watch_timer = NULL;
         return;
     }
 
@@ -879,17 +1131,7 @@ rv9_err_t rv9_rt_declare(uint32_t period_us)
     rt->release = xSemaphoreCreateCounting(MISS_BACKLOG, 0);
     if (rt->release == NULL) return RV9_ERR_NOMEM;
 
-    const esp_timer_create_args_t args = {
-        .callback        = release_isr,
-        .arg             = rt,
-        .dispatch_method = ESP_TIMER_ISR,
-        .name            = "rv9-rt",
-    };
-    if (esp_timer_create(&args, &rt->timer) != ESP_OK) {
-        vSemaphoreDelete(rt->release);
-        return RV9_ERR_NOMEM;
-    }
-
+    rt->clock_slot = -1;
     rt->in_use = true;
 
     /* Read before starting, so the schedule is if anything a microsecond
@@ -897,8 +1139,10 @@ rv9_err_t rv9_rt_declare(uint32_t period_us)
        is the direction an instrument deciding faults must err in. */
     uint64_t t0 = rv9_time_us();
 
-    if (esp_timer_start_periodic(rt->timer, period_us) != ESP_OK) {
+    rt->clock_slot = clock_add(period_us, release_fire, rt);
+    if (rt->clock_slot < 0) {
         rt->in_use = false;
+        vSemaphoreDelete(rt->release);
         return RV9_ERR_NOMEM;
     }
 
@@ -1095,6 +1339,21 @@ RV9_RT_CODE int rv9_rt_wait(void)
 
     uint32_t missed = jitter / rt->period_us;
 
+    /* Split the stall, if there was one: see first_isr_us. Read against
+       the due time still in force, before it is advanced below. */
+    portENTER_CRITICAL(&s_event_guard);
+    uint64_t first_isr = rt->first_isr_us;
+    rt->first_isr_us = 0;
+    portEXIT_CRITICAL(&s_event_guard);
+
+    if (missed > 0 && first_isr != 0 && first_isr <= woken &&
+        missed >= rt->worst_stall_missed) {
+        uint64_t isr_late = (first_isr > rt->due_us) ? first_isr - rt->due_us : 0;
+        rt->worst_stall_missed  = missed;
+        rt->stall_isr_late_us   = (isr_late > UINT32_MAX) ? UINT32_MAX : (uint32_t)isr_late;
+        rt->stall_sched_late_us = (uint32_t)(woken - first_isr);
+    }
+
     /* The activation now starting serves the most recent release; the
        ones before it got no activation at all. */
     rt->late_us  = jitter - missed * rt->period_us;
@@ -1161,7 +1420,7 @@ static void release_slot(rt_task_t *rt)
 
     /* Releases stop first, while the slot is still visibly ours. */
     bool borrowed = (rt->event != NULL);
-    if (!borrowed) esp_timer_stop(rt->timer);
+    if (!borrowed) { clock_remove(rt->clock_slot); rt->clock_slot = -1; }
 
     /* Out of the table before anything it points at is freed, and with the
        scheduler held so rv9_rt_stop cannot be halfway through giving the
@@ -1177,7 +1436,6 @@ static void release_slot(rt_task_t *rt)
     /* An event-driven task borrowed its release source; it did not make it,
        and the device it belongs to is still there. Only let go of it. */
     if (!borrowed) {
-        esp_timer_delete(rt->timer);
         vSemaphoreDelete(rt->release);
     }
 }
@@ -1252,6 +1510,8 @@ static void fill_stats(const rt_task_t *rt, rv9_rt_stats_t *out)
     out->last_response_us = rt->last_response_us;
     out->urgent           = rt->urgent;
     out->bound_us         = rt->bound_us;
+    out->stall_isr_late_us   = rt->stall_isr_late_us;
+    out->stall_sched_late_us = rt->stall_sched_late_us;
 }
 
 rv9_err_t rv9_rt_stats(rv9_rt_stats_t *out)
