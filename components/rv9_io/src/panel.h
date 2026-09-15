@@ -9,12 +9,27 @@
 
 #include "rv9/io.h"
 
+#include "driver/spi_master.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 
 /* Bring the panel up if it is not already, and report its geometry. The
    first caller's orientation is the one that takes effect. */
 rv9_io_err_t rv9_panel_open(bool landscape, int *w, int *h);
+
+/*
+ * The SPI bus the panel and the microSD card share.
+ *
+ * One bus, two chip selects, and either device may be attached first --
+ * the order descriptors happen to be in decides it. So whoever gets there
+ * first brings the bus up, and this is that call: idempotent, and
+ * configured for both (the card needs a data-in line the display never
+ * uses). The SPI driver serialises transactions between the two devices.
+ */
+#define RV9_SPI_HOST SPI2_HOST
+
+rv9_io_err_t rv9_panel_bus_claim(void);
 
 void rv9_panel_size(int *w, int *h);
 

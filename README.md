@@ -68,7 +68,7 @@ loadable pieces:
 | path | what it is |
 |---|---|
 | `/term`, `/uart0` | console panel (ST7789) and serial, through SCF |
-| `/r0`, `/f0` | RAM disk and flash filesystem, through RBF |
+| `/r0`, `/f0`, `/sd0` | RAM disk, flash filesystem and microSD card, through RBF |
 | `/n0/host/port` | a TCP connection; `/n0/listen/port` accepts |
 | `/ssh0` | SSH sessions, as a character device |
 | `/gpio/N`, `/pwm0`, `/adc0`, `/tsens` | hardware |
@@ -214,13 +214,12 @@ shipped has no Ed25519.
 
 ## Status
 
-Working on the hardware: modules, processes, I/O, RAM disk and flash
-storage, networking, an SSH server, an SVG window, GPIO/PWM/ADC, publication,
+Working on the hardware: modules, processes, I/O, RAM disk, flash and
+microSD storage, networking, an SSH server, an SVG window, GPIO/PWM/ADC, publication,
 and the real-time class with admission, derived priority, watchdog,
 failsafes and memory reserves.
 
 Still to come:
-- **SD card** (`/sd0`)
 - **The kernel owning the CPU from reset**, with its own trap vector and
   asynchronous preemption
 - **WiFi on RV-9's own primitives** (`wifi_osi_funcs_t`)

@@ -69,6 +69,7 @@ _Static_assert(sizeof(rbf_dirent_t) == 32, "dirent must be 32 bytes");
 /* Per-device mount state. */
 typedef struct {
     rbf_ident_t ident;
+    uint32_t    alloc_hint;      /* bitmap sector the last allocation came from */
     uint32_t    sector_count;
     bool        mounted;
     rv9_lock_t lock;
@@ -132,12 +133,53 @@ static bool bitmap_get(rv9_dev_t *dev, rbf_mount_t *m, uint32_t lsn)
 
 /* First free sector, or 0 if the volume is full. LSN 0 is the identification
    sector, so 0 is never a valid allocation and doubles as "none". */
+/*
+ * A free sector, found by reading the bitmap rather than the volume.
+ *
+ * This used to ask bitmap_get() about one sector at a time, and each of
+ * those questions read a whole bitmap sector from the device. On a RAM
+ * disk that is invisible. On a 32 GB card, whose first 15,221 sectors are
+ * metadata, creating the first file read the same bitmap sector fifteen
+ * thousand times: nineteen seconds, measured, for one empty file.
+ *
+ * So the scan is over bitmap sectors: read one, look at its bits, take the
+ * first that is clear and write the sector back with that bit set. Four
+ * reads instead of fifteen thousand. The hint remembers which bitmap
+ * sector the last allocation came from, so a volume filling up does not
+ * start from the beginning every time; it wraps, so nothing is missed.
+ */
 static uint32_t alloc_sector(rv9_dev_t *dev, rbf_mount_t *m)
 {
-    for (uint32_t lsn = 1; lsn < m->ident.total_sectors; lsn++) {
-        if (!bitmap_get(dev, m, lsn)) {
-            if (bitmap_set(dev, m, lsn, true) != RV9_IO_OK) return 0;
-            return lsn;
+    const uint32_t bits_per_sector = SECTOR_SIZE * 8;
+    uint32_t maps = m->ident.bitmap_sectors;
+    if (maps == 0) return 0;
+
+    uint32_t start = (m->alloc_hint < maps) ? m->alloc_hint : 0;
+
+    for (uint32_t n = 0; n < maps; n++) {
+        uint32_t map = (start + n) % maps;
+
+        if (rd(dev, m->ident.bitmap_lsn + map, m->scratch) != RV9_IO_OK) {
+            return 0;
+        }
+
+        for (uint32_t byte = 0; byte < SECTOR_SIZE; byte++) {
+            if (m->scratch[byte] == 0xFF) continue;
+
+            for (uint32_t bit = 0; bit < 8; bit++) {
+                if (m->scratch[byte] & (1u << bit)) continue;
+
+                uint32_t lsn = map * bits_per_sector + byte * 8 + bit;
+                if (lsn == 0) continue;                    /* the ident sector */
+                if (lsn >= m->ident.total_sectors) return 0;   /* past the end */
+
+                m->scratch[byte] |= (uint8_t)(1u << bit);
+                if (wr(dev, m->ident.bitmap_lsn + map, m->scratch) != RV9_IO_OK) {
+                    return 0;
+                }
+                m->alloc_hint = map;
+                return lsn;
+            }
         }
     }
     return 0;
@@ -153,7 +195,18 @@ static rv9_io_err_t rbf_format(rv9_dev_t *dev, rbf_mount_t *m,
     uint32_t bitmap_sectors = (sectors / 8 + SECTOR_SIZE - 1) / SECTOR_SIZE;
     if (bitmap_sectors == 0) bitmap_sectors = 1;
 
-    uint32_t root_sectors = 2;   /* 32 files; enough for now */
+    /*
+     * The root directory, sized to the volume it is on.
+     *
+     * Two sectors is 32 files, which is right for a 16 KB RAM disk and
+     * absurd on a 32 GB card. Every sector of it is read when a name is
+     * looked up and not found, so this is a trade rather than a maximum to
+     * be raised freely: sixteen sectors is 256 files, and sixteen reads for
+     * a miss is about twenty milliseconds on a card.
+     */
+    uint32_t root_sectors = 2;                              /* 32 files */
+    if (sectors >= (1u << 20))      root_sectors = 16;      /* 256 files */
+    else if (sectors >= (1u << 16)) root_sectors = 8;       /* 128 files */
 
     memset(&m->ident, 0, sizeof(m->ident));
     memcpy(m->ident.magic, RBF_MAGIC, RBF_MAGIC_LEN);
@@ -621,6 +674,42 @@ static rv9_io_err_t rbf_getstat(rv9_path_t *path, uint32_t code, void *arg)
     return RV9_IO_ERR_UNSUPPORTED;
 }
 
+/*
+ * Make an empty volume here, destroying what is on it.
+ *
+ * Only on the device itself -- `/sd0`, not `/sd0/notes` -- because a format
+ * is about the volume, and asking for one through a file would be an odd
+ * way to say it. Mounting formats an unrecognised volume on sight, which
+ * suits a RAM disk that starts empty every boot; this is for the other
+ * case, where the volume is recognised and is to be emptied anyway.
+ */
+static rv9_io_err_t rbf_setstat(rv9_path_t *path, uint32_t code, void *arg)
+{
+    (void)arg;
+
+    if (code != RV9_RBF_SS_FORMAT) return RV9_IO_ERR_UNSUPPORTED;
+
+    rbf_path_t  *st  = (rbf_path_t *)path->fm_state;
+    rv9_dev_t   *dev = path->dev;
+    rbf_mount_t *m   = (rbf_mount_t *)dev->fmgr_state;
+
+    if (st == NULL || !st->is_dir) return RV9_IO_ERR_INVAL;
+    if (m == NULL) return RV9_IO_ERR_IO;
+
+    rv9_lock_acquire(m->lock);
+    m->mounted    = false;
+    m->alloc_hint = 0;
+    rv9_io_err_t err = rbf_format(dev, m, m->sector_count);
+    m->mounted = (err == RV9_IO_OK);
+    rv9_lock_release(m->lock);
+
+    if (err == RV9_IO_OK) {
+        ESP_LOGW(TAG, "%s formatted on request: everything on it is gone",
+                 dev->name);
+    }
+    return err;
+}
+
 static rv9_io_err_t rbf_remove(rv9_dev_t *dev, const char *name)
 {
     rbf_mount_t *m = (rbf_mount_t *)dev->fmgr_state;
@@ -656,6 +745,7 @@ static const rv9_filemgr_t rbf = {
     .write   = rbf_write,
     .seek    = rbf_seek,
     .getstat = rbf_getstat,
+    .setstat = rbf_setstat,
     .remove  = rbf_remove,
 };
 

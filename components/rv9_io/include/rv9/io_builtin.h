@@ -21,6 +21,7 @@ rv9_io_err_t rv9_drv_ramdisk_register(void);
 rv9_io_err_t rv9_nfm_register(void);
 rv9_io_err_t rv9_drv_net_register(void);
 rv9_io_err_t rv9_drv_flashdisk_register(void);
+rv9_io_err_t rv9_drv_sdspi_register(void);
 rv9_io_err_t rv9_pio_register(void);
 rv9_io_err_t rv9_drv_gpio_register(void);
 rv9_io_err_t rv9_drv_pwm_register(void);

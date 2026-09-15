@@ -32,13 +32,18 @@
 
 static const char *TAG = "rv9-panel";
 
-#define LCD_HOST      SPI2_HOST
+#define LCD_HOST      RV9_SPI_HOST
 #define PIN_SCLK      7
 #define PIN_MOSI      6
 #define PIN_CS        23
 #define PIN_DC        24
 #define PIN_RST       26
 #define PIN_BL        10
+
+/* The card's data-out, on the bus the display shares. The display never
+   reads, so this line exists only for the card -- but it belongs to the
+   bus, and the bus is configured once. */
+#define PIN_SD_MISO   5
 
 #define PANEL_W       172
 #define PANEL_H       320
@@ -60,6 +65,7 @@ static int                    s_w, s_h;
 static bool                   s_landscape;
 static uint8_t                s_brightness = 100;
 static bool                   s_up;
+static bool                   s_bus_up;
 static const void            *s_owner;
 static volatile uint32_t      s_done_count;
 
@@ -98,6 +104,30 @@ uint32_t rv9_panel_backlight_get(void)
  * practice both descriptors should agree, and disagreeing is worth a log
  * line rather than a failure.
  */
+rv9_io_err_t rv9_panel_bus_claim(void)
+{
+    if (s_bus_up) return RV9_IO_OK;
+
+    /* Sized from the panel's own dimensions rather than the orientation
+       chosen at open: the card may claim the bus before any display does,
+       and the largest strip either way fits this. */
+    spi_bus_config_t bus = {
+        .sclk_io_num = PIN_SCLK,
+        .mosi_io_num = PIN_MOSI,
+        .miso_io_num = PIN_SD_MISO,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = PANEL_H * MAX_STRIP_ROWS * (int)sizeof(uint16_t) + 64,
+    };
+    if (spi_bus_initialize(RV9_SPI_HOST, &bus, SPI_DMA_CH_AUTO) != ESP_OK) {
+        ESP_LOGE(TAG, "spi_bus_initialize failed");
+        return RV9_IO_ERR_IO;
+    }
+
+    s_bus_up = true;
+    return RV9_IO_OK;
+}
+
 rv9_io_err_t rv9_panel_open(bool landscape, int *w, int *h)
 {
     if (s_up) {
@@ -137,18 +167,8 @@ rv9_io_err_t rv9_panel_open(bool landscape, int *w, int *h)
     };
     ledc_channel_config(&bl_ch);
 
-    spi_bus_config_t bus = {
-        .sclk_io_num = PIN_SCLK,
-        .mosi_io_num = PIN_MOSI,
-        .miso_io_num = -1,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = s_w * MAX_STRIP_ROWS * (int)sizeof(uint16_t) + 64,
-    };
-    if (spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO) != ESP_OK) {
-        ESP_LOGE(TAG, "spi_bus_initialize failed");
-        return RV9_IO_ERR_IO;
-    }
+    rv9_io_err_t berr = rv9_panel_bus_claim();
+    if (berr != RV9_IO_OK) return berr;
 
     esp_lcd_panel_io_spi_config_t io_cfg = {
         .cs_gpio_num = PIN_CS,

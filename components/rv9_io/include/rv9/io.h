@@ -64,6 +64,14 @@ const char *rv9_io_strerror(rv9_io_err_t err);
    own above RV9_SS_DRIVER_BASE. */
 /* Generic codes (RV9_SS_ECHO and friends) come from rv9/module.h. */
 
+/*
+ * A file manager's own setting, above the drivers' range so the two cannot
+ * be confused: RBF empties the volume the path is open on. Deliberate by
+ * construction -- there is no other way to ask for it, and `format` makes
+ * you say so twice.
+ */
+#define RV9_RBF_SS_FORMAT (RV9_SS_DRIVER_BASE + 64)
+
 struct rv9_dev;
 struct rv9_path;
 

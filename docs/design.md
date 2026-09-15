@@ -322,7 +322,7 @@ console to UART0, whose pins go nowhere on this board.
 | `/term` | SCF | lcdcon | console on the ST7789 panel |
 | `/uart0` | SCF | uart | serial console |
 | `/r0` | RBF | ramdisk | 64 KB of memory; exists so RBF can be proven without a card |
-| `/sd0` | RBF | sdspi | not yet written |
+| `/sd0` | RBF | sdspi | the microSD card; see §42 |
 | `/n0` | NFM | wifi+lwIP | network as a path, not a socket API |
 
 `/term` on the LCD is the first milestone that will actually feel like an
@@ -5016,6 +5016,112 @@ built into the timer service.
 **Five entries.** Four real-time tasks, the slot limit, and the watchdog.
 A fifth periodic task would need a larger table, as it would need a
 slot.
+
+## 42. The card
+
+The microSD slot was the last hole in phase 5: RBF was proven on a RAM disk
+and on a flash partition, and `/sd0` was a driver-shaped gap waiting for a
+card to exist. One arrived.
+
+### The driver
+
+`sdspi` is a block driver like the other two: `geometry`, `read_blocks`,
+`write_blocks`, and nothing else. ESP-IDF's SD-over-SPI host does the card
+protocol; this drives it, one sector at a time through a DMA-capable
+bounce buffer, because a caller's buffer may be anywhere.
+
+The card shares the display's SPI bus -- clock on 7, data in on 6, the
+card's chip select on 4 and the display's on 23 -- which sounded like the
+hard part and was not. Two devices on one bus with a chip select each is
+what the SPI driver already arbitrates, so a redraw and a sector write
+cannot overlap. What did need doing: the bus was brought up by the panel,
+configured with no data-in line, because a display never answers. It is
+now brought up by whichever of the two attaches first, with the card's
+data-in line included.
+
+There is no card-detect pin on this board, so a card is found by trying to
+initialise one. No card means `/sd0` does not attach, and a program asking
+for it is told the machine has no such device -- which is truer than a
+device that fails every read.
+
+### What a big volume broke
+
+The card is 62,333,952 sectors. Two things in RBF had never met a volume
+that size, and both were found by using it rather than by reading it.
+
+- **Creating the first file took nineteen seconds.** `alloc_sector`
+  walked the volume a sector at a time asking "is this one free?", and
+  each question read a whole bitmap sector. The first 15,221 sectors are
+  metadata, so it read the same bitmap sector fifteen thousand times. It
+  now walks the bitmap instead: read a sector, take the first clear bit,
+  write it back. Four reads. A create takes **0.2 s**.
+- **The root directory was two sectors, 32 files**, the same on a 16 KB
+  RAM disk as on a 32 GB card. It is now sized at format time from the
+  volume: 2 sectors below 64 K sectors, 8 below 1 M, 16 above -- 256
+  files. Not larger, because every sector of the root is read when a name
+  is looked up and missed.
+
+Both are why the layout is decided at format time and recorded in the
+identification sector: `/r0` and `/f0` kept their own layout and were not
+touched.
+
+### Formatting, and when not to
+
+Mounting a volume RV-9 does not recognise formats it. That is right for a
+RAM disk, which is empty every boot, and it is how a fresh card becomes
+RV-9 storage by being put in the slot -- as this one did, on the boot
+after it was inserted.
+
+It also means RV-9 claims the card. There is no FAT here, so a card
+holding RV-9 files is not a card a PC will read. For the other case there
+is now `format`, which empties a volume that RV-9 *does* recognise:
+
+```
+rv9> format /sd0
+format: this empties /sd0 completely, and there is no undo.
+say so: format /sd0 yes
+rv9> format /sd0 yes
+formatting /sd0 -- on a large card this takes a minute
+/sd0: empty
+```
+
+Two words, because there is no undo. It is a file manager's setstat rather
+than a driver's -- the volume is RBF's, not the card's.
+
+### Tested
+
+On the board, with a 30,436 MB card:
+
+```
+/sd0: card of 30436 MB, 512-byte sectors
+/sd0 mounted: volume 'rv9', 62333952 sectors      (1.2 s at boot)
+format /sd0 yes                                    60.5 s
+echo ... > /sd0/t1.txt                              0.2 s
+40 files created                                    8 s
+dir /sd0                                           43 files
+```
+
+After a reset: the card mounted in 1.2 s, all 43 files were still there
+and read back correctly, every boot suite passed (kal 45, conform 23,
+mod 17, io 44, pub 38, fault 76, proc 11, sched 15, mem 13), and memory
+was where it always is.
+
+### What this does not do
+
+**Formatting a fresh card delays the boot it happens on.** Writing 15,218
+bitmap sectors one at a time took about a minute, inside device attach,
+so that boot took a minute longer. It happens once per card, and nothing
+says so while it is happening.
+
+**Allocation is still linear in the worst case.** The hint means a filling
+volume does not rescan from the start, but a full one still walks every
+bitmap sector before reporting that it is full.
+
+**No FAT, and no partition table.** RV-9 takes the whole card as one RBF
+volume.
+
+**The card is not hot-pluggable.** It is found at attach, and there is no
+card-detect line to notice one arriving or leaving. Insert it, then boot.
 
 ## 9. Migration to a native kernel
 

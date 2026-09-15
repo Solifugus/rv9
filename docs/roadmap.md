@@ -147,7 +147,7 @@ to stop and enjoy it for a while before committing to the rest.**
 
 ---
 
-## Phase 5 — Storage  ✅ RAM disk done, SD card pending
+## Phase 5 — Storage  ✅ done
 
 **Goal:** persistence.
 
@@ -161,12 +161,15 @@ to stop and enjoy it for a while before committing to the rest.**
   `flashdisk`: same file manager as `/r0`, different driver. Programs
   written there are loaded at boot by `autoload()` and are commands again
   without a cable.
-- **`sdspi` driver → `/sd0` — not written.** Waiting on a microSD card to
-  test against. The file manager above it is already proven, so this is a
-  driver-shaped hole rather than an unknown.
-- Bus arbitration with the LCD is the interesting part when it comes: both
-  devices share SPI, and mediating that is the I/O manager's business rather
-  than each driver improvising.
+- **`sdspi` driver → `/sd0` — done**, see design §42. A 32 GB card, RBF over
+  it, the same file manager as `/r0` and `/f0`.
+- Bus arbitration with the LCD turned out to be nobody's problem: the card
+  and the display are two devices on one SPI bus with a chip select each,
+  and the SPI driver serialises transactions between them. Whichever
+  attaches first brings the bus up.
+- **`format`** — a volume is emptied only when asked twice (`format /sd0
+  yes`). An unrecognised volume is still formatted at mount, which is what
+  makes a fresh card storage by being put in.
 - **Loading modules from a volume — done.** `load <path>` reads a module
   through the I/O manager, verifies it and adds it to the directory, so a
   program can be added without reflashing. Combined with redirection into a

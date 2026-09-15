@@ -234,6 +234,7 @@ static void io_bringup(void)
     REGISTER(rv9_drv_lcdcon_register());
     REGISTER(rv9_drv_ramdisk_register());
     REGISTER(rv9_drv_flashdisk_register());
+    REGISTER(rv9_drv_sdspi_register());
     REGISTER(rv9_drv_net_register());
     REGISTER(rv9_drv_gpio_register());
     REGISTER(rv9_drv_pwm_register());
