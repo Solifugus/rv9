@@ -560,6 +560,13 @@
       "sessions": false
     },
     {
+      "name": "sdspi",
+      "read_rt": null,
+      "write_rt": null,
+      "retains": false,
+      "sessions": false
+    },
+    {
       "name": "ssh",
       "read_rt": false,
       "write_rt": false,

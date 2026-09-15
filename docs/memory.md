@@ -150,6 +150,7 @@ Taken while in use and returned afterwards.
 |---|---|---|
 | SSH session | ~9,200 | while connected; one at a time. Its send buffer was cut by 1,280 bytes to what is actually sent (design.md §39) |
 | window buffers (`/w0`) | ~11,900 | while open: document 4,096, band 5,120, coverage 640, points 2,048 |
+| microSD card (`/sd0`) | ~900 | from attach: the card's own state, a 512-byte bounce buffer, a lock (design.md §42) |
 | filesystem buffers | in the mount | RBF holds its structures at mount |
 | network packets | lwIP's pools | inside the 52 KB above |
 | shared libraries | — | `RV9_MOD_LIBRARY` exists; nothing links against one yet |
