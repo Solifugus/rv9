@@ -200,8 +200,11 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id,
         } else if (n->retries < MAX_RETRIES) {
             n->retries++;
             n->state = RV9_NET_CONNECTING;
-            ESP_LOGW(TAG, "disconnected: reason %u, retry %d",
-                     (unsigned)reason, n->retries);
+            ESP_LOGW(TAG, "disconnected: reason %u, retry %d "
+                          "(heap %u free, %u for programs)",
+                     (unsigned)reason, n->retries,
+                     (unsigned)rv9_heap_free(),
+                     (unsigned)rv9_heap_available_for(RV9_MEM_GENERAL));
             begin_attempt(n);
             esp_wifi_connect();
         } else {

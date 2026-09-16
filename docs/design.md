@@ -5106,7 +5106,40 @@ and read back correctly, every boot suite passed (kal 45, conform 23,
 mod 17, io 44, pub 38, fault 76, proc 11, sched 15, mem 13), and memory
 was where it always is.
 
+### Since: room, and programs from the card
+
+Two things the card made worth having.
+
+**`df` answers how much room a volume has.** `RV9_GS_SIZE` answers for a
+file; there was no way to ask a volume, which mattered little on a 16 KB
+RAM disk. It is a file-manager getstat on the device itself, counted from
+the bitmap when asked rather than kept running -- a wrong cached number
+would be worse than a slow true one.
+
+```
+rv9> df /r0
+/r0  size 16 KB  used 2 KB  free 14 KB
+rv9> df /f0
+/f0  size 1024 KB  used 46 KB  free 977 KB
+rv9> df /sd0
+/sd0  size 31166976 KB  used 7661 KB  free 31159315 KB
+```
+
+The card's 7,661 KB in use with nothing on it is the metadata: 15,221
+sectors of identification, bitmap and root directory. Counting takes about
+ten seconds there, because it reads all 15,218 bitmap sectors, and it holds
+the volume's lock while it does -- see what this does not do.
+
+**Programs on the card are commands after a reboot.** `autoload()` was
+already generic over a device and was called for `/f0`; it is now called
+for `/sd0` too. A board with no card opens nothing and pays nothing.
+
 ### What this does not do
+
+**`df` on a large card takes ten seconds and blocks the volume.** It holds
+the mount lock for the whole count, so nothing else on that volume moves
+meanwhile. Keeping a running free count would fix it, at the cost of a
+number that could drift from the truth.
 
 **Formatting a fresh card delays the boot it happens on.** Writing 15,218
 bitmap sectors one at a time took about a minute, inside device attach,

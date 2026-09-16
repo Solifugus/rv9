@@ -671,6 +671,41 @@ static rv9_io_err_t rbf_getstat(rv9_path_t *path, uint32_t code, void *arg)
         *(uint64_t *)arg = st->fd.size;
         return RV9_IO_OK;
     }
+
+    /*
+     * Room left, counted by reading the bitmap: one pass over
+     * bitmap_sectors, not over sectors. On this card that is fifteen
+     * thousand sectors of bitmap for sixty-two million sectors of volume,
+     * so counting the bits is the only affordable way to do it.
+     */
+    if (code == RV9_RBF_GS_SPACE && arg && st && st->is_dir) {
+        rv9_dev_t   *dev = path->dev;
+        rbf_mount_t *m   = (rbf_mount_t *)dev->fmgr_state;
+        if (m == NULL || !m->mounted) return RV9_IO_ERR_IO;
+
+        rv9_rbf_space_t *out = (rv9_rbf_space_t *)arg;
+        uint32_t used = 0;
+
+        rv9_lock_acquire(m->lock);
+        for (uint32_t map = 0; map < m->ident.bitmap_sectors; map++) {
+            if (rd(dev, m->ident.bitmap_lsn + map, m->scratch) != RV9_IO_OK) {
+                rv9_lock_release(m->lock);
+                return RV9_IO_ERR_IO;
+            }
+            for (uint32_t byte = 0; byte < SECTOR_SIZE; byte++) {
+                uint8_t v = m->scratch[byte];
+                while (v) { used += (v & 1u); v >>= 1; }
+            }
+        }
+        rv9_lock_release(m->lock);
+
+        out->sector_size   = SECTOR_SIZE;
+        out->total_sectors = m->ident.total_sectors;
+        out->free_sectors  = (used < m->ident.total_sectors)
+                             ? m->ident.total_sectors - used : 0;
+        return RV9_IO_OK;
+    }
+
     return RV9_IO_ERR_UNSUPPORTED;
 }
 

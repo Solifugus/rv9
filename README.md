@@ -68,7 +68,7 @@ loadable pieces:
 | path | what it is |
 |---|---|
 | `/term`, `/uart0` | console panel (ST7789) and serial, through SCF |
-| `/r0`, `/f0`, `/sd0` | RAM disk, flash filesystem and microSD card, through RBF |
+| `/r0`, `/f0`, `/sd0` | RAM disk, flash filesystem and microSD card, through RBF (`dir`, `df`, `format`) |
 | `/n0/host/port` | a TCP connection; `/n0/listen/port` accepts |
 | `/ssh0` | SSH sessions, as a character device |
 | `/gpio/N`, `/pwm0`, `/adc0`, `/tsens` | hardware |

@@ -22,6 +22,7 @@
 #include "proc_test.h"
 #include "sched_test.h"
 #include "mem_test.h"
+#include "sd_test.h"
 #include "conformance.h"
 
 #define RV9_RUN_KERNEL_TEST 1
@@ -254,6 +255,11 @@ static void io_bringup(void)
 
     /* Anything left on the persistent volume becomes a command again. */
     autoload("/f0");
+
+    /* And from the card, if there is one: a program written to /sd0 is a
+       command on the next boot, the same way /f0 works. A board with no
+       card opens nothing and this costs nothing. */
+    autoload("/sd0");
 
     /* Processes with no parent inherit these. */
     /* The terminal is the USB cable: keyboard in, characters out. The
@@ -819,6 +825,10 @@ static void rv9_init_task(void *arg)
        it runs last, when nothing else is starting. */
     rv9_mem_selftest();
     heap_mark("after mem");
+
+    /* The card, if this board has one: a driver, a file manager and a
+       volume a program will trust with something it cannot get back. */
+    rv9_sd_selftest();
 
     run_module("hello");
 

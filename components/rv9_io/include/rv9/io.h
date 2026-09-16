@@ -72,6 +72,22 @@ const char *rv9_io_strerror(rv9_io_err_t err);
  */
 #define RV9_RBF_SS_FORMAT (RV9_SS_DRIVER_BASE + 64)
 
+/*
+ * How much room a volume has, asked of the volume itself (`/sd0`, not
+ * `/sd0/notes`). RV9_GS_SIZE answers for a file; there was no way to ask
+ * about the device, which mattered little on a 16 KB RAM disk and matters
+ * on a 32 GB card. Counted from the bitmap when asked rather than kept
+ * running, because the count is wanted rarely and a wrong cached one would
+ * be worse than a slow true one.
+ */
+#define RV9_RBF_GS_SPACE (RV9_SS_DRIVER_BASE + 65)
+
+typedef struct __attribute__((packed)) {
+    uint32_t sector_size;
+    uint32_t total_sectors;
+    uint32_t free_sectors;
+} rv9_rbf_space_t;
+
 struct rv9_dev;
 struct rv9_path;
 
