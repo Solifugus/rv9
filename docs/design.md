@@ -5156,6 +5156,88 @@ volume.
 **The card is not hot-pluggable.** It is found at attach, and there is no
 card-detect line to notice one arriving or leaving. Insert it, then boot.
 
+## 43. A fault that would not come back
+
+The overnight soak in §42's week dropped the WiFi link 132 times in nine
+hours, about one every three and a half minutes, almost all reason 1
+(unspecified). Every session failure in that run followed from it. This
+section is what came of chasing it, including the part where it stopped
+happening and the cause was never found.
+
+### The control that mattered
+
+A laptop sat on the same access point, the same channel, through the same
+hours, and dropped nothing in 22.9 hours -- at -75 dBm, while the board
+dropped repeatedly at -58 dBm. Signal strength was not it, and the
+environment looked innocent.
+
+That reading was too quick. The system journal later showed the access
+point steering that laptop between two radios at 20:49, mid-soak, with a
+WNM "disassociation imminent" request -- and doing nothing of the sort on
+any later evening. The network was not identical between the run that had
+drops and the runs that did not, which is exactly the sort of difference
+a control is supposed to expose and this one nearly hid.
+
+### Narrowing it, and failing
+
+Each run is twenty minutes or more, on the board, with the serial log kept:
+
+| what ran | drops |
+|---|---|
+| idle, nothing at all | 0 |
+| 638 short SSH sessions, no loops | 0 |
+| a 100 Hz loop, 19 rounds, no network use | 0 |
+| both at once, loop on serial and sessions over the air | 0 |
+| the soak's own shape: loop rounds *inside* SSH sessions | 0 |
+| the original script again, 2 h | 0 |
+| the original script again, 5 h quiet daytime | 0 |
+| the original script again, 4 h busy evening | 0 |
+
+Over twelve hours of the same load that produced a drop every few
+minutes, and not one drop since. Three theories died on the way:
+
+- **The real-time loop starving the radio.** A loop runs above the WiFi
+  task, and since §41 its release interrupt runs above the radio's
+  interrupt level. Plausible, and wrong: the loop alone is clean.
+- **Session churn.** Also wrong: 638 sessions alone are clean.
+- **Memory pressure.** The driver now logs free heap at every disconnect;
+  the one drop ever caught that way had 84 KB free.
+
+### What was added on the way
+
+Nothing was fixed, because nothing was found. What is left behind is
+instrumentation, which is the honest product of a hunt like this:
+
+- **Disconnects say what memory looked like.** A reason code alone could
+  not distinguish exhaustion from anything else.
+- **The low-water mark now has two numbers.** `free` reports the lowest
+  free memory since boot and since the machine started serving. They
+  differ because the boot suites spend memory on purpose -- `mem-test`
+  drives the heap to the floor to prove a control loop is still admitted
+  -- which pins the since-boot figure at about 12 KB and tells you
+  nothing about the machine as it runs. ESP-IDF keeps one counter, not
+  two, so the figure from before the re-base is kept in the KAL and the
+  all-time answer is the lower of the halves.
+
+That second instrument exists because of a mistake worth recording: the
+soaks reported a low-water of about 2,500 bytes, and this was written off
+as the memory suite doing its job. The boot logs say `mem-test` bottoms
+out at the floor, around 12,400. Something in ordinary running takes it
+far lower, and now there is a number that can see it.
+
+### Where it stands
+
+Not reproducible, not explained, and not claimed to be fixed. What is
+known: it is not the loop, not the sessions, not memory, not signal
+strength, and not idle-versus-busy. What correlates is the evening it
+happened: the drop rate fell hour by hour as the household wound down --
+42 in the first hour, then 15, 18, 15, 12, 4, 12, 8, 4, 2 -- and the
+access point was steering clients that night and has not been since.
+
+If it returns, the board now records free memory at each drop, and the
+first thing to check is whether the access point is moving clients
+around again.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

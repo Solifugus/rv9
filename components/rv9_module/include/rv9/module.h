@@ -983,6 +983,18 @@ typedef struct __attribute__((packed)) {
 
     uint32_t heap_rt_reserve;  /* above the floor, kept for real-time work */
     uint32_t heap_general;     /* what an ordinary program may still take */
+
+    /*
+     * The lowest free memory has been since the machine started serving,
+     * as against heap_low_water, which is since boot.
+     *
+     * They differ because the boot suites spend memory on purpose: mem-test
+     * exhausts the heap to prove a control loop is still admitted and a
+     * failsafe still applied, which pins the since-boot figure at the floor
+     * for the rest of the run. True, and useless for watching a running
+     * machine. This one is re-based once every suite has finished.
+     */
+    uint32_t heap_low_since_up;
 } rv9_sys_mem_t;
 
 /* What a caller must ask for at minimum, and the boundary that must not

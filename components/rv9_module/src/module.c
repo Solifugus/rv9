@@ -672,6 +672,7 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
 
         m.heap_free      = (uint32_t)rv9_heap_free();
         m.heap_low_water = (uint32_t)rv9_heap_low_water();
+        m.heap_low_since_up = (uint32_t)rv9_heap_low_since_rebase();
         m.heap_exec_free = (uint32_t)rv9_heap_free_exec();
         m.module_count   = mods;
         m.proc_count     = 0;

@@ -35,6 +35,9 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     m_num(env, RV9_STDOUT, (int32_t)m.heap_refusals);
     m_say(env, RV9_STDOUT, "\nlow water      ");
     m_num(env, RV9_STDOUT, (int32_t)m.heap_low_water);
+    m_say(env, RV9_STDOUT, "  (since boot; the tests spend to the floor)");
+    m_say(env, RV9_STDOUT, "\n  since serving ");
+    m_num(env, RV9_STDOUT, (int32_t)m.heap_low_since_up);
     m_say(env, RV9_STDOUT, "\nexecutable     ");
     m_num(env, RV9_STDOUT, (int32_t)m.heap_exec_free);
     m_say(env, RV9_STDOUT, "\nmodules        ");

@@ -688,7 +688,18 @@ void  rv9_free(void *ptr);
 
 size_t rv9_heap_free(void);        /* bytes currently free */
 size_t rv9_heap_free_exec(void);   /* bytes free that may be executed */
-size_t rv9_heap_low_water(void);   /* smallest free ever seen */
+size_t rv9_heap_low_water(void);
+
+/*
+ * Re-base the low-water mark from now, and read it afterwards.
+ *
+ * Since-boot is the honest record of the worst the machine has ever seen,
+ * and the boot suites drive it to the floor deliberately, so it says
+ * nothing about the machine as it runs. Called once, when the tests are
+ * done; until then the two numbers are the same.
+ */
+void   rv9_heap_low_water_rebase(void);
+size_t rv9_heap_low_since_rebase(void);   /* smallest free ever seen */
 
 /*
  * The floor: memory RV-9 will not take.

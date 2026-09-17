@@ -255,7 +255,49 @@ size_t rv9_heap_free(void)
     return heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
 }
 
+/*
+ * The lowest free memory has ever been.
+ *
+ * Once the local monitor below is running, ESP-IDF's counter answers from
+ * the re-base rather than from startup -- it is one counter, not two. So
+ * the figure from before the re-base is kept here, and the all-time answer
+ * is the lower of the two halves. Exact, because a minimum over a whole
+ * run is the smaller of the minima over its parts.
+ */
+static size_t s_low_before_rebase;
+
 size_t rv9_heap_low_water(void)
+{
+    size_t now = heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT);
+    if (s_low_before_rebase != 0 && s_low_before_rebase < now) {
+        return s_low_before_rebase;
+    }
+    return now;
+}
+
+/*
+ * ESP-IDF can watch for a local low rather than the all-time one, which is
+ * exactly what is wanted once the boot tests have finished spending memory
+ * on purpose. While the monitor is running, heap_caps_get_minimum_free_size
+ * answers from the moment it started; before that, both numbers agree.
+ */
+static bool s_low_rebased;
+
+void rv9_heap_low_water_rebase(void)
+{
+    if (s_low_rebased) return;
+
+    /* Taken before the re-base, or it is gone: the counter is shared. */
+    size_t before = heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT);
+
+    /* If the monitor refuses, both numbers keep answering since boot --
+       equal figures say that plainly, and this file keeps no log of its
+       own to say it in. */
+    s_low_rebased = (heap_caps_monitor_local_minimum_free_size_start() == ESP_OK);
+    if (s_low_rebased) s_low_before_rebase = before;
+}
+
+size_t rv9_heap_low_since_rebase(void)
 {
     return heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT);
 }

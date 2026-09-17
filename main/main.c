@@ -837,6 +837,11 @@ static void rv9_init_task(void *arg)
 #if RV9_RUN_INVERSION_DEMO
     inversion_demo();
 #endif
+    /* Every suite has run, mem-test included, so the low-water mark has
+       been driven to the floor on purpose. Watch for local lows from here:
+       what matters now is the machine as it serves. */
+    rv9_heap_low_water_rebase();
+
     heap_mark("before services");
     init_shell_loop();
 
