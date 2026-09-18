@@ -492,6 +492,11 @@
       "write_rt": true
     },
     {
+      "name": "pipe",
+      "read_rt": false,
+      "write_rt": false
+    },
+    {
       "name": "rbf",
       "read_rt": false,
       "write_rt": false
@@ -533,6 +538,13 @@
     },
     {
       "name": "net",
+      "read_rt": null,
+      "write_rt": null,
+      "retains": false,
+      "sessions": false
+    },
+    {
+      "name": "pipemem",
       "read_rt": null,
       "write_rt": null,
       "retains": false,
