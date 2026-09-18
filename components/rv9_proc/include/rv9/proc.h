@@ -57,8 +57,20 @@ typedef uint16_t rv9_pid_t;
 #define RV9_PRIO_SYSTEM        (RV9_PRIO_MAX - 1)
 #define RV9_PROC_PRIO_CEILING  (RV9_PRIO_MAX - 2)
 
-/* Paths a process may hold open at once. */
-#define RV9_MAX_PATHS 8
+/*
+ * Paths a process may hold open at once.
+ *
+ * Eight was enough for a process: three standard paths and a few of its
+ * own. It was not enough for the shell building a *pipeline*, which at the
+ * moment it forks a middle stage is holding the read end it inherited, both
+ * ends of the next pipe, and parked copies of its own input and output --
+ * five, on top of the three standard ones and the panel.
+ *
+ * Twelve costs four pointers per process, which on a machine running
+ * twenty of them is a few hundred bytes, and buys the headroom to compose
+ * commands rather than run them one at a time.
+ */
+#define RV9_MAX_PATHS 12
 
 /*
  * What kind of work a process is.

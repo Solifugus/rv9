@@ -17,11 +17,22 @@
 #define ARG_MAX   8
 #define SAVE_PATH 5     /* spare slot used to park stdout during redirection */
 
+/* Stages in one pipeline. Four is three pipes, which is more than anything
+   worth typing, and the path table is what pays for each one. */
+#define PIPE_STAGES 4
+
+/* Where the shell parks its own stdout and stdin while a pipeline runs.
+   Claimed before any pipe is opened, so that open() -- which hands out the
+   lowest free slot -- can never be given one of them. */
+#define SAVE_OUT  (SAVE_PATH)
+#define SAVE_IN   (SAVE_PATH + 1)
+
 typedef struct {
     char line[LINE_MAX];    /* chopped into tokens */
     char raw[LINE_MAX];     /* kept whole, for multi-word arguments */
     int  term;
     char term_open;
+    uint32_t pipe_seq;      /* so two pipelines never share a pipe's name */
     rv9_sys_proc_t procs[16];   /* for the fallback `procs`, which cannot fork */
 } shell_statics_t;
 
@@ -150,13 +161,249 @@ static void help(const rv9_mod_env_t *env)
           "  help              this text\n"
           "  exit              leave the shell\n"
           "  <module> [arg] [> dev]  fork it, optionally redirected\n"
+          "  <module> | <module>     what one writes, the next reads\n"
           "  <module> &        run it without waiting; see it in 'procs'\n"
           "  kill [-f] <pid>   stop one: ask, then insist\n"
           "\n"
           "try: mdir, procs, owns, pubs, free, dir, filetest, netstat\n"
           "     dir /r0        echo > /term\n"
+          "     dir /f0 | count       mdir | match desc\n"
           "     fetch host /path > /r0/file\n"
           "     load /r0/file.mod     then run it by name\n");
+}
+
+/*
+ * Why a fork was refused, in words.
+ *
+ * Shared by the plain path and by a pipeline, because a stage that will
+ * not start is exactly as worth explaining as a command that will not --
+ * and "did not start" sent somebody hunting for a broken pipe when the
+ * answer was that the third process would not fit in memory.
+ */
+static void say_fork_error(const rv9_mod_env_t *env, const char *name, int pid)
+{
+    m_say(env, RV9_STDOUT, name);
+
+        if (pid == -RV9_PE_NOMEM) {
+            m_say(env, RV9_STDOUT, ": no memory to start it\n");
+        } else if (pid == -RV9_PE_MODULE) {
+            m_say(env, RV9_STDOUT, ": not loadable\n");
+        } else if (pid == -RV9_PE_BUSY) {
+            /* Refused before it started, because something it declared it
+               must own alone is owned. 'owns' says by whom. */
+            m_say(env, RV9_STDOUT, ": a device it needs alone is owned "
+                                   "(see 'owns')\n");
+        } else if (pid == -RV9_PE_NODEV) {
+            m_say(env, RV9_STDOUT, ": it needs a device this machine does "
+                                   "not have (see the log)\n");
+        } else if (pid == -RV9_PE_NOPUB) {
+            m_say(env, RV9_STDOUT, ": it watches a publication nothing on "
+                                   "this machine provides (see the log)\n");
+        } else if (pid == -RV9_PE_BUDGET) {
+            m_say(env, RV9_STDOUT, ": over the memory budget of whatever is "
+                                   "starting it (see 'budgets')\n");
+        } else if (pid == -RV9_PE_UNSCHEDULABLE) {
+            m_say(env, RV9_STDOUT, ": with it running, some real-time loop "
+                                   "would miss its deadline (see the log)\n");
+        } else if (pid == -RV9_PE_CONTRACT) {
+            /* Reachable by an ordinary fork now, not only by 'rt': a
+               failsafe naming a device the program never claimed is a
+               manifest contradicting itself. */
+            m_say(env, RV9_STDOUT, ": its declaration contradicts itself "
+                                   "(see the log)\n");
+        } else {
+            m_say(env, RV9_STDOUT, ": no such module\n");
+        }
+}
+
+/*
+ * Split a command at the first '|' that is not at the very start.
+ *
+ * In place, because the shell has two LINE_MAX buffers and no business
+ * allocating a third: each segment becomes its own string where the bar
+ * used to be.
+ */
+static int split_pipeline(char *raw, char *seg[], int max)
+{
+    int n = 0;
+    char *p = raw;
+
+    seg[n++] = p;
+    while (*p && n < max) {
+        if (*p == '|') {
+            *p = '\0';
+            seg[n++] = p + 1;
+        }
+        p++;
+    }
+    return n;
+}
+
+/* Trim, then cut the first word off as the command name. What is left,
+   with its spaces, is the argument -- see rest_of_line for why the whole
+   remainder matters rather than just the next token. */
+static char *cut_name(char *s, char **out_name)
+{
+    while (*s == ' ' || *s == '\t') s++;
+    *out_name = s;
+
+    while (*s && *s != ' ' && *s != '\t') s++;
+    if (*s) { *s = '\0'; s++; }
+
+    while (*s == ' ' || *s == '\t') s++;
+    return s;
+}
+
+/*
+ * A pipeline: what one stage writes, the next one reads.
+ *
+ * The whole of it is opens, dup2 and fork -- there is no pipe machinery
+ * here, because a pipe is a device and PIPEFM already is the machinery.
+ * The shell's only jobs are to name each pipe, to point one child's output
+ * and the next child's input at it, and then **to let go of both ends
+ * itself**. That last part is not tidiness: a reader learns that a stage
+ * has finished when the last writer closes, and the shell holding a write
+ * end open is a writer that never finishes.
+ *
+ * Both ends are opened before either child is forked. Open only the write
+ * end and the first stage can run, write, exit and take the pipe with it
+ * before the reader ever arrives.
+ */
+static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
+{
+    shell_statics_t *st = (shell_statics_t *)env->statics;
+
+    char *seg[PIPE_STAGES];
+    int stages = split_pipeline(raw, seg, PIPE_STAGES);
+
+    int pids[PIPE_STAGES];
+    for (int i = 0; i < stages; i++) pids[i] = -1;
+
+    /*
+     * Park our own input and output *first*, before a single pipe is
+     * opened.
+     *
+     * Not tidiness -- correctness. open() hands out the lowest free slot,
+     * so parking into a fixed slot after opening a pipe lands on top of
+     * the pipe, and putting the parked copy back afterwards closes it. The
+     * read end of the first pipe was being destroyed that way before the
+     * second stage could inherit it, and the only symptom was a command
+     * that quietly produced nothing.
+     *
+     * Parked before anything else, these two slots are taken, and no open
+     * in the loop below can be given them.
+     */
+    int saved_out = env->dup2(RV9_STDOUT, SAVE_OUT);
+    int saved_in  = env->dup2(RV9_STDIN,  SAVE_IN);
+    if (saved_out < 0 || saved_in < 0) {
+        if (saved_out >= 0) env->close(SAVE_OUT);
+        if (saved_in  >= 0) env->close(SAVE_IN);
+        m_say(env, RV9_STDOUT, "no room to hold my own input and output\n");
+        return;
+    }
+
+    int prev_read = -1;
+    bool broken = false;
+
+    for (int i = 0; i < stages && !broken; i++) {
+        char *name = NULL;
+        char *arg  = cut_name(seg[i], &name);
+        if (name[0] == '\0') {
+            m_say(env, RV9_STDOUT, "empty stage in the pipeline\n");
+            broken = true;
+            break;
+        }
+
+        /* The last stage may still redirect, as any command may. */
+        const char *target = NULL;
+        if (i == stages - 1) {
+            for (char *q = arg; *q; q++) {
+                if (*q == '>') {
+                    *q = '\0';
+                    char *t = q + 1;
+                    while (*t == ' ') t++;
+                    if (*t) target = t;
+                    break;
+                }
+            }
+        }
+
+        int pw = -1, pr = -1;
+        if (i < stages - 1) {
+            char pipename[24];
+            m_devpath(pipename, "/pipe/s", st->pipe_seq++);
+
+            /* Both ends before either child. Open only the write end and
+               the first stage can run, write, exit and take the pipe with
+               it before the reader ever arrives. */
+            pw = env->open(pipename, RV9_MODE_WRITE | RV9_MODE_CREATE);
+            if (pw >= 0) pr = env->open(pipename, RV9_MODE_READ);
+
+            if (pw < 0 || pr < 0) {
+                if (pw >= 0) env->close(pw);
+                m_say(env, RV9_STDOUT, pipename);
+                m_say(env, RV9_STDOUT, ": no pipe to be had\n");
+                broken = true;
+                break;
+            }
+        }
+
+        if (target != NULL) {
+            int t = env->open(target, RV9_MODE_WRITE | RV9_MODE_CREATE);
+            if (t < 0) {
+                m_say(env, RV9_STDOUT, target);
+                m_say(env, RV9_STDOUT, ": cannot open\n");
+                broken = true;
+            } else {
+                env->dup2(t, RV9_STDOUT);
+                env->close(t);
+            }
+        } else if (pw >= 0) {
+            env->dup2(pw, RV9_STDOUT);
+        }
+
+        if (!broken && prev_read >= 0) env->dup2(prev_read, RV9_STDIN);
+
+        if (!broken) pids[i] = env->fork_arg(name, 8, arg);
+
+        /* Our own back, from the copies parked before the loop. */
+        env->dup2(SAVE_OUT, RV9_STDOUT);
+        env->dup2(SAVE_IN,  RV9_STDIN);
+
+        /* Let go of the ends; the children hold what they need. A reader
+           learns a stage has finished when the last writer closes, and a
+           shell still holding a write end is a writer that never does. */
+        if (prev_read >= 0) env->close(prev_read);
+        if (pw >= 0)        env->close(pw);
+        prev_read = pr;
+
+        /* Only when the fork itself was the failure; anything earlier has
+           already said what went wrong in its own words. */
+        if (!broken && pids[i] < 0) {
+            say_fork_error(env, name, pids[i]);
+            broken = true;
+        }
+    }
+
+    if (prev_read >= 0) env->close(prev_read);
+
+    env->dup2(SAVE_OUT, RV9_STDOUT);
+    env->close(SAVE_OUT);
+    env->dup2(SAVE_IN, RV9_STDIN);
+    env->close(SAVE_IN);
+
+    /*
+     * Wait for all of them, not just the last. A stage still running when
+     * the prompt comes back would write into a terminal the shell is
+     * reading from, and the two would fight over it.
+     */
+    if (!background) {
+        for (int i = 0; i < stages; i++) {
+            if (pids[i] < 0) continue;
+            int status = 0;
+            env->wait(pids[i], &status, RV9_WAIT_FOREVER);
+        }
+    }
 }
 
 /*
@@ -215,39 +462,7 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
     if (pid < 0 && fallback) {
         /* Done already, by the shell itself. */
     } else if (pid < 0) {
-        /* Which failure it was. "No such module" for an exhausted heap is
-           a message that sends you hunting for the wrong thing. */
-        m_say(env, RV9_STDOUT, name);
-        if (pid == -RV9_PE_NOMEM) {
-            m_say(env, RV9_STDOUT, ": no memory to start it\n");
-        } else if (pid == -RV9_PE_MODULE) {
-            m_say(env, RV9_STDOUT, ": not loadable\n");
-        } else if (pid == -RV9_PE_BUSY) {
-            /* Refused before it started, because something it declared it
-               must own alone is owned. 'owns' says by whom. */
-            m_say(env, RV9_STDOUT, ": a device it needs alone is owned "
-                                   "(see 'owns')\n");
-        } else if (pid == -RV9_PE_NODEV) {
-            m_say(env, RV9_STDOUT, ": it needs a device this machine does "
-                                   "not have (see the log)\n");
-        } else if (pid == -RV9_PE_NOPUB) {
-            m_say(env, RV9_STDOUT, ": it watches a publication nothing on "
-                                   "this machine provides (see the log)\n");
-        } else if (pid == -RV9_PE_BUDGET) {
-            m_say(env, RV9_STDOUT, ": over the memory budget of whatever is "
-                                   "starting it (see 'budgets')\n");
-        } else if (pid == -RV9_PE_UNSCHEDULABLE) {
-            m_say(env, RV9_STDOUT, ": with it running, some real-time loop "
-                                   "would miss its deadline (see the log)\n");
-        } else if (pid == -RV9_PE_CONTRACT) {
-            /* Reachable by an ordinary fork now, not only by 'rt': a
-               failsafe naming a device the program never claimed is a
-               manifest contradicting itself. */
-            m_say(env, RV9_STDOUT, ": its declaration contradicts itself "
-                                   "(see the log)\n");
-        } else {
-            m_say(env, RV9_STDOUT, ": no such module\n");
-        }
+        say_fork_error(env, name, pid);
     } else if (background) {
         /* No job table and no notification when it ends: `procs` is where
            to look. What this buys is two things running at once, which is
@@ -350,6 +565,24 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 
         if (m_eq(argv[0], "exit")) break;
         if (m_eq(argv[0], "help")) { help(env); continue; }
+
+        /*
+         * A pipeline is handled whole, from the untouched copy: tokenize()
+         * has already chopped st->line, and every stage needs its own
+         * argument with the spaces still in it.
+         */
+        bool piped = false;
+        for (const char *q = st->raw; *q; q++) if (*q == '|') piped = true;
+
+        if (piped) {
+            if (st->term_open && m_onscreen(env, st->term)) {
+                m_say(env, st->term, "> ");
+                m_say(env, st->term, argv[0]);
+                m_say(env, st->term, " |\n");
+            }
+            run_pipeline(env, st->raw, background);
+            continue;
+        }
 
         /* "cmd arg > /dev" -- pull the redirection off the end, and pass
            whatever is left as the module's argument. */

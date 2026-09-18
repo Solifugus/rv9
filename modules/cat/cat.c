@@ -7,6 +7,16 @@
  * Missing until now because nothing had needed it: a file was something
  * you loaded as a module or edited. The second form is the point -- with
  * redirection already working, a file reaching a device needs no new verb.
+ *
+ * With no name it copies standard input instead, which is what makes it
+ * the simplest thing a pipeline can end with:
+ *
+ *   mdir | cat
+ *
+ * That is not a convenience bolted on for the demonstration. Reading
+ * standard input when given nothing to open is what separates a tool from
+ * a program, and until pipes existed there was no way for any of these to
+ * be one.
  */
 #include "modlib.h"
 
@@ -22,19 +32,20 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     cat_statics_t *st = (cat_statics_t *)env->statics;
     if (st == NULL || env->statics_size < sizeof(*st)) return -2;
 
-    if (env->arg == NULL || env->arg[0] == '\0' || env->arg[0] == ' ') {
-        m_say(env, RV9_STDERR, "usage: cat <file>\n");
-        return -3;
-    }
+    bool named = (env->arg != NULL && env->arg[0] != '\0' &&
+                  env->arg[0] != ' ');
 
-    char name[48];
-    m_word(env->arg, name, sizeof(name));
+    int p = RV9_STDIN;
+    if (named) {
+        char name[48];
+        m_word(env->arg, name, sizeof(name));
 
-    int p = env->open(name, RV9_MODE_READ);
-    if (p < 0) {
-        m_say(env, RV9_STDERR, name);
-        m_say(env, RV9_STDERR, ": cannot open\n");
-        return -4;
+        p = env->open(name, RV9_MODE_READ);
+        if (p < 0) {
+            m_say(env, RV9_STDERR, name);
+            m_say(env, RV9_STDERR, ": cannot open\n");
+            return -4;
+        }
     }
 
     for (;;) {
@@ -43,6 +54,6 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         env->write(RV9_STDOUT, st->buf, (uint32_t)n);
     }
 
-    env->close(p);
+    if (named) env->close(p);
     return 0;
 }

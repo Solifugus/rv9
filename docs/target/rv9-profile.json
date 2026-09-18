@@ -621,7 +621,7 @@
   "processes": {
     "history": 16,
     "history_max": 32,
-    "max_paths": 8,
+    "max_paths": 12,
     "pids": [
       1,
       65535

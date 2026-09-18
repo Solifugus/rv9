@@ -526,11 +526,18 @@ already has beside RBF, NFM, PFM and PIO. `|` in the shell then costs two
 opens and a fork, and every existing module starts composing without being
 touched, because they already read stdin and write stdout.
 
-- [ ] pipe file manager
-- [ ] `|` in the shell
+- [x] pipe file manager — PIPEFM over pipemem, `/pipe`
+- [x] `|` in the shell — up to four stages
 - [ ] `<` input redirection
 - [ ] scripts: a file of commands the shell can run
 - [ ] exit status visible to a script, or tools cannot make decisions
+
+Two notes from building it. Almost nothing read standard input, because
+until pipes existed nothing could: `cat` with no name now copies its input,
+and every filter below must do the same or the pipe has nothing to talk to.
+And a pipeline of three stages needs three processes at once, which fits on
+the console and does not inside an SSH session on this board -- the shell
+says so in words rather than failing obscurely.
 
 ### Naming
 
