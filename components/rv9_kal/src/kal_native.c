@@ -44,6 +44,11 @@
 
 static const char *TAG = "rv9-kal";
 
+/* Waiting forever is passed straight through to the kernel rather than
+   translated, so the two spellings must be the same number. */
+_Static_assert(RV9_WAIT_FOREVER == RV9K_WAIT_FOREVER,
+               "the KAL's 'forever' must be the kernel's 'forever'");
+
 /* The kernel's heap. Its own objects come from here; the host allocator
    still serves DMA and executable memory, which are properties of where
    the memory is rather than of who hands it out.

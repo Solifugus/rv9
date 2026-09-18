@@ -5238,16 +5238,174 @@ If it returns, the board now records free memory at each drop, and the
 first thing to check is whether the access point is moving clients
 around again.
 
+## 44. How long forever is
+
+Step 4 of the migration is `wifi_osi_funcs_t` — the radio blobs running on
+RV-9's primitives instead of FreeRTOS's. Before writing any of it, both
+sides were read properly: what the blobs actually call, and what RV-9
+actually has. That comparison said, unambiguously, that step 4 is not next
+(§45). It also found two faults in what is already here, and neither was
+in the part anyone was looking at.
+
+### A contract with two implementations, and no test where they differ
+
+`RV9_WAIT_FOREVER` is the KAL's way of saying a wait has no deadline. The
+FreeRTOS backend has always translated it: `portMAX_DELAY`, a value that
+kernel reserves for exactly this. The native kernel had nothing, so the
+value fell through to the ordinary conversion from milliseconds to ticks:
+
+```c
+#define RV9K_MS_TO_TICKS(ms)  ((ms) * RV9K_TICK_HZ / 1000)
+```
+
+At 1 kHz that reads as an identity and is one for every value anybody
+tests with. `0xFFFFFFFF * 1000` overflows thirty-two bits before the
+divide can undo it, and what comes out the other side is 2,294,725 ticks.
+**Waiting forever was waiting thirty-eight minutes.**
+
+The same arithmetic is in FreeRTOS's own `pdMS_TO_TICKS`, which multiplies
+in `TickType_t`, so the reference backend had a version of it too: a
+timeout of 4,294,968 ms — seventy-one and a half minutes, the longest wait
+expressible short of forever — converts to **zero** ticks. The longest
+possible wait returned immediately, having waited not at all.
+
+Both are fixed by widening the intermediate, and forever is now its own
+case in the kernel rather than a very large number. "No deadline" cannot
+be spelled as a tick value in any case: every tick value is a legal
+deadline once the counter wraps, so a blocked thread now carries a flag
+saying whether its deadline means anything.
+
+### Why the suite did not catch it
+
+§9c said the conformance suite is the acceptance test for the native
+kernel, and that a contract with two implementations is what forces the
+contract to be written down precisely. That worked — it found a recursive
+mutex deadlocking against itself in the *reference*.
+
+It did not find this, because it only ever passed timeouts of 0, 100 and
+2000 ms. Those are the values a person types while writing a test: small,
+round, and comfortably inside every representation. The two values where
+the implementations disagreed were at the far end of the range, and
+nothing went there.
+
+Four checks now do, and they are structured so they can fail rather than
+hang: a thread is parked on a semaphore nobody has given, the suite
+confirms it is still parked a moment later, then gives the semaphore and
+confirms the wait ended with a *give* rather than a timeout. Both values
+are tested, against both backends.
+
+Putting the old arithmetic back was worth the two minutes it took. It did
+not produce a neat row of FAILs — the board panicked and rebooted, fifty-
+two times, on an illegal instruction inside the parked thread. So the fault
+was never merely "a long wait ends early"; a timeout past seventy-one
+minutes was a way to crash the machine, and no caller had happened to ask
+for one yet.
+
+### The other fault: a header that had stopped being true
+
+`kal.h` said, of `rv9_sem_give_from_isr` and `rv9_queue_send_from_isr`:
+
+> NOT IMPLEMENTED under the native kernel, which refuses with
+> `RV9_ERR_UNSUPPORTED` rather than pretend.
+
+Both have been implemented since §41. The header had simply not been
+changed, and the comment directly beneath it is the account of a driver
+that waited on a semaphore nothing could give and turned a 1.2 second boot
+into fourteen — a fault caused by a caller believing the wrong thing about
+these two functions.
+
+A header is not documentation about code; for anyone calling across a
+seam it *is* the code. This one had been wrong for longer than it was
+right, sitting on top of its own cautionary tale.
+
+## 45. What the radio would need
+
+`wifi_osi_funcs_t` is the table ESP-IDF hands the WiFi blobs so they can
+create a task, take a mutex and post to a queue without knowing whose
+kernel they are on. Satisfying it with RV-9's primitives is the step where
+the radio stops depending on FreeRTOS. Before starting, both halves were
+measured rather than assumed: the blobs were disassembled and every
+indirect call through `g_osi_funcs_p` resolved to a field, so "the driver
+uses this" below means it was seen to, and "does not" means it was looked
+for and is absent.
+
+### The numbers
+
+The WiFi stack creates **exactly one task**: `ppTask`, from
+`pp_create_task`, with a 3 KB or 6 KB stack. Its priority is not a
+constant anywhere in ESP-IDF — the blob asks `_task_get_max_priority()`
+and subtracts two. On this build that is 23 of 25: **second from the top**,
+above everything except the two real-time classes.
+
+### What is genuinely missing
+
+Most of the table is not about scheduling at all — PHY, clocks, NVS, coex,
+logging, thirty-odd fields that pass straight through to ESP-IDF and
+always will. Of the rest:
+
+| | |
+| --- | --- |
+| semaphores, mutexes, task create/delete/delay | already there, thin wrappers |
+| event groups | RV-9 has nothing like them — **and the blobs never call them** |
+| `_queue_create`, `_queue_send_to_front`, `_task_create` | dead on this chip |
+| software timers | **584 call sites, and RV-9 has no timer service at all** |
+| `_task_yield_from_isr` | cannot be honoured as specified |
+| `_is_from_isr` | RV-9 has no "am I in an interrupt" predicate |
+| `_wifi_thread_semphr_get` | needs a second task-local slot; the I/O manager owns the only one |
+
+Event groups looked like the largest gap on paper and are a phantom: five
+stubs that abort loudly is the correct implementation. The timers are the
+opposite — `_timer_disarm` alone is called 217 times and `_timer_done`
+172, and they look like a hardware shim while being a second scheduler.
+That is the one to plan for.
+
+### Why this is not the next step
+
+Three reasons, none of which an adapter layer can absorb:
+
+**The kernel is cooperative and the radio is not optional about being
+scheduled.** `ppTask` blocks on a queue, which is polite, and then runs
+blob code that will never call `rv9k_preempt_point()`. Under RV-9's
+scheduler any compute-bound thread stalls it until it volunteers, and a
+WiFi task that misses beacons gets the station disassociated.
+
+**An interrupt cannot switch to it.** `_task_yield_from_isr` is called
+from the MAC receive interrupt, immediately after `_queue_send_from_isr`,
+and it means *switch now*. RV-9's answer is to raise the count and leave
+the waking for thread context (§9b). That is right for a semaphore and the
+wrong latency for a radio.
+
+**It would lose its standing.** Hosted as an RV-9 thread it runs inside
+`rv9-kernel` at host priority 19, down from 23 — beneath `esp_timer`,
+beneath both real-time classes — and subject to aging, so a starved shell
+thread could transiently outrank it. Raising the kernel task above 23 was
+considered and rejected in §33, because it would put the shell above a
+control loop.
+
+### The roadmap, corrected
+
+This document's §9 listed `wifi_osi_funcs_t` as step 3 and
+`components/rv9_kernel/include/rv9/kernel.h` listed it as step 4, behind
+owning the CPU. The header was right, and the ordering is load-bearing
+rather than cosmetic: the radio needs preemption and an interrupt that can
+reach the scheduler, and both of those are what owning the machine buys.
+The list at the end of this document has been corrected to match.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has
 been validated by use:
 
 1. Implement the RV-9 scheduler, timers and memory allocator natively
-2. Satisfy the KAL with them; the personality layer does not change
-3. Implement `wifi_osi_funcs_t` against RV-9 primitives — the blobs never know
-4. Port lwIP `sys_arch` to RV-9 — one file
+2. Its own timer interrupt, so preemption does not need anyone's cooperation
+3. Own the CPU from reset; the host scheduler goes away
+4. Implement `wifi_osi_funcs_t` against RV-9 primitives — the blobs never
+   know — and port lwIP `sys_arch`, one file
 5. Add PMP-based process isolation, which the 8-bit systems of the 1980s never had
+
+Steps 1 and 2 are done; see §9a and §9b. `wifi_osi_funcs_t` was listed
+here as step 3 for a long time, ahead of owning the CPU. It is behind it,
+and §45 is the measurement that says why.
 
 Throughout, the FreeRTOS build stays alive as a reference: any behavioural
 divergence is a bug in the new kernel, and you have a working system to diff

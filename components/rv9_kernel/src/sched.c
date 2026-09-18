@@ -234,6 +234,7 @@ rv9k_thread_t *rv9k_thread_create(rv9k_entry_fn fn, void *arg, const char *name,
     t->boost              = 0;
     t->state              = RV9K_READY;
     t->wake_at_tick       = 0;
+    t->has_deadline       = false;
     t->blocked_on         = NULL;
     t->ran_ticks          = 0;
     t->entered_tick       = 0;
@@ -337,8 +338,9 @@ static bool block_on(rv9k_waitq_t *wq, uint32_t timeout_ms)
     rv9k_thread_t *self = s_current;
 
     self->blocked_on   = wq;
-    self->wake_at_tick = (timeout_ms == 0) ? 0
-                       : now() + RV9K_MS_TO_TICKS(timeout_ms);
+    self->has_deadline = (timeout_ms != RV9K_WAIT_FOREVER);
+    self->wake_at_tick = self->has_deadline
+                       ? now() + RV9K_MS_TO_TICKS(timeout_ms) : 0;
     self->state        = RV9K_BLOCKED;
     waitq_push(wq, self);
     s_blocks++;
@@ -367,8 +369,10 @@ static void wake_sleepers(void)
         }
 
         /* A blocked thread with a deadline that has passed comes back
-           runnable and discovers for itself that it timed out. */
-        if (th->state == RV9K_BLOCKED && th->wake_at_tick != 0 &&
+           runnable and discovers for itself that it timed out. One
+           blocked forever has no deadline and is left where it is; only a
+           give, a kill or a stop moves it. */
+        if (th->state == RV9K_BLOCKED && th->has_deadline &&
             RV9K_TICK_REACHED(t, th->wake_at_tick)) {
             th->state = RV9K_READY;
         }

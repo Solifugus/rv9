@@ -7,6 +7,9 @@
 
 #include "rv9/kal.h"
 
+_Static_assert(CONF_WAIT_FOREVER == RV9_WAIT_FOREVER,
+               "the suite's 'forever' must be the one this backend is given");
+
 static uint64_t f_time_ms(void)          { return rv9_time_ms(); }
 static void     f_delay_ms(uint32_t ms)  { rv9_task_delay_ms(ms); }
 static void     f_yield(void)            { rv9_task_yield(); }

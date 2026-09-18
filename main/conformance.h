@@ -15,6 +15,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * The contract's spelling of "no deadline", so the portable suite can test
+ * it without reaching into the KAL's header. Both ops tables assert that
+ * it equals their own RV9_WAIT_FOREVER.
+ */
+#define CONF_WAIT_FOREVER ((uint32_t)0xFFFFFFFFu)
+
 typedef struct {
     const char *name;
 

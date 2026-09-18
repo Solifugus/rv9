@@ -53,7 +53,34 @@ extern "C" {
  * and that is the entire dependency.
  */
 #define RV9K_TICK_HZ          1000
-#define RV9K_MS_TO_TICKS(ms)  ((ms) * RV9K_TICK_HZ / 1000)
+
+/*
+ * Milliseconds to ticks, without overflowing on the way.
+ *
+ * This was `(ms) * RV9K_TICK_HZ / 1000` in 32-bit arithmetic: exact for
+ * ordinary values and silently wrong for large ones, because the multiply
+ * wraps before the divide can undo it. A wait of 0xFFFFFFFF ms came out as
+ * 2,294,725 ticks -- thirty-eight minutes. Widening the intermediate costs
+ * nothing at 1 kHz, where the compiler folds the whole expression away,
+ * and it is the difference between a long timeout and a wrong one.
+ */
+#define RV9K_MS_TO_TICKS(ms) \
+    ((uint32_t)(((uint64_t)(ms) * RV9K_TICK_HZ) / 1000u))
+
+/*
+ * Wait with no deadline at all.
+ *
+ * Not the same thing as a very long one. A thread blocked forever is never
+ * made runnable by the clock, so there is no arithmetic to get wrong and
+ * no deadline to arrive early after the tick counter wraps.
+ *
+ * The KAL's RV9_WAIT_FOREVER is this value. The FreeRTOS backend has
+ * always had portMAX_DELAY to map it onto; the native kernel had nothing,
+ * so "forever" quietly became thirty-eight minutes -- the kind of
+ * divergence between two implementations of one contract that the
+ * conformance suite exists to catch, and did not.
+ */
+#define RV9K_WAIT_FOREVER     ((uint32_t)0xFFFFFFFFu)
 
 /* Aging, matching the policy proven in phase 2. */
 #define RV9K_AGE_MAX          10
@@ -85,6 +112,12 @@ struct rv9k_thread {
 
     uint32_t       wake_at_tick;    /* when sleeping */
     void          *blocked_on;      /* which primitive, when blocked */
+
+    /* Whether wake_at_tick means anything while this thread is blocked.
+       A blocked thread may have no deadline -- see RV9K_WAIT_FOREVER --
+       and "no deadline" cannot be spelled as a tick value, because every
+       tick value is a legal deadline once the counter wraps. */
+    bool           has_deadline;
 
     uint32_t       ran_ticks;       /* accounting: CPU actually received */
     uint32_t       entered_tick;    /* when this thread last got the CPU */

@@ -14,6 +14,9 @@
 #include "rv9/kernel.h"
 #include "rv9/kal.h"
 
+_Static_assert(CONF_WAIT_FOREVER == RV9K_WAIT_FOREVER,
+               "the suite's 'forever' must be the one this kernel is given");
+
 static uint64_t n_time_ms(void)
 {
     return (uint64_t)rv9k_ticks() * 1000u / RV9K_TICK_HZ;

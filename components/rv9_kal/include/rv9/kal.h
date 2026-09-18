@@ -73,6 +73,15 @@ const char *rv9_strerror(rv9_err_t err);
 /* ------------------------------------------------------------------ */
 
 #define RV9_NO_WAIT      ((uint32_t)0)
+
+/*
+ * No deadline, rather than a very distant one.
+ *
+ * Both backends must treat this as its own case. FreeRTOS has
+ * portMAX_DELAY; the native kernel has RV9K_WAIT_FOREVER, and until it did
+ * this value went through the ordinary milliseconds-to-ticks conversion,
+ * where the multiply wrapped and forever became thirty-eight minutes.
+ */
 #define RV9_WAIT_FOREVER ((uint32_t)0xFFFFFFFFu)
 
 uint64_t rv9_time_us(void);
@@ -620,16 +629,25 @@ rv9_err_t rv9_sem_give(rv9_sem_t sem);
 /*
  * Give from an interrupt.
  *
- * NOT IMPLEMENTED under the native kernel, which refuses with
- * RV9_ERR_UNSUPPORTED rather than pretend -- making its wait queues
- * interrupt-safe is real work and has not been done. The FreeRTOS backend
- * supports it.
+ * Implemented by both backends, but they do not cost the same thing.
+ * FreeRTOS unblocks the waiter inside the handler. The native kernel
+ * raises the count immediately and leaves the *waking* for thread
+ * context, because unlinking a thread from a wait queue is not something
+ * an interrupt may do to a cooperative kernel: see rv9k_sem_give_from_isr.
+ * Nothing is lost, and a sleeping waiter wakes within a scheduling round
+ * rather than within microseconds. Real-time work does not come through
+ * here.
  *
- * Hence RV9_MUST_CHECK. A caller that drops the result gets a primitive
- * that silently does nothing, and the consequence lands somewhere else
- * entirely: the panel driver waited on a semaphore nothing could ever
- * give, timed out on every transfer, and turned a 1.2 second boot into
- * fourteen. The stub was honest; the caller was not listening.
+ * This said "NOT IMPLEMENTED under the native kernel" for longer than it
+ * was true, which is its own kind of hazard: the header is what a caller
+ * reads before deciding whether to believe the return value.
+ *
+ * Hence RV9_MUST_CHECK, which is about the remaining failure -- a give
+ * that finds the count already at its maximum, or the pending ring full.
+ * A caller that drops the result gets a primitive that silently does
+ * nothing, and the consequence lands somewhere else entirely: the panel
+ * driver waited on a semaphore nothing could ever give, timed out on
+ * every transfer, and turned a 1.2 second boot into fourteen.
  */
 RV9_MUST_CHECK
 rv9_err_t rv9_sem_give_from_isr(rv9_sem_t sem, bool *higher_prio_woken);
@@ -658,7 +676,9 @@ void      rv9_queue_destroy(rv9_queue_t queue);
 rv9_err_t rv9_queue_send(rv9_queue_t queue, const void *item,
                          uint32_t timeout_ms);
 rv9_err_t rv9_queue_recv(rv9_queue_t queue, void *item, uint32_t timeout_ms);
-/* Also unimplemented under the native kernel. See rv9_sem_give_from_isr. */
+/* The item lands now; the waking waits for thread context on the native
+   kernel. False means the queue was full and the item is gone -- inside a
+   handler there is nowhere to put it. See rv9_sem_give_from_isr. */
 RV9_MUST_CHECK
 rv9_err_t rv9_queue_send_from_isr(rv9_queue_t queue, const void *item,
                                   bool *higher_prio_woken);

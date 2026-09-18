@@ -38,6 +38,66 @@ static void worker(void *arg)
     h->ops->task_exit();
 }
 
+/* ---- a thread parked on a wait that must not end early ---- */
+
+typedef struct {
+    const kal_ops_t *ops;
+    void            *sem;
+    uint32_t         timeout_ms;
+    volatile int     returned;
+    volatile int     result;
+} longwait_t;
+
+static void long_waiter(void *arg)
+{
+    longwait_t *w = (longwait_t *)arg;
+    w->result   = w->ops->sem_take(w->sem, w->timeout_ms);
+    w->returned = 1;
+    w->ops->task_exit();
+}
+
+/*
+ * A wait that should still be waiting.
+ *
+ * Parks a thread on a semaphore nobody has given, checks it is still there
+ * after a moment, then gives it and checks the wait ended with a success
+ * rather than a timeout. Done from a second thread because a wait this
+ * long cannot be taken on the thread running the suite.
+ */
+static void check_long_wait(const kal_ops_t *ops, uint32_t timeout_ms,
+                            const char *still_waiting, const char *ended)
+{
+    static longwait_t w;    /* static: the thread outlives this frame */
+
+    w.ops        = ops;
+    w.sem        = NULL;
+    w.timeout_ms = timeout_ms;
+    w.returned   = 0;
+    w.result     = 0;
+
+    if (ops->sem_create(1, 0, &w.sem) != 0 || w.sem == NULL) {
+        check(false, still_waiting);
+        check(false, ended);
+        return;
+    }
+
+    if (ops->task_create(long_waiter, "conf-wait", 4096, &w, 8) != 0) {
+        check(false, still_waiting);
+        check(false, ended);
+        ops->sem_destroy(w.sem);
+        return;
+    }
+
+    ops->delay_ms(150);
+    check(w.returned == 0, still_waiting);
+
+    ops->sem_give(w.sem);
+    for (int i = 0; i < 20 && !w.returned; i++) ops->delay_ms(10);
+
+    check(w.returned == 1 && w.result == 0, ended);
+    ops->sem_destroy(w.sem);
+}
+
 int rv9_conformance_run(const kal_ops_t *ops)
 {
     s_passed  = 0;
@@ -73,6 +133,27 @@ int rv9_conformance_run(const kal_ops_t *ops)
 
         ops->sem_destroy(h.done);
     }
+
+    /*
+     * ---- how long a long wait is ----
+     *
+     * Both backends converted milliseconds to ticks by multiplying in 32
+     * bits. 4294968 ms -- seventy-one and a half minutes, and the largest
+     * timeout a caller can name short of forever -- wrapped to zero ticks,
+     * so the longest possible wait returned immediately having waited not
+     * at all. Forever fared worse on the native kernel: it went through
+     * the same conversion and came out as thirty-eight minutes.
+     *
+     * Neither is visible from one side. The suite runs both backends, and
+     * this is the shape of divergence it exists to find.
+     */
+    check_long_wait(ops, 4294968u,
+                    "a 71-minute timeout has not expired after 150ms",
+                    "a 71-minute wait ends on a give, not a timeout");
+
+    check_long_wait(ops, CONF_WAIT_FOREVER,
+                    "a wait forever has not expired after 150ms",
+                    "a wait forever ends on a give, not a timeout");
 
     /* ---- mutexes ---- */
     void *m = NULL;

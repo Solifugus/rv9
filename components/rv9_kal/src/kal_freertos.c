@@ -40,7 +40,20 @@ static inline TickType_t timeout_to_ticks(uint32_t timeout_ms)
 {
     if (timeout_ms == RV9_WAIT_FOREVER) return portMAX_DELAY;
     if (timeout_ms == RV9_NO_WAIT)      return 0;
-    return pdMS_TO_TICKS(timeout_ms);
+
+    /*
+     * pdMS_TO_TICKS multiplies in TickType_t, which is 32 bits here, so a
+     * timeout longer than about 71 minutes wraps and comes out *short*:
+     * 4294968 ms converts to zero ticks, turning the longest wait a caller
+     * can ask for into no wait at all.
+     *
+     * Widen the intermediate and clamp below portMAX_DELAY, which this
+     * backend reserves to mean forever. The native kernel had the same
+     * arithmetic and the same fault; see RV9K_MS_TO_TICKS.
+     */
+    uint64_t ticks = ((uint64_t)timeout_ms * configTICK_RATE_HZ) / 1000u;
+    if (ticks >= (uint64_t)portMAX_DELAY) return portMAX_DELAY - 1;
+    return (TickType_t)ticks;
 }
 
 const char *rv9_strerror(rv9_err_t err)
