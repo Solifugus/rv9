@@ -5391,6 +5391,72 @@ rather than cosmetic: the radio needs preemption and an interrupt that can
 reach the scheduler, and both of those are what owning the machine buys.
 The list at the end of this document has been corrected to match.
 
+## 46. Where the reserve goes
+
+§43 ended with an open question. Free memory sat flat at around 38 KB for
+hours at a time, and the low-water mark said something had taken it to
+2,500 bytes. The instrument that could see it was built at the end of §43;
+this is what it saw.
+
+A three-hour soak, sampled every two minutes:
+
+| elapsed | heap free | low water | refused |
+| --- | --- | --- | --- |
+| 13 s | 37972 | 27876 | 3 |
+| 2661 s | 50708 | 11268 | 3 |
+| 5685 s | 37992 | 9888 | 4 |
+| 8779 s | 37972 | 9348 | 5 |
+| 10853 s | 40296 | 4968 | 5 |
+
+Free memory does not move. The low-water mark ratchets down all night, and
+the count of allocations the floor refused climbs with it. So nothing is
+leaking; something is taking a large amount and giving it straight back,
+and occasionally several of those coincide.
+
+### Found by taking it apart
+
+From a fresh boot, one thing at a time, reading the low-water mark after
+each. The numbers are what remained free at the worst moment:
+
+| | low water |
+| --- | --- |
+| idle, one session to ask | 27800 |
+| after 20 sessions, one after another | 25952 |
+| after 5 sessions at once | 25320 |
+| **after one real-time loop round** | **16784** |
+| a loop round with 5 sessions across it | 13064 |
+| the same again, twice more | 11204 |
+
+Sessions are nearly free — twenty of them cost 1.8 KB between them, and
+running five at once costs barely more than running them singly. **Forking
+a real-time process costs 8.5 KB**, all of it returned when the process
+ends: a host task and its stack, the slot, the process record, the path
+table.
+
+Nothing here is a leak and nothing is surprising in isolation. The deep
+excursions are coincidences — a real-time fork while two sessions are
+being established — and over a night of a hundred and fifty rounds and
+eight hundred sessions, the rarest coincidences are the ones the low-water
+mark remembers.
+
+### The part worth keeping
+
+The soak's worst reading, 4,968 bytes, is **below the floor**. `free`
+reports a 12,288-byte reserve that RV-9 will not allocate into, and this
+went through it.
+
+That is not the floor failing. It is the floor working, and §23 says so in
+advance: the reserve is not for RV-9's benefit but for everything RV-9
+cannot ask — WiFi, the PHY, lwIP, ESP-IDF's own internals, which allocate
+straight from the heap and abort when they cannot. Keeping RV-9 out of the
+last twelve kilobytes is what leaves them there to be taken. The refusal
+counter climbing from 3 to 5 across the soak is the record of RV-9 being
+told no at exactly those moments, and going without instead.
+
+So the answer to §43's question is that the memory goes where it was
+reserved to go, and the machine stayed up for three hours while it
+happened.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has
