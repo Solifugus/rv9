@@ -1,5 +1,11 @@
 # RV-9
 
+<img src="docs/rv9-mascot.png" alt="The RV-9 mascot: an armoured robot cat with amber eyes, crouched and alert on a circuit-board floor" width="640">
+
+*Nine lives, the finest motion control in nature, and a well-known
+disinclination to take orders from anyone. RV-9 is an independent project;
+see [Name and trademarks](#name-and-trademarks).*
+
 **A small modular operating system for RISC-V, built to run the machines that
 move. Its design is inspired by the classic OS-9 architecture.**
 
