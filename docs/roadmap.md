@@ -506,3 +506,65 @@ attention as RBF.
   gradients.
 - **Phase 7 steps 3-5:** the WiFi blobs on RV-9 primitives, lwIP's
   `sys_arch`, and PMP process isolation.
+
+---
+
+## Phase 10 — Tools that compose
+
+**Goal:** a complete but minimal set of small tools, in the Unix spirit but
+readable. Agreed to run *before* phase 7 step 3, because it makes the system
+worth using now and step 3 is a different project.
+
+### The gate: nothing composes yet
+
+The shell has `>`, `&` and `kill`. It has no pipes, so `dir | match .mod |
+count` is impossible and "small tools" degrades into many small programs
+that cannot talk to each other.
+
+**A pipe is a file manager** — which is the OS-9 answer and fits what RV-9
+already has beside RBF, NFM, PFM and PIO. `|` in the shell then costs two
+opens and a fork, and every existing module starts composing without being
+touched, because they already read stdin and write stdout.
+
+- [ ] pipe file manager
+- [ ] `|` in the shell
+- [ ] `<` input redirection
+- [ ] scripts: a file of commands the shell can run
+- [ ] exit status visible to a script, or tools cannot make decisions
+
+### Naming
+
+Whole words, OS-9 flavoured, matching `dir` / `del` / `procs` / `mdir`.
+Guessable beats short. No Unix aliases: two names per tool is two things to
+document and a module directory full of near-duplicates.
+
+### Stream filters — seven, and no more
+
+- [ ] `match` — lines containing a pattern
+- [ ] `count` — lines, words, bytes
+- [ ] `first` / `last` — leading or trailing lines
+- [ ] `field` — pick columns
+- [ ] `sort`
+- [ ] `unique`
+
+### Files
+
+- [ ] `copy`
+- [ ] `move` — covers rename
+- [ ] `makedir`
+- [ ] `info` — size, type, owner of a path
+- [ ] `dump` — hex; this is a board, it earns its place
+
+### System
+
+- [ ] `log` — read the system log over SSH instead of needing a serial cable
+- [ ] `sleep`
+- [ ] `reboot`
+- [ ] `uptime`
+- [ ] `date` — wants a clock source first, so NTP over WiFi
+
+### Deliberately absent
+
+RV-9's model already covers these, and adding them would be noise: `ls`
+(`dir`), `ps` (`procs`), `mount` (a volume is a descriptor), `chmod` (no
+permission model beyond ownership), `find` (`dir` piped through `match`).
