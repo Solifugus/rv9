@@ -49,14 +49,26 @@ static const char *TAG = "rv9-kal";
 _Static_assert(RV9_WAIT_FOREVER == RV9K_WAIT_FOREVER,
                "the KAL's 'forever' must be the kernel's 'forever'");
 
-/* The kernel's heap. Its own objects come from here; the host allocator
-   still serves DMA and executable memory, which are properties of where
-   the memory is rather than of who hands it out.
-   
-   Sized to what the kernel actually holds -- thread bookkeeping and small
-   objects. Reserving more than that takes it away from the WiFi stack,
-   which needs a great deal more than RV-9 does. */
-#define KERNEL_HEAP_BYTES (32 * 1024)
+/*
+ * The kernel's heap -- and an honest accounting of what is in it.
+ *
+ * Nothing. Thread stacks come from rv9_alloc_internal, because they must
+ * be internal RAM and must go through the floor; semaphores, mutexes and
+ * queues come from the host allocator. Not one allocation in the running
+ * system reaches rv9k_alloc, which is exercised only by the kernel's own
+ * self-test, and that does not run in this build.
+ *
+ * It was 32 KB. On a machine that was offering programs 3.4 KB, a third of
+ * a megabyte of RAM had thirty-two kilobytes of it set aside for a heap
+ * with nothing in it -- ten times what a program could have. OS-9 ran in
+ * 64 KB with room to work, and the difference was never the hardware.
+ *
+ * Four kilobytes keeps the region real, so the kernel's allocator is
+ * exercised and the path exists for the objects that will move into it. It
+ * grows again when the kernel owns the machine and takes its region from
+ * boot information rather than borrowing one.
+ */
+#define KERNEL_HEAP_BYTES (4 * 1024)
 
 static volatile uint32_t *s_tick_ref;
 
