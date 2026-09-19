@@ -579,19 +579,34 @@ Three things the filters exposed, all older than they were:
 
 ### Files
 
-- [ ] `copy`
-- [ ] `move` — covers rename
-- [ ] `makedir`
-- [ ] `info` — size, type, owner of a path
-- [ ] `dump` — hex; this is a board, it earns its place
+- [x] `copy` — between volumes as readily as within one
+- [x] `move` — copy then remove; RBF has no rename and across volumes
+      there would be nothing to rename
+- [ ] ~~`makedir`~~ — **not possible.** RBF's namespace is flat: a path is
+      a device and a name, and there is nowhere to put a directory. Left
+      here rather than deleted, because "why is there no mkdir" deserves
+      an answer.
+- [x] `info` — a path's length, or that it has none
+- [x] `dump` — hex; this is a board, it earns its place
 
 ### System
 
 - [ ] `log` — read the system log over SSH instead of needing a serial cable
-- [ ] `sleep`
-- [ ] `reboot`
-- [ ] `uptime`
+- [x] `sleep` — seconds, or milliseconds when asked; a minute is refused
+      as a likely typo
+- [ ] ~~`reboot`~~ — **not possible.** Nothing in the module ABI restarts
+      the machine, and inventing an entry for it wants more thought than a
+      shell tool deserves.
+- [x] `uptime`
 - [ ] `date` — wants a clock source first, so NTP over WiFi
+
+Writing these found the slowest thing on the board. `/f0` took **fifty-two
+seconds** to store five kilobytes, because RBF hands the block driver one
+sector at a time and the driver did a 4 KB read, erase and write for each
+one. Flash only needs erasing to turn a zero back into a one, so a write
+whose every byte satisfies `(old & new) == new` -- which is any write into
+space that is still erased -- can go straight down. Fifty-two seconds
+became two. See design §48.
 
 ### Deliberately absent
 

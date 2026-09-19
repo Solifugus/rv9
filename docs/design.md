@@ -5457,6 +5457,95 @@ So the answer to §43's question is that the memory goes where it was
 reserved to go, and the machine stayed up for three hours while it
 happened.
 
+## 48. Two places the memory went, and one place the time went
+
+§46 answered where the *reserve* goes. This is about the room that was
+never offered in the first place, and about a volume that took fifty-two
+seconds to store five kilobytes. All three were found by trying to use the
+machine rather than by testing it, which is the argument for building
+tools that compose.
+
+### A heap with nothing in it
+
+A third of a megabyte of RAM, and `free` offered programs **3,424 bytes**.
+OS-9 ran in 64 KB with room to work, so that number was an accusation.
+
+Thirty-two kilobytes of it was the kernel's own heap, and the kernel's own
+heap was empty. Thread stacks come from `rv9_alloc_internal`, because they
+must be internal RAM and must pass the floor; semaphores, mutexes and
+queues come from the host allocator. Not one allocation in the running
+system reaches `rv9k_alloc` -- it is exercised by the kernel's own
+self-test, which does not run in this build. Ten times what a program
+could have, set aside for nothing.
+
+| | before | after |
+| --- | --- | --- |
+| heap free, in a session | 23,904 | 53,220 |
+| for programs | 3,424 | 32,740 |
+
+Four kilobytes keeps the region real so the allocator is exercised and the
+path exists for the objects that will move into it. It grows again when
+the kernel owns the machine and takes its region from boot information
+rather than borrowing one.
+
+What that bought was not abstract. `procs | match active` had been refused
+for memory; three-stage pipelines had been console-only. Both worked
+immediately, with nothing else changed.
+
+### A tool that could see a fifth of the machine
+
+`mdir` held sixteen module records. The store has eighty-six. It had been
+showing a fifth of itself since the day it outgrew its buffer, and the
+thing that finally said so was `mdir | count lines` answering 17.
+
+Nobody had noticed because nobody had ever counted. A list you read is a
+list you believe; a list you pipe into something is a list that gets
+checked.
+
+### Fifty-two seconds to write five kilobytes
+
+`/f0` is RBF over a flash partition, and storing `mdir`'s output took
+**fifty-two seconds** -- about a hundred bytes a second, on the volume
+whose entire purpose is that programs live there.
+
+The driver's own comment said it batched sectors within an erase block so
+that a sequential run cost one cycle rather than eight. It does. **RBF
+never gives it the chance**, because RBF writes one sector at a time. So
+every 512 bytes cost a 4 KB read, a 4 KB erase and a 4 KB write: the
+eightfold amplification the comment described itself as avoiding.
+
+The fix is not batching. It is that **an erase is only needed to turn a
+zero bit back into a one** -- writing can always clear bits. So a write
+whose every byte satisfies `(old & new) == new` can go straight to the
+flash with no cycle at all, and that covers the ordinary case by a wide
+margin: appending to a file, filling a fresh volume, setting a bitmap bit
+that only ever goes from one to zero. The read-erase-write path remains
+for a genuine overwrite, which is what it was always for.
+
+Fifty-two seconds became two, and a `copy` of the same file between
+volumes now takes one. The data was checked by round trip: written to
+flash, copied back, counted, and identical.
+
+### What right-sizing a stack looks like when it is wrong
+
+The first filters were given 2048-byte stacks out of habit, and would not
+compose: a session had about 4 KB and a pipeline wants two processes. They
+were cut to 1536 on the evidence of `mdir`, which peaks at 1176 doing
+more.
+
+Then `copy` was given 1536 too, and peaked at **1436**. In the background
+it worked. In the foreground it went over -- and did not fault. §22's
+guard catches a call chain one frame too deep by standing on it; a frame
+that steps *over* it corrupts whatever is underneath, and what happened
+instead was a hang. `smash`, which descends deliberately onto the guard,
+still reports correctly; that is the difference between touching the wall
+and going through it.
+
+The lesson is not "use bigger stacks". It is that a measured peak plus a
+hundred bytes is not a margin, and that until the PMP arrives (phase 7
+step 5) the guard is a detector with a known blind spot rather than a
+protection.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

@@ -7,10 +7,27 @@
  *
  * The awkward part is that flash erases in 4 KB blocks and RBF writes in
  * 512-byte sectors. A partial write therefore means read the whole erase
- * block, patch the sectors inside it, erase, and write it back. That is
- * eight times the write traffic in the worst case, and the driver batches
- * by erase block so a sequential run of sectors costs one cycle rather
- * than eight.
+ * block, patch the sectors inside it, erase, and write it back.
+ *
+ * This batches consecutive sectors that fall in one erase block, which
+ * helps exactly when the caller offers several at once -- and RBF never
+ * does. It writes a sector at a time, so every 512 bytes cost a 4 KB read,
+ * a 4 KB erase and a 4 KB write. Measured: `mdir > /f0/b.txt`, five and a
+ * half kilobytes, took **fifty-two seconds**. About a hundred bytes a
+ * second, on a volume whose whole purpose is that programs live there.
+ *
+ * WHAT FLASH ACTUALLY REQUIRES
+ *
+ * An erase is only needed to turn a zero bit back into a one. Writing can
+ * always clear bits. So a write whose every byte satisfies
+ * (old & new) == new -- which includes the ordinary case of writing into
+ * space that is still erased, all 0xFF -- can go straight to the flash
+ * with no read-modify-erase cycle at all.
+ *
+ * That is the common case by a wide margin: appending to a file, filling a
+ * fresh volume, writing a bitmap bit that only ever goes from one to zero.
+ * The slow path remains for a genuine overwrite, which is what it was
+ * always for.
  *
  * Flash wears out -- on the order of 100k erase cycles per block. This is
  * fine for configuration, programs and logs written occasionally. It is
@@ -119,7 +136,40 @@ static rv9_io_err_t flashdisk_write(rv9_dev_t *dev, uint32_t lsn,
         uint32_t here = SECTORS_PER_ERASE - within;
         if (here > count - done) here = count - done;
 
-        size_t block_off = (size_t)block * ERASE_SIZE;
+        size_t block_off  = (size_t)block * ERASE_SIZE;
+        size_t sector_off = block_off + (size_t)within * SECTOR_SIZE;
+        size_t span       = (size_t)here * SECTOR_SIZE;
+        const uint8_t *from = src + (size_t)done * SECTOR_SIZE;
+
+        /*
+         * Can this be written where it stands?
+         *
+         * Only if every bit we are turning on is already on, because flash
+         * writing clears bits and never sets them. Reading the span costs
+         * one read; getting the answer right saves an erase and a 4 KB
+         * write, which is the whole difference between this volume being
+         * usable and not.
+         */
+        if (esp_partition_read(f->part, sector_off, f->scratch,
+                               span) == ESP_OK) {
+            bool clears_only = true;
+            for (size_t i = 0; i < span; i++) {
+                if ((f->scratch[i] & from[i]) != from[i]) {
+                    clears_only = false;
+                    break;
+                }
+            }
+
+            if (clears_only) {
+                if (esp_partition_write(f->part, sector_off, from,
+                                        span) != ESP_OK) {
+                    result = RV9_IO_ERR_IO;
+                    break;
+                }
+                done += here;
+                continue;
+            }
+        }
 
         if (esp_partition_read(f->part, block_off, f->scratch,
                                ERASE_SIZE) != ESP_OK) {

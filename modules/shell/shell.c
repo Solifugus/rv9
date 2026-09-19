@@ -310,7 +310,7 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
         char *name = NULL;
         char *arg  = cut_name(seg[i], &name);
         if (name[0] == '\0') {
-            m_say(env, RV9_STDOUT, "empty stage in the pipeline\n");
+            m_say(env, RV9_STDERR, "empty stage in the pipeline\n");
             broken = true;
             break;
         }
@@ -324,6 +324,12 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
                     *q = '\0';
                     char *f = q + 1;
                     while (*f == ' ') f++;
+                    /* And the space before the bar. "a < f | b" split at
+                       the bar leaves "f " -- which opens as a name with a
+                       space on the end, and does not exist. */
+                    char *e = f;
+                    while (*e) e++;
+                    while (e > f && (e[-1] == ' ' || e[-1] == '\t')) *--e = '\0';
                     if (*f) source = f;
                     break;
                 }
@@ -338,6 +344,9 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
                     *q = '\0';
                     char *t = q + 1;
                     while (*t == ' ') t++;
+                    char *e = t;
+                    while (*e) e++;
+                    while (e > t && (e[-1] == ' ' || e[-1] == '\t')) *--e = '\0';
                     if (*t) target = t;
                     break;
                 }
@@ -357,8 +366,8 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
 
             if (pw < 0 || pr < 0) {
                 if (pw >= 0) env->close(pw);
-                m_say(env, RV9_STDOUT, pipename);
-                m_say(env, RV9_STDOUT, ": no pipe to be had\n");
+                m_say(env, RV9_STDERR, pipename);
+                m_say(env, RV9_STDERR, ": no pipe to be had\n");
                 broken = true;
                 break;
             }
@@ -367,8 +376,8 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
         if (target != NULL) {
             int t = env->open(target, RV9_MODE_WRITE | RV9_MODE_CREATE);
             if (t < 0) {
-                m_say(env, RV9_STDOUT, target);
-                m_say(env, RV9_STDOUT, ": cannot open\n");
+                m_say(env, RV9_STDERR, target);
+                m_say(env, RV9_STDERR, ": cannot open\n");
                 broken = true;
             } else {
                 env->dup2(t, RV9_STDOUT);
@@ -381,8 +390,15 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
         if (!broken && source != NULL) {
             int f = env->open(source, RV9_MODE_READ);
             if (f < 0) {
-                m_say(env, RV9_STDOUT, source);
-                m_say(env, RV9_STDOUT, ": cannot open\n");
+                /*
+                 * Standard error, not standard output: by this point this
+                 * stage's output has been pointed at the pipe, so saying
+                 * it on stdout would post the complaint into the very pipe
+                 * whose reader is about to be abandoned. It was, and the
+                 * command produced nothing at all.
+                 */
+                m_say(env, RV9_STDERR, source);
+                m_say(env, RV9_STDERR, ": cannot open\n");
                 broken = true;
             } else {
                 env->dup2(f, RV9_STDIN);
