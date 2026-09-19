@@ -19,6 +19,12 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 
     m_say(env, RV9_STDOUT, "heap free      ");
     m_num(env, RV9_STDOUT, (int32_t)m.heap_free);
+
+    /* The number that decides whether an allocation succeeds. A total
+       cannot: a heap free in small pieces refuses a large request while
+       reporting plenty of room. */
+    m_say(env, RV9_STDOUT, "\n  largest block ");
+    m_num(env, RV9_STDOUT, (int32_t)m.heap_largest);
     m_say(env, RV9_STDOUT, "\navailable      ");
     m_num(env, RV9_STDOUT, (int32_t)m.heap_available);
 

@@ -1017,6 +1017,22 @@ typedef struct __attribute__((packed)) {
      * machine. This one is re-based once every suite has finished.
      */
     uint32_t heap_low_since_up;
+
+    /*
+     * The largest single block still available, which is the number that
+     * decides whether an allocation succeeds.
+     *
+     * `heap_free` is a total, and a total cannot fail an allocation on its
+     * own -- a heap with forty kilobytes free in four-kilobyte pieces will
+     * refuse an eight-kilobyte request and report plenty of room. Without
+     * this the machine cannot say whether it ran out of memory or ran out
+     * of *contiguous* memory, and those want opposite fixes: one wants
+     * less spending, the other wants less churn.
+     *
+     * Appended after heap_low_since_up, so a caller built against the
+     * older record still works: see RV9_SYS_MEM_MIN.
+     */
+    uint32_t heap_largest;
 } rv9_sys_mem_t;
 
 /* What a caller must ask for at minimum, and the boundary that must not

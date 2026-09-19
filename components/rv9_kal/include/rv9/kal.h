@@ -707,6 +707,17 @@ void *rv9_alloc_internal(size_t size);
 void  rv9_free(void *ptr);
 
 size_t rv9_heap_free(void);        /* bytes currently free */
+
+/*
+ * The largest single block still available.
+ *
+ * The number that actually decides whether an allocation succeeds, and the
+ * one a total cannot stand in for: a heap with forty kilobytes free in
+ * four-kilobyte pieces refuses an eight-kilobyte request while reporting
+ * plenty of room. Knowing both is how "out of memory" and "out of
+ * *contiguous* memory" can be told apart, and they want opposite fixes.
+ */
+size_t rv9_heap_largest(void);
 size_t rv9_heap_free_exec(void);   /* bytes free that may be executed */
 size_t rv9_heap_low_water(void);
 

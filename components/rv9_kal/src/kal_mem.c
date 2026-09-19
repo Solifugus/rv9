@@ -250,6 +250,11 @@ void *rv9_alloc_internal(size_t size)
  */
 void *rv9_alloc_critical(size_t size) { return malloc(size); }
 
+size_t rv9_heap_largest(void)
+{
+    return heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+}
+
 size_t rv9_heap_free(void)
 {
     return heap_caps_get_free_size(MALLOC_CAP_DEFAULT);

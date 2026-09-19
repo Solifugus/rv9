@@ -8,3 +8,7 @@ dependencies.lock
 # editors
 .vscode/
 *.swp
+
+# The soak harness lives outside the repo: it holds the network it tests
+# against, and a masking table is still the credentials written down.
+tools/soak.py
