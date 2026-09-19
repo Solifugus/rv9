@@ -17,7 +17,7 @@
  */
 #include "modlib.h"
 
-#define LINE_CAP  80
+#define LINE_CAP  64
 #define LINE_MAXN 128
 
 typedef struct {
@@ -55,12 +55,17 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     }
 
     uint32_t n = 0;
-    bool     full = false;
+    bool     full = false, toolong = false;
 
     for (;;) {
         if (m_getline(env, RV9_STDIN, &st->in, st->line, LINE_CAP) < 0) break;
 
         if (n == LINE_MAXN) { full = true; break; }
+
+        /* A line at the cap was truncated on the way in by m_getline, and
+           quietly sorting a shortened line is the other way to give an
+           answer that looks right and is not. */
+        if (m_len(st->line) >= LINE_CAP - 1) { toolong = true; break; }
 
         /* Insert where it belongs, shifting the tail down one. */
         uint32_t at = n;
@@ -76,6 +81,11 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         m_say(env, RV9_STDERR, "sort: more than 128 lines; refusing to "
                                "answer with only some of them\n");
         return -3;
+    }
+    if (toolong) {
+        m_say(env, RV9_STDERR, "sort: a line longer than 63 characters; "
+                               "refusing to sort it shortened\n");
+        return -4;
     }
 
     for (uint32_t i = 0; i < n; i++) {
