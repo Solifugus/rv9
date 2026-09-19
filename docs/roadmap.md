@@ -528,7 +528,7 @@ touched, because they already read stdin and write stdout.
 
 - [x] pipe file manager — PIPEFM over pipemem, `/pipe`
 - [x] `|` in the shell — up to four stages
-- [ ] `<` input redirection
+- [x] `<` input redirection — on a plain command and on a pipeline's first stage
 - [ ] scripts: a file of commands the shell can run
 - [ ] exit status visible to a script, or tools cannot make decisions
 
@@ -539,6 +539,13 @@ And a pipeline of three stages needs three processes at once, which fits on
 the console and does not inside an SSH session on this board -- the shell
 says so in words rather than failing obscurely.
 
+Which makes a filter's stack a first-class concern rather than a detail.
+`count` and `match` were given 2048 by habit and would not compose in a
+session; measured against `mdir`, which peaks at 1176 while doing more,
+1536 was enough and was the difference between working and not. Every
+filter below should be sized the same way -- buffers in statics, and the
+stack measured rather than assumed.
+
 ### Naming
 
 Whole words, OS-9 flavoured, matching `dir` / `del` / `procs` / `mdir`.
@@ -547,8 +554,8 @@ document and a module directory full of near-duplicates.
 
 ### Stream filters — seven, and no more
 
-- [ ] `match` — lines containing a pattern
-- [ ] `count` — lines, words, bytes
+- [x] `match` — lines containing a pattern (plain text, not a language)
+- [x] `count` — lines, words, bytes; name one to get the number alone
 - [ ] `first` / `last` — leading or trailing lines
 - [ ] `field` — pick columns
 - [ ] `sort`

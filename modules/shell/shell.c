@@ -96,21 +96,22 @@ static void fallback_kill(const rv9_mod_env_t *env, const char *arg)
  * at the driver with an empty password and sent us hunting through WPA
  * settings for a fault that was never there.
  */
-static char *rest_of_line(char *raw, const char *redirect_target)
+static char *rest_of_line(char *raw)
 {
     char *p = raw;
     while (*p && *p != ' ' && *p != '\t') p++;      /* past the command */
     while (*p == ' ' || *p == '\t') p++;            /* to the first argument */
     if (*p == '\0') return NULL;
 
-    /* Stop before any redirection, which is the shell's business. */
-    if (redirect_target != NULL) {
-        for (char *r = p; *r; r++) {
-            if (*r == '>') {
-                while (r > p && (r[-1] == ' ' || r[-1] == '\t')) r--;
-                *r = '\0';
-                break;
-            }
+    /* Stop before any redirection, in either direction: where the output
+       goes and where the input comes from are the shell's business, not
+       the module's, and a module handed "> /r0/x" as an argument would
+       treat it as one. */
+    for (char *r = p; *r; r++) {
+        if (*r == '>' || *r == '<') {
+            while (r > p && (r[-1] == ' ' || r[-1] == '\t')) r--;
+            *r = '\0';
+            break;
         }
     }
 
@@ -160,7 +161,7 @@ static void help(const rv9_mod_env_t *env)
           "commands are modules; 'mdir' lists them\n"
           "  help              this text\n"
           "  exit              leave the shell\n"
-          "  <module> [arg] [> dev]  fork it, optionally redirected\n"
+          "  <module> [arg] [< file] [> dev]  fork it, redirected\n"
           "  <module> | <module>     what one writes, the next reads\n"
           "  <module> &        run it without waiting; see it in 'procs'\n"
           "  kill [-f] <pid>   stop one: ask, then insist\n"
@@ -314,6 +315,21 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
             break;
         }
 
+        /* The first stage may take its input from a file, as any command
+           may; the later ones take it from the stage before. */
+        const char *source = NULL;
+        if (i == 0) {
+            for (char *q = arg; *q; q++) {
+                if (*q == '<') {
+                    *q = '\0';
+                    char *f = q + 1;
+                    while (*f == ' ') f++;
+                    if (*f) source = f;
+                    break;
+                }
+            }
+        }
+
         /* The last stage may still redirect, as any command may. */
         const char *target = NULL;
         if (i == stages - 1) {
@@ -362,7 +378,19 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
             env->dup2(pw, RV9_STDOUT);
         }
 
-        if (!broken && prev_read >= 0) env->dup2(prev_read, RV9_STDIN);
+        if (!broken && source != NULL) {
+            int f = env->open(source, RV9_MODE_READ);
+            if (f < 0) {
+                m_say(env, RV9_STDOUT, source);
+                m_say(env, RV9_STDOUT, ": cannot open\n");
+                broken = true;
+            } else {
+                env->dup2(f, RV9_STDIN);
+                env->close(f);
+            }
+        } else if (!broken && prev_read >= 0) {
+            env->dup2(prev_read, RV9_STDIN);
+        }
 
         if (!broken) pids[i] = env->fork_arg(name, 8, arg);
 
@@ -414,15 +442,35 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
  * forks -- the child gets the target without knowing -- then puts it back.
  */
 static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
-                const char *target, bool background)
+                const char *target, const char *source, bool background)
 {
-    int redirected = 0;
+    /*
+     * Park first, open second -- both of them, before either.
+     *
+     * open() hands out the lowest free slot, so opening the target and
+     * then parking into a fixed slot can land the parked copy on top of
+     * the thing just opened. That cost an afternoon in the pipeline; it
+     * is the same mistake available here.
+     */
+    int saved_out = -1, saved_in = -1;
 
     if (target != NULL) {
-        if (env->dup2(RV9_STDOUT, SAVE_PATH) < 0) {
+        saved_out = env->dup2(RV9_STDOUT, SAVE_OUT);
+        if (saved_out < 0) {
             m_say(env, RV9_STDOUT, "cannot save stdout\n");
             return;
         }
+    }
+    if (source != NULL) {
+        saved_in = env->dup2(RV9_STDIN, SAVE_IN);
+        if (saved_in < 0) {
+            if (saved_out >= 0) env->close(SAVE_OUT);
+            m_say(env, RV9_STDOUT, "cannot save stdin\n");
+            return;
+        }
+    }
+
+    if (target != NULL) {
         /* CREATE so that "> /r0/thing" makes a file rather than failing.
            Redirecting to a device ignores it; redirecting to a volume is
            how anything gets onto one. */
@@ -430,12 +478,25 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         if (t < 0) {
             m_say(env, RV9_STDOUT, target);
             m_say(env, RV9_STDOUT, ": cannot open\n");
-            env->close(SAVE_PATH);
+            if (saved_in  >= 0) env->close(SAVE_IN);
+            env->close(SAVE_OUT);
             return;
         }
         env->dup2(t, RV9_STDOUT);
         env->close(t);
-        redirected = 1;
+    }
+    if (source != NULL) {
+        int f = env->open(source, RV9_MODE_READ);
+        if (f < 0) {
+            m_say(env, RV9_STDOUT, source);
+            m_say(env, RV9_STDOUT, ": cannot open\n");
+            if (saved_out >= 0) { env->dup2(SAVE_OUT, RV9_STDOUT);
+                                  env->close(SAVE_OUT); }
+            env->close(SAVE_IN);
+            return;
+        }
+        env->dup2(f, RV9_STDIN);
+        env->close(f);
     }
 
     int pid = env->fork_arg(name, 8, arg);
@@ -454,9 +515,13 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         if (env->wait(pid, &status, RV9_WAIT_FOREVER) < 0) status = -1;
     }
 
-    if (redirected) {
-        env->dup2(SAVE_PATH, RV9_STDOUT);
-        env->close(SAVE_PATH);
+    if (saved_out >= 0) {
+        env->dup2(SAVE_OUT, RV9_STDOUT);
+        env->close(SAVE_OUT);
+    }
+    if (saved_in >= 0) {
+        env->dup2(SAVE_IN, RV9_STDIN);
+        env->close(SAVE_IN);
     }
 
     if (pid < 0 && fallback) {
@@ -586,14 +651,12 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 
         /* "cmd arg > /dev" -- pull the redirection off the end, and pass
            whatever is left as the module's argument. */
-        const char *target = NULL;
+        const char *target = NULL, *source = NULL;
         for (int i = 1; i < argc; i++) {
-            if (m_eq(argv[i], ">") && i + 1 < argc) {
-                target = argv[i + 1];
-                break;
-            }
+            if (m_eq(argv[i], ">") && i + 1 < argc) target = argv[i + 1];
+            if (m_eq(argv[i], "<") && i + 1 < argc) source = argv[i + 1];
         }
-        const char *arg = rest_of_line(st->raw, target);
+        const char *arg = rest_of_line(st->raw);
 
         /*
          * Mirror to the panel, but never take it back.
@@ -611,7 +674,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
             m_say(env, st->term, "\n");
         }
 
-        run(env, argv[0], arg, target, background);
+        run(env, argv[0], arg, target, source, background);
     }
 
     if (st->term_open) env->close(st->term);
