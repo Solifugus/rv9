@@ -22,6 +22,16 @@
 #define LISTEN_PATH "/n0/listen/2300"
 #define SAVE_IN     5
 #define SAVE_OUT    6
+/*
+ * And somewhere to park standard error, which this daemon used to leave
+ * pointing at the console.
+ *
+ * Every "cannot open", every usage line, every refusal a tool wrote to
+ * stderr went to the board's log instead of to the person who typed the
+ * command -- so over a network session a failing command produced a
+ * status and no explanation. A session's errors belong in the session.
+ */
+#define SAVE_ERR    7
 
 typedef struct {
     uint32_t sessions;
@@ -48,8 +58,10 @@ int rv9_module_entry(const rv9_mod_env_t *env)
            connection, and hand them to a shell. */
         env->dup2(RV9_STDIN, SAVE_IN);
         env->dup2(RV9_STDOUT, SAVE_OUT);
+        env->dup2(RV9_STDERR, SAVE_ERR);
         env->dup2(c, RV9_STDIN);
         env->dup2(c, RV9_STDOUT);
+        env->dup2(c, RV9_STDERR);
 
         int pid = env->fork_arg("shell", 8, 0);
         if (pid >= 0) {
@@ -60,8 +72,10 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         /* Put the console back, whatever happened to the session. */
         env->dup2(SAVE_IN, RV9_STDIN);
         env->dup2(SAVE_OUT, RV9_STDOUT);
+        env->dup2(SAVE_ERR, RV9_STDERR);
         env->close(SAVE_IN);
         env->close(SAVE_OUT);
+        env->close(SAVE_ERR);
         env->close(c);
 
         m_say(env, RV9_STDERR, "rshd: session ended\n");

@@ -74,6 +74,53 @@ static inline uint32_t m_age_ms(uint64_t now_us, uint64_t then_us)
 }
 
 /* Split "a b" into the first word and the rest. */
+/* ------------------------------------------------------------------ */
+/* Reading input a line at a time                                      */
+/*                                                                     */
+/* Every filter wants the same loop -- read a chunk, hand back lines,  */
+/* remember what is left over -- and five copies of it would be five   */
+/* chances to get the leftover wrong. The state lives in the caller's  */
+/* statics because a module has no globals to put it in.               */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    char    buf[96];
+    int16_t have;       /* bytes in buf */
+    int16_t next;       /* next byte to hand out */
+} m_lines_t;
+
+/*
+ * One line into out[cap], NUL-terminated and without its newline.
+ * Returns its length, or -1 when the input has finished.
+ *
+ * A line longer than the buffer is truncated rather than dropped, and a
+ * last line with no newline on the end is still returned -- both because
+ * losing input silently is the one thing a filter must never do.
+ */
+static inline int m_getline(const rv9_mod_env_t *env, int path,
+                            m_lines_t *ls, char *out, uint32_t cap)
+{
+    uint32_t len = 0;
+
+    for (;;) {
+        if (ls->next >= ls->have) {
+            int n = env->read(path, ls->buf, sizeof(ls->buf));
+            ls->have = (int16_t)(n > 0 ? n : 0);
+            ls->next = 0;
+            if (n <= 0) {
+                if (len == 0) return -1;
+                out[len] = '\0';
+                return (int)len;
+            }
+        }
+
+        char c = ls->buf[ls->next++];
+        if (c == '\n') { out[len] = '\0'; return (int)len; }
+        if (c == '\r') continue;
+        if (len + 1 < cap) out[len++] = c;
+    }
+}
+
 static inline const char *m_word(const char *s, char *out, uint32_t cap)
 {
     uint32_t i = 0;

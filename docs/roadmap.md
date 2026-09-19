@@ -556,10 +556,26 @@ document and a module directory full of near-duplicates.
 
 - [x] `match` — lines containing a pattern (plain text, not a language)
 - [x] `count` — lines, words, bytes; name one to get the number alone
-- [ ] `first` / `last` — leading or trailing lines
-- [ ] `field` — pick columns
-- [ ] `sort`
-- [ ] `unique`
+- [x] `first` / `last` — leading or trailing lines
+- [x] `field` — pick columns, counted from one
+- [x] `sort` — 128 lines; more than that is refused, never silently partial
+- [x] `unique` — adjacent duplicates, so usually after `sort`
+
+The seven are done. `modlib.h` grew `m_getline`, because five copies of
+"read a chunk, hand back lines, remember the leftover" would have been
+five chances to get the leftover wrong.
+
+Three things the filters exposed, all older than they were:
+
+- **The kernel's heap held nothing** and was 32 KB of a machine offering
+  programs 3.4 KB. Now 4 KB; programs have 48 KB. See design §48.
+- **`mdir` could see 16 modules** and the store had 86. It had been showing
+  a fifth of itself since the day it outgrew the buffer, and piping it into
+  `count` is what finally said so.
+- **Standard error never reached a network session.** `sshd` and `rshd`
+  pointed a session's input and output at the connection and left its
+  errors on the console, so a failing command over SSH produced a status
+  and no explanation.
 
 ### Files
 

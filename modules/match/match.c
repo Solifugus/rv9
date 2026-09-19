@@ -40,7 +40,13 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     if (env == NULL || env->abi_version < 9) return -1;
 
     match_statics_t *st = (match_statics_t *)env->statics;
-    if (st == NULL || env->statics_size < sizeof(*st)) return -2;
+    if (st == NULL || env->statics_size < sizeof(*st)) {
+        /* Silence here is how four missing bytes cost an afternoon: the
+           module returned -2, the shell reported nothing, and the command
+           simply produced no output. */
+        m_say(env, RV9_STDERR, "match: static_size in build.conf is too small\n");
+        return -2;
+    }
 
     char want[48];
     want[0] = '\0';

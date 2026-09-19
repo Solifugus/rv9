@@ -6,7 +6,14 @@
  */
 #include "modlib.h"
 
-#define MAX_MODULES 16
+/*
+ * Enough for the whole store, which is the only number that is ever
+ * right. It was sixteen, chosen when sixteen was generous; the store
+ * passed eighty without anybody noticing, and `mdir` had been quietly
+ * showing a fifth of it ever since. Piping it into `count` is what
+ * finally said so out loud.
+ */
+#define MAX_MODULES 128
 
 typedef struct {
     rv9_sys_module_t mods[MAX_MODULES];
