@@ -857,6 +857,28 @@ _Static_assert(sizeof(rv9_pub_info_t) == 56, "rv9_pub_info_t is frozen");
 #define RV9_SYS_LIMITS   9     /* rv9_sys_limits_t, one record           */
 #define RV9_SYS_BUDGETS 10     /* rv9_sys_budget_t, one per live process */
 #define RV9_SYS_STACK_PEAKS 11 /* rv9_sys_stack_peak_t, one per module run */
+#define RV9_SYS_LOG     12     /* rv9_sys_log_t, a window of the system log */
+
+/*
+ * A window of the log, read back from the ring the system keeps.
+ *
+ * In and out in the same record: the caller sets `from` and `want`, and
+ * the system fills `text` and sets `got` and `held`. A reader walks
+ * forward by adding `got` to `from`, and knows it has reached the end
+ * when `got` comes back zero.
+ *
+ * The offsets shift under a reader that dawdles while the machine is
+ * logging, because the oldest bytes fall off the end of a ring. That is
+ * the honest behaviour: a tool that cannot keep up should see the recent
+ * past rather than a consistent view of an old one.
+ */
+typedef struct __attribute__((packed)) {
+    uint32_t from;      /* in:  byte offset into what is held */
+    uint32_t want;      /* in:  how much of `text` may be used */
+    uint32_t got;       /* out: how much was written */
+    uint32_t held;      /* out: how many bytes the ring holds now */
+    char     text[256];
+} rv9_sys_log_t;
 
 /* What each running process is charged, and what it is allowed. */
 typedef struct __attribute__((packed)) {
@@ -1197,6 +1219,11 @@ typedef enum {
 } rv9_mod_err_t;
 
 const char *rv9_mod_strerror(rv9_mod_err_t err);
+
+/* Where RV9_SYS_LOG's answer comes from. The ring lives above this layer;
+   a build without one answers with nothing. */
+void rv9_mod_set_log_source(uint32_t (*read)(uint32_t, char *, uint32_t),
+                            uint32_t (*held)(void));
 
 /* Scan the module store and build the directory. Safe to call once at boot.
    Returns the number of valid modules found. */

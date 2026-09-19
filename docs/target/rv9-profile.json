@@ -272,7 +272,8 @@
     "DEVICES": 8,
     "LIMITS": 9,
     "BUDGETS": 10,
-    "STACK_PEAKS": 11
+    "STACK_PEAKS": 11,
+    "LOG": 12
   },
   "calls": [
     {

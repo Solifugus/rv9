@@ -14,6 +14,7 @@
 #include "rv9/io_builtin.h"
 #include "rv9/ssh_builtin.h"
 #include "kal_selftest.h"
+#include "logring.h"
 #include "kernel_test.h"
 #include "module_test.h"
 #include "io_test.h"
@@ -768,6 +769,14 @@ static void rv9_init_task(void *arg)
      * self-test reported accurately the first time it was asked from the
      * wrong place.
      */
+    /*
+     * Start keeping the log before the tests run, so that whatever a
+     * failing boot has to say is still readable afterwards over the
+     * network -- which is the whole reason for keeping it.
+     */
+    rv9_logring_start();
+    rv9_mod_set_log_source(rv9_logring_read, rv9_logring_held);
+
     if (!rv9_kal_selftest()) {
         ESP_LOGE(TAG, "KAL self-test failed -- not proceeding");
         return;

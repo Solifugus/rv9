@@ -591,7 +591,11 @@ Three things the filters exposed, all older than they were:
 
 ### System
 
-- [ ] `log` — read the system log over SSH instead of needing a serial cable
+- [x] `log` — read the system log over SSH instead of needing a serial
+      cable. An 8 KB ring in RAM, filled by chaining `esp_log_set_vprintf`
+      so the serial port still gets every line, read back through sysinfo
+      like `procs` and `mdir` read theirs. No options for searching or
+      counting, because `match` and `count` already exist and compose.
 - [x] `sleep` — seconds, or milliseconds when asked; a minute is refused
       as a likely typo
 - [ ] ~~`reboot`~~ — **not possible.** Nothing in the module ABI restarts

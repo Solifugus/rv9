@@ -12,7 +12,10 @@
  */
 #include "modlib.h"
 
-#define LINE_CAP  96
+/* Long enough for a log line, which is what this is mostly pointed at.
+   96 cut "W (59469) wifi:<ba-add>idx:1, ifx:0, ..." in half, and a tool
+   that quietly shortens what it shows you is worse than no tool. */
+#define LINE_CAP  144
 #define RING_MAX  16
 
 typedef struct {

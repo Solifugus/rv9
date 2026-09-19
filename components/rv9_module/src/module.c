@@ -18,6 +18,24 @@
 static const char *TAG = "rv9-mod";
 
 /*
+ * Where the kept log comes from.
+ *
+ * Registered rather than called, because the ring lives above this layer
+ * -- it is part of the system rv9_module serves, not part of the module
+ * manager. A build without one answers RV9_SYS_LOG with nothing, which is
+ * the truth for that build.
+ */
+static uint32_t (*s_log_read)(uint32_t from, char *out, uint32_t cap);
+static uint32_t (*s_log_held)(void);
+
+void rv9_mod_set_log_source(uint32_t (*read)(uint32_t, char *, uint32_t),
+                            uint32_t (*held)(void))
+{
+    s_log_read = read;
+    s_log_held = held;
+}
+
+/*
  * Storage backend.
  *
  * TODO (phase 5): this belongs behind an RBF driver once the I/O manager
@@ -706,6 +724,18 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
     case RV9_SYS_ADMIT: {
         if (s_proc_ops == NULL || s_proc_ops->rt_load == NULL) return -1;
         return s_proc_ops->rt_load(buf, len);
+    }
+
+    case RV9_SYS_LOG: {
+        if (buf == NULL || len < sizeof(rv9_sys_log_t)) return -1;
+        rv9_sys_log_t *q = (rv9_sys_log_t *)buf;
+
+        uint32_t cap = q->want;
+        if (cap > sizeof(q->text)) cap = sizeof(q->text);
+
+        q->held = s_log_held ? s_log_held() : 0;
+        q->got  = s_log_read ? s_log_read(q->from, q->text, cap) : 0;
+        return (int)q->got;
     }
 
     case RV9_SYS_MODULES: {

@@ -10,7 +10,7 @@
  */
 #include "modlib.h"
 
-#define LINE_CAP 96
+#define LINE_CAP 144
 
 typedef struct {
     m_lines_t in;
