@@ -44,10 +44,14 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     int n = env->sysinfo(RV9_SYS_MODULES, st->mods, sizeof(st->mods));
     if (n < 0) return -3;
 
-    m_say(env, RV9_STDOUT, "name        type    rev  size link\n");
+    /* Thirteen wide because the longest name in the store is twelve
+       ('st-rt-badpin') and a name that exactly fills its column used to
+       fuse with the type beside it. The format allows 31, so m_pad still
+       has to guarantee a separator; this only keeps the table straight. */
+    m_say(env, RV9_STDOUT, "name         type    rev  size link\n");
 
     for (int i = 0; i < n; i++) {
-        m_pad(env, RV9_STDOUT, st->mods[i].name, 12);
+        m_pad(env, RV9_STDOUT, st->mods[i].name, 13);
         m_pad(env, RV9_STDOUT, type_name(st->mods[i].type), 8);
         m_numpad(env, RV9_STDOUT, st->mods[i].revision, 5);
         m_numpad(env, RV9_STDOUT, (int32_t)st->mods[i].size, 6);

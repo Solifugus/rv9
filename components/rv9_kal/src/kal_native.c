@@ -280,6 +280,12 @@ int rv9_task_fault(rv9_task_t task)
     return rv9k_thread_fault((const rv9k_thread_t *)task);
 }
 
+bool rv9_task_stack_ok(rv9_task_t task)
+{
+    if (!rv9k_is_thread(task)) return true;   /* no guard to read */
+    return rv9k_stack_ok((const rv9k_thread_t *)task);
+}
+
 bool rv9_task_alive(rv9_task_t task)
 {
     /* A host task's liveness is the trampoline's business, as it is on

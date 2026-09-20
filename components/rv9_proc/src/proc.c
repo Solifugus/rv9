@@ -593,6 +593,12 @@ static void finish(rv9_proc_t *p, int rc, int fault,
     } else if (fault == RV9_FAULT_KILLED) {
         ESP_LOGW(TAG, "pid %u ('%s') killed between activations",
                  (unsigned)p->pid, p->name);
+    } else if (fault == RV9_FAULT_STACK) {
+        /* It returned, so it is not being stopped -- it is being
+           contradicted. Whatever it was about to report, it wrote below
+           its own stack to get there. */
+        ESP_LOGE(TAG, "pid %u ('%s') returned having run off its stack; "
+                      "its status is discarded", (unsigned)p->pid, p->name);
     }
 
     /* Third in R9's order: published, now that the table says it. */
@@ -777,10 +783,36 @@ static void proc_trampoline(void *arg)
     ESP_LOGI(TAG, "pid %u chained to '%s'", (unsigned)p->pid, next_name);
     }
 
+    /*
+     * Did it come back off the bottom of its own stack?
+     *
+     * The scheduler's guard catches a thread when it is switched away
+     * from, and for most overruns that happens immediately -- the deepest
+     * call is usually one that blocks. But a program can descend past its
+     * floor, come back up, and return without ever yielding, and then the
+     * only remaining switch is its own exit. The guard does fire there; it
+     * fires after this function has decided the process returned normally,
+     * which is a detection nobody can see.
+     *
+     * `smash` showed it: four runs in eight reported "ran off its stack",
+     * and the other four printed a status of zero, on a board that was
+     * merely quieter. Nothing was wrong with the guard. The report was
+     * racing the funeral.
+     *
+     * Asked here, it is not. A fault outranks whatever the module was
+     * about to return, because the return value came out of a program that
+     * has already written outside its own memory.
+     */
+    int fault = RV9_FAULT_NONE;
+    if (!rv9_task_stack_ok(rv9_task_self())) {
+        fault = RV9_FAULT_STACK;
+        rc    = -RV9_PROC_ERR_FAULT;
+    }
+
     /* A real-time process gives its period back in finish(), or the next
        one cannot declare: the timer and its release semaphore belong to
        the slot, not to the module that borrowed it. */
-    finish(p, rc, RV9_FAULT_NONE, NULL);
+    finish(p, rc, fault, NULL);
 }
 
 /* ------------------------------------------------------------------ */

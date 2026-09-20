@@ -488,30 +488,36 @@ tightest place on the board.
 
 ## Immediate next step
 
-**Phase 10. `/i2c` as a device.**
+**A real sensor on the I²C bus.**
 
-Everything above it is done; this is what the machine cannot currently do.
-RV-9 can read an analogue voltage and its own die temperature, and that is
-the whole of its sensing. Almost every sensor anyone would reach for —
-inertial units, time-of-flight, magnetometers, encoders, pressure — speaks
-I²C, so a sensor-to-actuator loop can presently be built with an actuator
-and no sensor.
+The mechanism is done — IFM, the `i2c` driver, the register-on-the-path
+transaction, the probe and the scan — and it has been exercised only
+against a bus with nothing on it. Everything an empty bus can prove is
+proved: the addresses parse, the transactions are issued, a silent address
+reads as absent rather than as a fault. What it cannot prove is that the
+bytes coming back mean what the datasheet says, and until one chip answers,
+"RV-9 can read sensors" is a claim about code rather than about the world.
 
-That also makes it the gate on the demonstration the venture plan is built
-around (`~/development/RV9-Venture/05-evidence.md`): a control loop with a
-real deadline and a real consequence for missing it.
+That is also the gate on the demonstration the venture plan is built around
+(`~/development/RV9-Venture/05-evidence.md`): a control loop with a real
+deadline, a real input and a real consequence for missing it. An actuator
+and no sensor is not that demonstration.
 
 Then, in order of what it unblocks rather than phase number:
 
-1. **I²C, then SPI** as devices — real sensing.
+1. **A sensor answering, then SPI** as a device — real sensing. IFM was
+   built for both; a chip select is an address, so SPI is a driver rather
+   than a discipline.
 2. **Motors** — waiting on hardware, not on code.
 3. **Shell scripts and an exit status a script can read** — the difference
-   between a demonstration that is typed and one that is run.
+   between a demonstration that is typed and one that is run. The status
+   half is now askable: ABI 14's `wait_why` separates what a program
+   returned from what RV-9 decided about it (design §49).
 4. **Phase 7 step 3** — the deep work, and the one that can wait.
 
 *Done, and previously listed here: the `sdspi` driver and `/sd0` (phase 5,
-see design §42), and the PIPE file manager (phase 11, design §47's
-neighbours).*
+see design §42), the PIPE file manager (phase 11, design §47's
+neighbours), and `/i2c0` under IFM (phase 10, above).*
 
 ### Waiting on a normal network
 

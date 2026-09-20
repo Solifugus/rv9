@@ -136,6 +136,12 @@ int rv9_task_fault(rv9_task_t task)
     return RV9_TASK_FAULT_NONE;
 }
 
+bool rv9_task_stack_ok(rv9_task_t task)
+{
+    (void)task;
+    return true;
+}
+
 bool rv9_task_alive(rv9_task_t task)
 {
     (void)task;

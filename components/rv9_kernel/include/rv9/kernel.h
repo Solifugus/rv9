@@ -241,6 +241,10 @@ void rv9k_set_idle_hook(void (*fn)(void));
  * it -- but it catches the ordinary case of a call chain one frame too
  * deep, which is the failure a hand-declared stack actually produces.
  *
+ * The RV9K_STACK_PAD_WORDS below the stack are checked with it, so the
+ * band actually read is these four words plus the whole pad. A frame that
+ * steps over four words rarely steps over forty.
+ *
  * Real prevention needs the PMP, which is phase 7's last step. Until then
  * this is detection: the corruption has already happened when it fires,
  * and the value is that it is reported rather than mysterious.
@@ -255,6 +259,10 @@ void rv9k_set_idle_hook(void (*fn)(void));
  * overwritten whatever the allocator put underneath it by the time the
  * guard is noticed -- so the report arrives alongside a second, silent
  * failure in an unrelated process.
+ *
+ * It is read as well as reserved: stack_intact() checks these words along
+ * with the guard above them, so a write that lands in the pad is detected
+ * rather than merely absorbed.
  *
  * Every stack is allocated with this much extra underneath it, and the
  * thread is never told about it: `stack` points above it, `stack_words`
@@ -273,6 +281,23 @@ void rv9k_set_idle_hook(void (*fn)(void));
 #define RV9K_FAULT_KILLED 2   /* stopped from outside; see rv9k_thread_stop */
 
 size_t rv9k_stack_unused(const rv9k_thread_t *t);
+
+/*
+ * Is this thread's guard still unwritten?
+ *
+ * The same question reschedule() asks on its own account, asked from
+ * outside so that it can also be asked at a moment reschedule() cannot
+ * help with: a thread that ran off its stack and is now on its way out
+ * under its own power.
+ *
+ * The guard is checked when a thread is switched away from, and the last
+ * time a thread is switched away from is its own exit -- by which time the
+ * layer above has already recorded that it returned, and with what. So an
+ * overrun followed by a clean return was detected a moment too late to be
+ * reported, and a program could corrupt the pad beneath its stack and be
+ * announced as having succeeded. Asking here closes that.
+ */
+bool   rv9k_stack_ok(const rv9k_thread_t *t);
 
 /* Non-zero once the kernel has stopped this thread for a fault. */
 int    rv9k_thread_fault(const rv9k_thread_t *t);

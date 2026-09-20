@@ -622,10 +622,39 @@ static bool stack_intact(const rv9k_thread_t *t)
 {
     if (t == NULL || t->stack == NULL) return true;
 
-    for (int i = 0; i < RV9K_GUARD_WORDS; i++) {
-        if (t->stack[i] != RV9K_STACK_PAINT) return false;
+    /*
+     * The pad is part of the guard, because containment without detection
+     * turned out to be worth very little.
+     *
+     * Four words used to be the whole of it, and four words is a wall that
+     * a frame can step over without touching: a function whose deepest
+     * local is a buffer it only half fills writes at its own offsets and
+     * leaves gaps. `smash` found this by panicking the board -- it descends
+     * until the paint scan says eight bytes remain, and that scan can only
+     * see *inside* the stack, so it reads "eight bytes left" while the
+     * deepest frame has reached a hundred and fifty bytes below the floor.
+     * The crash was in free(), reaping that stack: the heap block header
+     * underneath it had been rewritten.
+     *
+     * The pad below every stack was already allocated and already painted,
+     * for exactly those writes to land in. Reading it costs thirty-two
+     * more comparisons at a switch and turns "it landed somewhere
+     * harmless" into "it was caught", which is the difference between a
+     * detector and a cushion.
+     *
+     * Downward, so the commonest overrun -- the word just below the floor
+     * -- is found first.
+     */
+    const uint32_t *p = t->stack;
+    for (int i = RV9K_GUARD_WORDS - 1; i >= -RV9K_STACK_PAD_WORDS; i--) {
+        if (p[i] != RV9K_STACK_PAINT) return false;
     }
     return true;
+}
+
+bool rv9k_stack_ok(const rv9k_thread_t *t)
+{
+    return stack_intact(t);
 }
 
 /*

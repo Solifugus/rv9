@@ -3,9 +3,9 @@
  *
  * A detector nobody has seen fire is a claim, not a feature. This is how
  * the guard is exercised on the real board: it descends until it is
- * standing on the guard, asks to be scheduled, and is killed for it. The
- * shell should print "returned -6" and carry on, and `procs` should show
- * nothing left behind.
+ * standing on the guard, and is killed for it. The shell should print
+ * "smash: ran off its stack and was stopped", `procs` should show STACK,
+ * and nothing should be left behind.
  *
  * The descent is measured rather than guessed, which is the whole point.
  * A recursion that simply runs away writes hundreds of bytes into whoever
@@ -109,7 +109,24 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         return -4;
     }
 
-    m_say(env, RV9_STDOUT, "descending...\n");
+    /*
+     * How expensive the question is, which is most of the stack.
+     *
+     * Asking costs about 600 bytes of a 1024-byte stack: the call walks the
+     * process table and fills a record per live process. So the descent is
+     * not really the module's frames arriving at the floor -- it is the
+     * *measurement* arriving there, taken from a frame 600 bytes higher.
+     * Worth printing, because it is why the last step is a plunge rather
+     * than a step, and why the guard now covers the pad as well (§50).
+     */
+    int32_t left0 = spare(env, st, NULL);
+    m_say(env, RV9_STDOUT, "stack ");
+    m_num(env, RV9_STDOUT, (int)size);
+    m_say(env, RV9_STDOUT, ", unwritten at entry ");
+    m_num(env, RV9_STDOUT, (int)left0);
+    m_say(env, RV9_STDOUT, " (asking costs ");
+    m_num(env, RV9_STDOUT, (int)size - left0);
+    m_say(env, RV9_STDOUT, ")\ndescending...\n");
 
     /* One frame is at least sixteen bytes, so the whole stack cannot hold
        more than this many of them. */
@@ -120,11 +137,21 @@ int rv9_module_entry(const rv9_mod_env_t *env)
                        return -5; }
 
     /*
-     * The guard is checked when a thread is switched away from, so ask to
-     * be switched away from. Writing does that, and we do not expect to
-     * come back from it -- so the line below is not a report of success,
-     * it is the failure case.
+     * Back up, with the guard written.
+     *
+     * Reaching this line is not a failure and was wrongly reported as one.
+     * The guard is read when a thread is switched away from, and on a busy
+     * board the descent itself blocks somewhere and is caught before it
+     * ever returns -- which is what happens most of the time and why this
+     * line was rarely seen. On a quiet board nothing blocks, the recursion
+     * unwinds, and the check falls to the one made when the module returns.
+     *
+     * Either way the process ends with RV9_FAULT_STACK and the shell says
+     * so; the status below is discarded. So this reports where it got to,
+     * and leaves the verdict to whoever is entitled to give it.
      */
-    m_say(env, RV9_STDOUT, "still here: the guard did not fire\n");
+    m_say(env, RV9_STDOUT, "back up with the guard written, at depth ");
+    m_num(env, RV9_STDOUT, depth);
+    m_say(env, RV9_STDOUT, "\n");
     return 0;
 }

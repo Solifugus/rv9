@@ -159,6 +159,22 @@ rv9_err_t rv9_task_stack(rv9_task_t task, size_t *size, size_t *unused);
 int  rv9_task_fault(rv9_task_t task);
 
 /*
+ * Has this task written below the floor of its own stack?
+ *
+ * rv9_task_fault asks what the scheduler already decided. This asks the
+ * question directly, which matters in one place: a task about to end
+ * normally. The scheduler's check happens when a task is switched away
+ * from, and the last such moment is the task's own exit -- too late for
+ * the layer above to turn into a status, because it has already written
+ * one. Asked here, before that status is written, an overrun followed by a
+ * clean return is still an overrun.
+ *
+ * Only RV-9's own kernel paints a guard, so the host backend answers
+ * `true`: a statement about what is known, not about what happened.
+ */
+bool rv9_task_stack_ok(rv9_task_t task);
+
+/*
  * Stop another task, if that can be done without breaking anything else.
  *
  * Not the same as rv9_task_delete, which stops a task wherever it is. A

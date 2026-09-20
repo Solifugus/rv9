@@ -5538,8 +5538,9 @@ it worked. In the foreground it went over -- and did not fault. §22's
 guard catches a call chain one frame too deep by standing on it; a frame
 that steps *over* it corrupts whatever is underneath, and what happened
 instead was a hang. `smash`, which descends deliberately onto the guard,
-still reports correctly; that is the difference between touching the wall
-and going through it.
+reports correctly; that is the difference between touching the wall and
+going through it. (It reported correctly about half the time, for a reason
+that had nothing to do with the guard: see §50.)
 
 The lesson is not "use bigger stacks". It is that a measured peak plus a
 hundred bytes is not a margin, and that until the PMP arrives (phase 7
@@ -5617,6 +5618,189 @@ That last line used to read "stopped by the scheduler (see the log)" for
 every fault, because the status could not say which. `i2c` was also changed
 to return positive codes, which is the right habit regardless — but the
 habit was never the problem. Reading one number as if it were two was.
+
+## 50. A detector that was racing the funeral
+
+While checking §49 on the board, `smash` printed this:
+
+```
+rv9> smash
+descending...
+still here: the guard did not fire
+```
+
+It is the test whose entire purpose is to make the stack guard fire, and an
+hour earlier it had fired. Eight runs in a row on a board left otherwise
+idle gave five failures and three catches, in no pattern.
+
+### It was not the guard
+
+The guard is four words of paint at the bottom of every stack (§22), and
+`smash` descends until the paint scan says eight bytes remain — by which
+time words two and three have certainly been overwritten. Nothing restores
+paint. So in every one of those eight runs the guard *was* written, and
+`stack_intact()` would have said so to anyone who asked.
+
+The trouble is when it is asked. From `reschedule()`:
+
+```c
+if (prev != NULL && !stack_intact(prev)) {
+    stack_fault(prev);
+    abandon = true;
+}
+```
+
+That is the only cheap moment — a running thread keeps its stack pointer in
+a register, so there is nothing to inspect until it stops. The design note
+above it claimed an overrun is therefore "caught within one scheduling
+decision of happening", and that is true. What it missed is that **the last
+scheduling decision of a thread's life is its own exit**, and by then the
+process manager has already recorded that the module returned, and with
+what. The kernel still sets the fault; it sets it on a corpse whose death
+certificate is written.
+
+So the outcome depended on whether anything blocked between the corruption
+and the return. Immediately after boot something always does — the radio is
+chattering, the log is draining — and the descent is caught mid-flight.
+Ten minutes later, on a quiet board, the recursion unwinds, the write to
+the terminal fits in a buffer without waiting, and the program exits
+reporting success.
+
+That is the worst possible failure for a detector: it works when the system
+is busy and stops working when the system is calm, which is the opposite of
+what anybody would guess, and it reports *success* rather than silence.
+
+### Asking at the one moment that was missing
+
+`rv9k_stack_ok()` is `stack_intact()` with a name outsiders may use, and the
+KAL passes it through as `rv9_task_stack_ok()`. The process trampoline now
+asks, once, after the module's entry function returns and before the status
+is written:
+
+```c
+int fault = RV9_FAULT_NONE;
+if (!rv9_task_stack_ok(rv9_task_self())) {
+    fault = RV9_FAULT_STACK;
+    rc    = -RV9_PROC_ERR_FAULT;
+}
+finish(p, rc, fault, NULL);
+```
+
+A fault outranks the return value, because the return value came out of a
+program that has already written outside its own memory. The log says what
+happened rather than pretending the process was stopped, since it was not —
+it was contradicted:
+
+```
+E rv9-proc: pid 36 ('smash') returned having run off its stack;
+            its status is discarded
+smash: ran off its stack and was stopped
+```
+
+It costs four word comparisons per process exit.
+
+`smash` was also changed to stop calling that path a failure. Coming back
+up is a legitimate outcome on a quiet board; reporting the depth it reached
+and leaving the verdict to the process manager is the honest version, and
+the old message was reporting a bug in the test as a bug in the kernel.
+
+### Then it panicked the board
+
+With the check in, the next run took the new path and the machine died:
+
+```
+back up with the guard written, at depth 9
+E rv9-proc: pid 37 ('smash') returned having run off its stack;
+            its status is discarded
+Guru Meditation Error: Core 0 panic'ed (Load access fault)
+```
+
+The fault was in `free()`, called from `reap_dead()` — the kernel returning
+that very stack. The heap block header underneath it had been rewritten.
+
+Two things made that possible, and only the first was obvious. `smash`
+descends until the paint scan says eight bytes remain and argues that
+nothing below the floor can therefore have been touched. The argument is
+wrong, and it is wrong for a reason worth writing down: **the scan can only
+see inside the stack.** It reports the lowest word that is no longer
+painted, and a frame does not write every word it occupies — a function
+whose deepest local is a buffer it half fills writes at its own offsets and
+leaves the rest painted. So the scan can read "eight bytes left" while the
+deepest frame has actually reached a long way below the base, and no
+measurement inside the array can see it.
+
+The second thing is how far "a long way" is. `smash` was made to print it:
+
+```
+stack 1024, unwritten at entry 424 (asking costs 600)
+```
+
+Six hundred bytes of a thousand-and-twenty-four, to ask how much stack is
+left. The call walks the process table and fills a record per live process.
+So the descent was never the module's own frames arriving at the floor: it
+was the *measurement* arriving there, taken from a frame six hundred bytes
+higher, and the last step of the descent is a six-hundred-byte plunge whose
+landing point is estimated by a scan that cannot see where it landed.
+
+### The pad is now read, not just reserved
+
+The 128 bytes below every stack (`RV9K_STACK_PAD_WORDS`) exist so a modest
+overrun lands somewhere harmless, and they were already painted at creation
+"so that a thread which reaches it is still caught by the guard above it" —
+which was wishful: nothing read them. `stack_intact()` now checks the pad
+along with the four guard words, downward from the floor so the commonest
+overrun is found first:
+
+```c
+const uint32_t *p = t->stack;
+for (int i = RV9K_GUARD_WORDS - 1; i >= -RV9K_STACK_PAD_WORDS; i--) {
+    if (p[i] != RV9K_STACK_PAINT) return false;
+}
+```
+
+Thirty-two more comparisons at a switch, and the band a frame has to jump
+clear of goes from 16 bytes to 160. That is the difference between a
+cushion and a detector: a write that lands in the pad used to be absorbed
+silently and is now the end of the process.
+
+### What this does not fix
+
+A single large local can still step over 160 bytes, and nothing here
+notices. The limit in §48 is narrowed, not removed, and real prevention is
+still the PMP — phase 7 step 5. What has been removed is the case where the
+guard *was* written and the system said nothing.
+
+### And one more thing a pipeline caught
+
+While re-checking the board afterwards, the README's own example came back
+with a fourth line:
+
+```
+rv9> mdir | field 2 | sort | unique
+1
+descrip
+program
+type
+```
+
+`m_pad` writes a value and then pads out to the column width, and pads
+nothing at all when the value already fills it. The longest name in the
+store is `st-rt-badpin`, which is exactly twelve characters in a
+twelve-wide column, so that row read `st-rt-badpinprogram` — and `field 2`
+answered `1`, the revision, for that row and `program` for the other
+hundred and one.
+
+On screen it is a cosmetic flaw in one line of a hundred-line table, which
+is why it survived. Through a pipe it is a wrong answer, because in a shell
+built out of `field` and `sort` **the separator is the format**. `m_pad` now
+always writes at least one space, so a value that overflows its column
+leaves the table one character out of alignment — visible — rather than
+fusing two columns, which is not. `mdir`'s name column went to thirteen as
+well, and the format still permits thirty-one, which is why the guarantee
+has to live in `m_pad` and not in the callers.
+
+This is §48's observation a second time: a list you read is a list you
+believe, and a list you pipe into something is a list that gets checked.
 
 ## 9. Migration to a native kernel
 

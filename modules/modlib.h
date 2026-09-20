@@ -211,12 +211,23 @@ static inline void m_screen(const rv9_mod_env_t *env, int path,
     *cols = v & 0xFFFF;
 }
 
-/* Left-aligned in a field of `width`, for table output. */
+/*
+ * Left-aligned in a field of `width`, for table output.
+ *
+ * At least one space, always, even when the value fills the column. A name
+ * that exactly filled it used to run straight into the next one: `mdir`
+ * printed "st-rt-badpinprogram", and `mdir | field 2 | sort | unique` then
+ * answered "1" -- the revision -- for that row and "program" for the other
+ * hundred. A table that is merely untidy on screen is a table that lies
+ * through a pipe, because in this shell the separator *is* the format. One
+ * row out of alignment can be seen; one row with two columns fused cannot.
+ */
 static inline void m_pad(const rv9_mod_env_t *env, int path, const char *s,
                          uint32_t width)
 {
     uint32_t n = m_len(s);
     m_say(env, path, s);
+    if (n >= width) { m_say(env, path, " "); return; }
     while (n++ < width) m_say(env, path, " ");
 }
 
