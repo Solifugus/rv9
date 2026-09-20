@@ -27,6 +27,12 @@ static const char *TAG = "rv9-mod";
  */
 static uint32_t (*s_log_read)(uint32_t from, char *out, uint32_t cap);
 static uint32_t (*s_log_held)(void);
+static bool     (*s_clock_read)(uint32_t *epoch, uint32_t *age_s);
+
+void rv9_mod_set_clock_source(bool (*read)(uint32_t *, uint32_t *))
+{
+    s_clock_read = read;
+}
 
 void rv9_mod_set_log_source(uint32_t (*read)(uint32_t, char *, uint32_t),
                             uint32_t (*held)(void))
@@ -725,6 +731,19 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
     case RV9_SYS_ADMIT: {
         if (s_proc_ops == NULL || s_proc_ops->rt_load == NULL) return -1;
         return s_proc_ops->rt_load(buf, len);
+    }
+
+    case RV9_SYS_CLOCK: {
+        if (buf == NULL || len < sizeof(rv9_sys_clock_t)) return -1;
+        rv9_sys_clock_t *c = (rv9_sys_clock_t *)buf;
+
+        uint32_t epoch = 0, age = 0;
+        bool set = s_clock_read ? s_clock_read(&epoch, &age) : false;
+
+        c->epoch = epoch;
+        c->set   = set ? 1u : 0u;
+        c->age_s = age;
+        return 1;
     }
 
     case RV9_SYS_LOG: {

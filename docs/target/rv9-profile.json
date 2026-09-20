@@ -273,7 +273,8 @@
     "LIMITS": 9,
     "BUDGETS": 10,
     "STACK_PEAKS": 11,
-    "LOG": 12
+    "LOG": 12,
+    "CLOCK": 13
   },
   "calls": [
     {

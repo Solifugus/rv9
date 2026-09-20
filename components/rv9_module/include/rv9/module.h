@@ -858,6 +858,23 @@ _Static_assert(sizeof(rv9_pub_info_t) == 56, "rv9_pub_info_t is frozen");
 #define RV9_SYS_BUDGETS 10     /* rv9_sys_budget_t, one per live process */
 #define RV9_SYS_STACK_PEAKS 11 /* rv9_sys_stack_peak_t, one per module run */
 #define RV9_SYS_LOG     12     /* rv9_sys_log_t, a window of the system log */
+#define RV9_SYS_CLOCK   13     /* rv9_sys_clock_t, what time it is */
+
+/*
+ * What time it is, as opposed to how long the machine has been up.
+ *
+ * `set` is the field that matters. This board has no clock that survives
+ * power, so wall-clock time is acquired from the network and is simply
+ * unknown until it answers. A reader that ignores `set` and trusts
+ * `epoch` gets 1970, which is worse than being told nothing.
+ *
+ * UTC. Where a person is standing is not something the board knows.
+ */
+typedef struct __attribute__((packed)) {
+    uint32_t epoch;     /* seconds since 1970-01-01, UTC; 0 when unset */
+    uint32_t set;       /* non-zero once the network has answered */
+    uint32_t age_s;     /* how long ago it last answered */
+} rv9_sys_clock_t;
 
 /*
  * A window of the log, read back from the ring the system keeps.
@@ -1240,6 +1257,10 @@ const char *rv9_mod_strerror(rv9_mod_err_t err);
    a build without one answers with nothing. */
 void rv9_mod_set_log_source(uint32_t (*read)(uint32_t, char *, uint32_t),
                             uint32_t (*held)(void));
+
+/* Where RV9_SYS_CLOCK's answer comes from; see rv9_mod_set_log_source for
+   why this is registered rather than called. */
+void rv9_mod_set_clock_source(bool (*read)(uint32_t *epoch, uint32_t *age_s));
 
 /* Scan the module store and build the directory. Safe to call once at boot.
    Returns the number of valid modules found. */

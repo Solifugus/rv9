@@ -15,6 +15,7 @@
 #include "rv9/ssh_builtin.h"
 #include "kal_selftest.h"
 #include "logring.h"
+#include "clock.h"
 #include "kernel_test.h"
 #include "module_test.h"
 #include "io_test.h"
@@ -511,6 +512,17 @@ static void init_shell_loop(void)
 {
     const size_t n = sizeof(s_services) / sizeof(s_services[0]);
 
+    /*
+     * Ask the network what time it is.
+     *
+     * Here rather than in the network driver: the driver's job is the
+     * link, and what anybody does once there is a link is not its
+     * business. It is safe before the radio associates -- the service
+     * keeps asking, and a board with no network simply never learns the
+     * time, which is the truth and is reported as such.
+     */
+    rv9_clock_start();
+
     for (;;) {
         uint64_t now = rv9_time_ms();
 
@@ -776,6 +788,7 @@ static void rv9_init_task(void *arg)
      */
     rv9_logring_start();
     rv9_mod_set_log_source(rv9_logring_read, rv9_logring_held);
+    rv9_mod_set_clock_source(rv9_clock_read);
 
     if (!rv9_kal_selftest()) {
         ESP_LOGE(TAG, "KAL self-test failed -- not proceeding");

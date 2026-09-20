@@ -602,7 +602,7 @@ Three things the filters exposed, all older than they were:
       the machine, and inventing an entry for it wants more thought than a
       shell tool deserves.
 - [x] `uptime`
-- [ ] `date` — wants a clock source first, so NTP over WiFi
+- [x] `date` — SNTP over WiFi, UTC. The inventory is complete.
 
 Writing these found the slowest thing on the board. `/f0` took **fifty-two
 seconds** to store five kilobytes, because RBF hands the block driver one
