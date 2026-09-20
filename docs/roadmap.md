@@ -617,3 +617,21 @@ became two. See design §48.
 RV-9's model already covers these, and adding them would be noise: `ls`
 (`dir`), `ps` (`procs`), `mount` (a volume is a descriptor), `chmod` (no
 permission model beyond ownership), `find` (`dir` piped through `match`).
+
+---
+
+## Working with two boards attached
+
+`/dev/ttyACM0` is not the C5. Enumeration order depends on which board was
+plugged in first, and with an ESP32-S3 also attached the C5 has been seen
+at `ttyACM1` — so a flash aimed at `ttyACM0` writes RV-9 onto the wrong
+machine.
+
+Use the by-id path, which names the chip by its MAC and does not move:
+
+```
+/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_38:44:BE:0E:A3:08-if00
+```
+
+`ls -l /dev/serial/by-id/` lists what is attached and where each one went.
+The soak harness uses the by-id path for the same reason.
