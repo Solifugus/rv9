@@ -234,6 +234,7 @@ static void io_bringup(void)
     REGISTER(rv9_pio_register());
     REGISTER(rv9_pfm_register());
     REGISTER(rv9_pipefm_register());
+    REGISTER(rv9_ifm_register());
     REGISTER(rv9_drv_uart_register());
     REGISTER(rv9_drv_lcdcon_register());
     REGISTER(rv9_drv_ramdisk_register());
@@ -247,6 +248,7 @@ static void io_bringup(void)
     REGISTER(rv9_drv_svgwin_register());
     REGISTER(rv9_drv_pubmem_register());
     REGISTER(rv9_drv_pipemem_register());
+    REGISTER(rv9_drv_i2c_register());
     REGISTER(rv9_drv_ssh_register());
 
     #undef REGISTER

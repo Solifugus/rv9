@@ -479,6 +479,11 @@
   },
   "file_managers": [
     {
+      "name": "ifm",
+      "read_rt": false,
+      "write_rt": false
+    },
+    {
       "name": "nfm",
       "read_rt": false,
       "write_rt": false
@@ -528,6 +533,13 @@
       "name": "gpio",
       "read_rt": true,
       "write_rt": true,
+      "retains": true,
+      "sessions": false
+    },
+    {
+      "name": "i2c",
+      "read_rt": null,
+      "write_rt": null,
       "retains": true,
       "sessions": false
     },

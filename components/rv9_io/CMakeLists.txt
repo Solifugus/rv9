@@ -7,6 +7,7 @@ idf_component_register(SRCS "src/io.c" "src/claim.c" "src/scf.c" "src/drv_uart.c
                             "src/drv_adc.c" "src/drv_tsens.c"
                             "src/pfm.c" "src/drv_pubmem.c"
                             "src/pipefm.c" "src/drv_pipemem.c"
+                            "src/ifm.c" "src/drv_i2c.c"
                        INCLUDE_DIRS "include"
-                       REQUIRES rv9_kal rv9_module rv9_proc esp_lcd driver esp_driver_sdspi sdmmc esp_driver_usb_serial_jtag lwip esp_netif esp_wifi esp_event esp_timer nvs_flash
+                       REQUIRES rv9_kal rv9_module rv9_proc esp_lcd driver esp_driver_i2c esp_driver_sdspi sdmmc esp_driver_usb_serial_jtag lwip esp_netif esp_wifi esp_event esp_timer nvs_flash
                                 esp_driver_ledc esp_driver_gpio esp_adc esp_driver_tsens)

@@ -420,7 +420,18 @@ control layer is late if it is late.
   reduced by nearest neighbour looks like gravel.
 - Not done in the window: font families and weights, rotated text, arc
   x-axis-rotation, opacity, gradients, documents over 4 KB.
-- Not done: I2C and SPI as devices, which is what most sensors want.
+- **I²C — done**, as `/i2c0/<address>` under a new **IFM** file manager: a
+  fourth discipline after SCF's characters, RBF's blocks and PIO's values.
+  What moves is a string of bytes, because reading six bytes of
+  acceleration has to be one transaction or the three axes are from three
+  different instants. A register set on the *path* turns a read into the
+  write-then-read with a repeated start that datasheets describe and
+  several devices require. `i2c scan` walks the bus; addresses are
+  accepted in hex as a datasheet writes them or decimal as a script does.
+  **Verified only against an empty bus** — the manager, the driver, the
+  probe and the scan all work; nothing has yet talked to a real chip.
+- Not done: SPI as a device. IFM was built for both — a chip select is an
+  address — so this is a driver, not a discipline.
 - **Interrupt-driven inputs — done.** `setstat(path, RV9_PIO_SS_EDGE, ...)`
   arms a pin; `getstat(path, RV9_PIO_GS_EVENT, ...)` says which event it
   signals on. Generic PIO codes, not gpio-specific: any device that can
@@ -477,14 +488,30 @@ tightest place on the board.
 
 ## Immediate next step
 
-**Phase 5. Storage: the `sdspi` driver and `/sd0`**, when the card arrives.
+**Phase 10. `/i2c` as a device.**
 
-The card shares its SPI bus with the panel, so bus arbitration is the new
-problem and the console will contend with it. `panel.c` already owns that
-bus and serialises transfers, which is most of the answer — the driver
-below it becomes a second client rather than a second owner. A PIPE file
-manager belongs in this phase too, being a file manager wanting the same
-attention as RBF.
+Everything above it is done; this is what the machine cannot currently do.
+RV-9 can read an analogue voltage and its own die temperature, and that is
+the whole of its sensing. Almost every sensor anyone would reach for —
+inertial units, time-of-flight, magnetometers, encoders, pressure — speaks
+I²C, so a sensor-to-actuator loop can presently be built with an actuator
+and no sensor.
+
+That also makes it the gate on the demonstration the venture plan is built
+around (`~/development/RV9-Venture/05-evidence.md`): a control loop with a
+real deadline and a real consequence for missing it.
+
+Then, in order of what it unblocks rather than phase number:
+
+1. **I²C, then SPI** as devices — real sensing.
+2. **Motors** — waiting on hardware, not on code.
+3. **Shell scripts and an exit status a script can read** — the difference
+   between a demonstration that is typed and one that is run.
+4. **Phase 7 step 3** — the deep work, and the one that can wait.
+
+*Done, and previously listed here: the `sdspi` driver and `/sd0` (phase 5,
+see design §42), and the PIPE file manager (phase 11, design §47's
+neighbours).*
 
 ### Waiting on a normal network
 

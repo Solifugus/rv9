@@ -186,6 +186,26 @@ typedef struct rv9_driver {
                               bool set, uint32_t code, uint32_t *value);
 
     /*
+     * Transaction devices -- a unit on a shared bus that moves bytes.
+     *
+     * `unit_read` and `unit_write` above carry one 32-bit value, which is
+     * right for a pin and wrong for a sensor: reading six bytes of
+     * acceleration has to happen in one transaction, or the samples are
+     * not from the same instant.
+     *
+     * One call covers all three shapes, because that is what the hardware
+     * does: write only (rlen 0), read only (wlen 0), or write-then-read
+     * without releasing the bus in between, which is the one that matters.
+     */
+    rv9_io_err_t (*xfer_open)(struct rv9_dev *dev, uint32_t unit,
+                              uint32_t mode, void **unit_state);
+    rv9_io_err_t (*xfer_close)(struct rv9_dev *dev, void *unit_state);
+    rv9_io_err_t (*xfer)(struct rv9_dev *dev, void *unit_state,
+                         const void *wbuf, size_t wlen,
+                         void *rbuf, size_t rlen);
+    rv9_io_err_t (*xfer_probe)(struct rv9_dev *dev, uint32_t unit);
+
+    /*
      * Where this device's memory is. A fourth shape, and the smallest.
      *
      * The publication file manager needs somewhere to keep cells that

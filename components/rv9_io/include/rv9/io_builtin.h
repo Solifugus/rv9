@@ -30,5 +30,7 @@ rv9_io_err_t rv9_drv_tsens_register(void);
 rv9_io_err_t rv9_drv_svgwin_register(void);
 rv9_io_err_t rv9_pfm_register(void);
 rv9_io_err_t rv9_pipefm_register(void);
+rv9_io_err_t rv9_ifm_register(void);
 rv9_io_err_t rv9_drv_pubmem_register(void);
 rv9_io_err_t rv9_drv_pipemem_register(void);
+rv9_io_err_t rv9_drv_i2c_register(void);

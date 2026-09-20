@@ -659,6 +659,39 @@ typedef struct {
 #define RV9_PIO_GS_EVENT      21   /* event id, or 0 if not armed */
 
 /* ------------------------------------------------------------------ */
+/* Transaction devices -- IFM                                          */
+/*                                                                     */
+/* A fourth discipline, after SCF's character streams, RBF's blocks    */
+/* and PIO's values. A sensor on a shared bus is addressed, and what   */
+/* moves is a string of bytes rather than one number: write a register */
+/* number, read six bytes back, in one transaction that never lets go  */
+/* of the bus in between.                                              */
+/*                                                                     */
+/* I2C now; SPI is the same shape with a chip select instead of an     */
+/* address, which is why this is not called "the I2C manager".         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The register a read should be preceded by.
+ *
+ * Set it, and a read becomes write-this-byte-then-read -- one
+ * transaction with a repeated start, which is what almost every sensor
+ * documents and what several of them require. Set it to
+ * RV9_IFM_REG_NONE and a read is a plain read, for devices that simply
+ * stream.
+ *
+ * It is a property of the path, not of the device, so two programs
+ * reading different registers of the same chip do not disturb each
+ * other.
+ */
+#define RV9_IFM_SS_REG        22
+#define RV9_IFM_REG_NONE      0xFFFFFFFFu
+
+/* Does anything answer at this address? Non-zero if it acknowledged.
+   A probe costs one byte on the bus and is how `i2c scan` works. */
+#define RV9_IFM_GS_PRESENT    23
+
+/* ------------------------------------------------------------------ */
 /* Publication cells                                                   */
 /*                                                                     */
 /* One process computes a value; another has to see it. RV-9 had no    */
