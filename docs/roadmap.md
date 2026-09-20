@@ -509,7 +509,7 @@ attention as RBF.
 
 ---
 
-## Phase 10 — Tools that compose
+## Phase 11 — Tools that compose  ✅ done
 
 **Goal:** a complete but minimal set of small tools, in the Unix spirit but
 readable. Agreed to run *before* phase 7 step 3, because it makes the system
@@ -545,6 +545,19 @@ session; measured against `mdir`, which peaks at 1176 while doing more,
 1536 was enough and was the difference between working and not. Every
 filter below should be sized the same way -- buffers in statics, and the
 stack measured rather than assumed.
+
+### Outcome
+
+Thirteen tools, four-stage pipelines, and four soak runs totalling 26
+hours: 1,318 real-time loop rounds, every deadline met, no panic, reboot,
+disconnect or stack overflow. The inventory is complete.
+
+What it cost, and what it found, is in design §48: an empty 32 KB kernel
+heap, `mdir` seeing a fifth of the store, standard error never reaching a
+network session, `/f0` writing at a hundred bytes a second, and a stack
+guard that a large frame steps over. All five were older than the tools
+that exposed them, and none was visible while commands could only be run
+one at a time.
 
 ### Naming
 

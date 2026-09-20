@@ -67,6 +67,28 @@ reflashed. Each module carries a TLV **manifest** that says what it needs:
 stack, statics, period, deadline, worst-case execution time, exclusive
 devices, publications, failsafe states, and a memory budget.
 
+### Small tools that compose
+A pipe is a file manager, the way OS-9 did it -- so `|` in the shell costs
+two opens and a fork, and every program that reads standard input and
+writes standard output composes through one without being changed:
+
+```
+rv9> mdir | field 2 | sort | unique
+descrip
+program
+type
+
+rv9> procs | match active | field 3
+match / procs / shell / sshd
+
+rv9> log | match error | last 20
+```
+
+Thirteen tools, whole words rather than abbreviations: `match` `count`
+`first` `last` `field` `sort` `unique` `copy` `move` `info` `dump` `log`
+`date`. Each states its limits and refuses rather than answering with part
+of the truth -- `sort` will not return your lines shortened, and says so.
+
 ### Everything is a path
 File managers, drivers and device descriptors are separate, independently
 loadable pieces:
@@ -77,6 +99,7 @@ loadable pieces:
 | `/r0`, `/f0`, `/sd0` | RAM disk, flash filesystem and microSD card, through RBF (`dir`, `df`, `format`) |
 | `/n0/host/port` | a TCP connection; `/n0/listen/port` accepts |
 | `/ssh0` | SSH sessions, as a character device |
+| `/pipe/name` | a pipe -- what one program writes, another reads |
 | `/gpio/N`, `/pwm0`, `/adc0`, `/tsens` | hardware |
 | `/w0` | a window you draw on by writing SVG to it |
 | `/pub0/NAME` | a published value with an owner and a sequence number |
@@ -159,8 +182,8 @@ entirely is the remaining kernel work.
 ## Tested on the hardware at every boot
 
 ```
-kal 45   conform 23   mod 17   io 44   pub 38
-fault 76   proc 11   sched 15   mem 13
+kal 45   conform 27   mod 17   io 44   pub 38
+fault 76   proc 11   sched 15   mem 13   sd 7
 ```
 
 The boot suites cover the following:
@@ -173,6 +196,13 @@ The boot suites cover the following:
 - **mem**: memory used up on purpose, to show a control loop is still
   admitted, a dying loop's pin is still parked, and a fork bomb stops at
   its budget.
+- **sd**: the microSD card -- mounted, written, read back, and survived a
+  reboot.
+
+Beyond the boot suites, four soak runs totalling 26 hours have driven the
+board over SSH with a 100 Hz control loop, pipelines, flash round trips
+and session churn: **1,318 real-time loop rounds, every deadline met**, and
+no panic, reboot, WiFi disconnect or stack overflow in any of them.
 
 On the host, `tools/hosttest/run.sh` checks path parsing, the SVG
 rasteriser and the target profile.
@@ -218,18 +248,33 @@ shipped has no Ed25519.
 - [**Alignment**](docs/alignment.md): notes from the R9 side, and where RV-9
   stands against each one.
 
+## Licence
+
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+The name and the mascot are not covered by that licence; see
+[Name and trademarks](#name-and-trademarks).
+
 ## Status
 
 Working on the hardware: modules, processes, I/O, RAM disk, flash and
-microSD storage, networking, an SSH server, an SVG window, GPIO/PWM/ADC, publication,
-and the real-time class with admission, derived priority, watchdog,
-failsafes and memory reserves.
+microSD storage, networking, an SSH server, an SVG window, GPIO/PWM/ADC,
+publication, a shell with pipes and redirection, a complete set of small
+tools, a clock taken from the network, and the real-time class with
+admission, derived priority, watchdog, failsafes and memory reserves.
 
 Still to come:
 - **The kernel owning the CPU from reset**, with its own trap vector and
   asynchronous preemption
 - **WiFi on RV-9's own primitives** (`wifi_osi_funcs_t`)
 - **PMP memory isolation between processes**
+
+Attempted and abandoned, with the reasoning kept: asynchronous preemption
+while RV-9 is a guest. The mechanism worked and then hung the machine three
+times, and the cause is architectural rather than a bug — the stub's `mret`
+is a second trap return for a trap the host already returned from, and on
+this chip that pops a hardware interrupt-level stack that was only pushed
+once. See design §47. It waits for the kernel to own the trap.
 
 ## Name and trademarks
 
