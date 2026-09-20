@@ -18,10 +18,12 @@ the screen and published sensor values are all paths, an SSH server, and a
 real-time class that *admits* control loops only when it can show they will
 meet their deadlines.
 
-It is also the first target of **Rachis9 (R9)**, a language for autonomous
-real-world systems such as drones and robots. R9 components declare their
-period, deadline, cost, memory and the devices they own, and RV-9 enforces
-those declarations.
+It is also the first target of
+[**Rachis9 (R9)**](https://github.com/Solifugus/r9), a language for
+autonomous real-world systems such as drones and robots. R9 components
+declare their period, deadline, cost, memory and the devices they own, and
+RV-9 enforces those declarations. R9 is still a design; RV-9 is the half
+that runs.
 
 RV-9 is not OS-9. It is an independent project, not affiliated with or
 endorsed by the owner of OS-9, and it contains no OS-9 code. It has no
@@ -245,8 +247,9 @@ shipped has no Ed25519.
 - [**Roadmap**](docs/roadmap.md): phases, what is done, and what is next.
 - [**Memory**](docs/memory.md): where every kilobyte goes, measured on the
   board.
-- [**Alignment**](docs/alignment.md): notes from the R9 side, and where RV-9
-  stands against each one.
+- [**Alignment**](docs/alignment.md): notes from the
+  [R9](https://github.com/Solifugus/r9) side, and where RV-9 stands against
+  each one.
 
 ## Licence
 
