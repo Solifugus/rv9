@@ -59,6 +59,22 @@ typedef struct {
        each, and neither can starve the other by draining a shared queue. */
     rv9_event_t event;
     uint32_t    edge;
+
+    /*
+     * Pulse timing, measured in the handler. See RV9_PIO_GS_PULSE_US: for a
+     * whole class of sensor the measurement *is* an interval between edges,
+     * and it is only worth having if both ends were read before anyone was
+     * woken up.
+     *
+     * `last_rise` is the working value, the other three are the answers.
+     * Volatile because the handler writes them and ordinary code reads
+     * them; a torn 32-bit read is not possible on this machine, and the
+     * sequence number is what makes a torn *pair* detectable.
+     */
+    uint64_t          last_rise;
+    volatile uint32_t pulse_us;
+    volatile uint32_t pulses;
+    volatile uint32_t period_us;
 } gpio_unit_t;
 
 /*
@@ -73,6 +89,14 @@ typedef struct {
  */
 static bool s_isr_service;
 
+/* An interval, narrowed for the getstat interface. Saturating rather than
+   wrapping: an hour is not a measurement anything here makes, and a wrapped
+   answer looks plausible while a pegged one does not. */
+static RV9_RT_CODE uint32_t clamp32(uint64_t v)
+{
+    return (v > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (uint32_t)v;
+}
+
 /*
  * Resident. Everything it calls is too -- rv9_event_signal_from_isr and the
  * timestamp it takes -- and nothing here allocates, logs or takes a lock
@@ -81,6 +105,34 @@ static bool s_isr_service;
 static RV9_RT_CODE void gpio_edge_isr(void *arg)
 {
     gpio_unit_t *u = (gpio_unit_t *)arg;
+
+    /*
+     * Stamp first, wake second.
+     *
+     * The clock is read before anything else happens, because everything
+     * else -- deciding which edge this was, signalling, the host's yield --
+     * is time that belongs to the software rather than to the world. Which
+     * edge it was comes from the level: this handler runs on both when the
+     * unit is armed for both, and the pin still reads the value that caused
+     * it. gpio_get_level is a register read, so it is resident like the
+     * rest of this function.
+     */
+    uint64_t t = rv9_time_us();
+
+    if (gpio_get_level((gpio_num_t)u->pin)) {
+        if (u->last_rise != 0) u->period_us = clamp32(t - u->last_rise);
+        u->last_rise = t;
+    } else if (u->last_rise != 0) {
+        /*
+         * A falling edge with no rise behind it is the tail of a pulse that
+         * began before anyone was watching. Its width is unknowable, so it
+         * is not published -- publishing a wrong first reading is worse
+         * than publishing none, because a caller cannot tell the two apart.
+         */
+        u->pulse_us = clamp32(t - u->last_rise);
+        u->pulses++;                 /* last: the width must be there first */
+    }
+
     rv9_event_signal_from_isr(u->event);
 }
 
@@ -233,6 +285,53 @@ static rv9_io_err_t gpio_unit_close(rv9_dev_t *dev, void *state)
 }
 
 /*
+ * Change one path's mind about driving the pin.
+ *
+ * The open path computes direction as the union of what every opener wants,
+ * because a pin is one piece of hardware and a reader arriving must not
+ * stop a writer driving it. setstat did not: it called gpio_set_direction
+ * straight, so one path asking for input made the pin an input while
+ * another was still driving it -- the same fault the open path was fixed
+ * for, left behind in the other half.
+ *
+ * It surfaced with `range`, which drives a single-wire sonic ranger: a
+ * generator on the same pin stopped producing edges the moment `range`
+ * released it, because "released" had turned the hardware into an input
+ * under the generator's feet.
+ *
+ * The one deliberate difference from open: `s_driving` is sticky against
+ * an *arriving reader*, and not against this. A program that holds the pin
+ * and says "stop driving" means it -- and has to mean it, because a
+ * bidirectional device answers on the wire we triggered it on, and a pin
+ * still driving low is a pin the sensor cannot raise.
+ */
+static rv9_io_err_t gpio_set_dir(gpio_unit_t *u, bool out)
+{
+    if (out == u->output) return RV9_IO_OK;
+
+    bool drive = out;
+    rv9_lock_acquire(s_lock);
+    if (u->pin < MAX_PINS) {
+        if (out) {
+            s_output_count[u->pin]++;
+            s_driving[u->pin] = 1;
+        } else if (s_output_count[u->pin] > 0) {
+            s_output_count[u->pin]--;
+        }
+        drive = (s_output_count[u->pin] > 0);
+        if (!drive) s_driving[u->pin] = 0;
+    }
+    rv9_lock_release(s_lock);
+
+    u->output = out;
+
+    return (gpio_set_direction((gpio_num_t)u->pin,
+                               drive ? GPIO_MODE_INPUT_OUTPUT
+                                     : GPIO_MODE_INPUT) == ESP_OK)
+           ? RV9_IO_OK : RV9_IO_ERR_IO;
+}
+
+/*
  * Arm or disarm the pin.
  *
  * Unlike a level, this does not survive the close -- see the note at the
@@ -265,6 +364,15 @@ static rv9_io_err_t gpio_set_edge(gpio_unit_t *u, uint32_t mode)
     }
 
     if (u->event == NULL) {
+        /* Arming is a fresh start for the measurements: a width left over
+           from a previous arming would be read as this one's first answer,
+           and the sequence number is only meaningful if it counts from
+           here. */
+        u->last_rise = 0;
+        u->pulse_us  = 0;
+        u->pulses    = 0;
+        u->period_us = 0;
+
         if (rv9_event_create(&u->event) != RV9_OK) return RV9_IO_ERR_NOMEM;
         if (gpio_isr_handler_add((gpio_num_t)u->pin, gpio_edge_isr, u)
             != ESP_OK) {
@@ -332,11 +440,7 @@ static rv9_io_err_t gpio_unit_stat(rv9_dev_t *dev, void *state, bool set,
     switch (code) {
     case RV9_PIO_SS_DIRECTION:
         if (!set) { *value = u->output ? 1 : 0; return RV9_IO_OK; }
-        u->output = (*value != 0);
-        gpio_set_direction((gpio_num_t)u->pin,
-                           u->output ? GPIO_MODE_INPUT_OUTPUT
-                                     : GPIO_MODE_INPUT);
-        return RV9_IO_OK;
+        return gpio_set_dir(u, *value != 0);
 
     case RV9_PIO_SS_PULL:
         if (!set) return RV9_IO_ERR_UNSUPPORTED;
@@ -357,6 +461,27 @@ static rv9_io_err_t gpio_unit_stat(rv9_dev_t *dev, void *state, bool set,
     case RV9_PIO_GS_EVENT:
         if (set) return RV9_IO_ERR_UNSUPPORTED;
         *value = (uint32_t)rv9_event_id(u->event);
+        return RV9_IO_OK;
+
+    /*
+     * Answerable only while the pin is armed for edges, because otherwise
+     * the handler is not running and the answer would be a stale one from
+     * whenever it last was. Saying "unsupported" sends a caller to look at
+     * its arming, which is the actual mistake.
+     */
+    case RV9_PIO_GS_PULSE_US:
+        if (set || u->event == NULL) return RV9_IO_ERR_UNSUPPORTED;
+        *value = u->pulse_us;
+        return RV9_IO_OK;
+
+    case RV9_PIO_GS_PULSES:
+        if (set || u->event == NULL) return RV9_IO_ERR_UNSUPPORTED;
+        *value = u->pulses;
+        return RV9_IO_OK;
+
+    case RV9_PIO_GS_PERIOD_US:
+        if (set || u->event == NULL) return RV9_IO_ERR_UNSUPPORTED;
+        *value = u->period_us;
         return RV9_IO_OK;
 
     default:

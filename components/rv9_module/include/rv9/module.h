@@ -680,6 +680,46 @@ typedef struct {
                                       3 = both */
 #define RV9_PIO_GS_EVENT      21   /* event id, or 0 if not armed */
 
+/*
+ * Timing measured between edges, in the interrupt handler.
+ *
+ * The event already carried a stamp taken in the ISR -- that is how the KAL
+ * reports edge-to-process latency -- but a program never saw it, so
+ * anything measuring the *world's* timing had to read the clock after being
+ * woken, and the number then carried the scheduler's jitter.
+ *
+ * Whole classes of sensor are a pulse whose duration is the measurement: a
+ * sonic ranger's echo, a servo or RC receiver's frame, a tachometer, a
+ * wheel encoder. For those the answer is an interval between two edges, and
+ * if both ends are stamped in the handler then the jitter cancels and an
+ * *ordinary* program gets a measurement good to a couple of microseconds.
+ * That is the point worth having: microsecond sensing without the real-time
+ * class, because the accuracy comes from where the clock was read rather
+ * than from when the program ran.
+ *
+ * The subtraction happens in the handler, so what a program reads is the
+ * answer and not two timestamps it has to be trusted to pair up correctly.
+ * Arm the unit for both edges (RV9_PIO_SS_EDGE = 3) and read whenever
+ * convenient.
+ *
+ * GS_PULSES is a sequence number, not decoration: it is how a caller knows
+ * the width it just read belongs to the pulse it was waiting for rather
+ * than to the last one, which matters most when nothing arrived at all.
+ *
+ *     uint32_t seen = 0, n, width;
+ *     getstat(p, RV9_PIO_GS_PULSES, &seen);
+ *     ... provoke the pulse ...
+ *     getstat(p, RV9_PIO_GS_PULSES, &n);
+ *     if (n != seen) getstat(p, RV9_PIO_GS_PULSE_US, &width);
+ *
+ * A pulse longer than about an hour reads as an hour: the interval is
+ * narrowed to 32 bits, which no physical measurement this is for comes
+ * close to, and a saturating answer is better than a wrapped one.
+ */
+#define RV9_PIO_GS_PULSE_US   24   /* width of the last complete high pulse */
+#define RV9_PIO_GS_PULSES     25   /* how many complete pulses seen, a seq no */
+#define RV9_PIO_GS_PERIOD_US  26   /* last rising edge to the one before it */
+
 /* ------------------------------------------------------------------ */
 /* Transaction devices -- IFM                                          */
 /*                                                                     */

@@ -486,17 +486,47 @@ a failsafe can still be applied with the reserve spent.
 What remains is headroom inside an SSH session, which is still the
 tightest place on the board.
 
+- **Pulse timing — done**, as three PIO getstat codes: `GS_PULSE_US`,
+  `GS_PULSES` and `GS_PERIOD_US`. The interrupt handler already read the
+  microsecond clock; it now also does the subtraction, so what a program
+  reads is an interval rather than two timestamps it has to pair up. The
+  consequence is that an *ordinary* program gets a microsecond
+  measurement — accuracy comes from where the clock was read, not from when
+  the program ran. Measured at ±2 µs on a 5 ms interval with WiFi up. Covers
+  sonic ranging, servo and RC frames, tachometers and encoders; the `range`
+  command speaks the three-pin HC-SR04 protocol. See design §51. **Verified
+  only against a generator on a pin** — no sensor has answered yet.
+- **`setstat(RV9_PIO_SS_DIRECTION)` ignored the direction union — fixed.**
+  Open computed direction as the union of what every opener wants; setstat
+  called `gpio_set_direction` straight and undid it, so one path releasing
+  a pin took it away from another that was driving it.
+
 ## Immediate next step
 
-**A real sensor on the I²C bus.**
+**A real sensor answering — I²C, or the sonic ranger.**
 
-The mechanism is done — IFM, the `i2c` driver, the register-on-the-path
-transaction, the probe and the scan — and it has been exercised only
-against a bus with nothing on it. Everything an empty bus can prove is
-proved: the addresses parse, the transactions are issued, a silent address
-reads as absent rather than as a fault. What it cannot prove is that the
-bytes coming back mean what the datasheet says, and until one chip answers,
-"RV-9 can read sensors" is a claim about code rather than about the world.
+There are now two mechanisms and no measurements of the world.
+
+**I²C** is done — IFM, the `i2c` driver, the register-on-the-path
+transaction, the probe and the scan — and has been exercised only against a
+bus with nothing on it. Everything an empty bus can prove is proved: the
+addresses parse, the transactions are issued, a silent address reads as
+absent rather than as a fault.
+
+**Pulse timing** is done and is exact to 2 µs, measured against a generator
+on a pin. `range` speaks the three-pin HC-SR04 protocol, including not
+mistaking its own trigger for an echo, but no ranger has answered it.
+
+Neither can prove that the numbers coming back mean what the datasheet says,
+and until one part answers, "RV-9 can read sensors" is a claim about code
+rather than about the world. The sonic ranger is probably the shorter path:
+one wire, no address, and the answer checkable with a tape measure. The
+electrical question is that these modules are usually 5 V parts that drive
+5 V on SIG, and an ESP32-C5 pin is 3.3 V — try the sensor at 3.3 V first,
+which most of the clones tolerate with reduced range, and reach for a series
+resistor and a clamp only if it will not work there. Not a plain divider:
+SIG is bidirectional, and a divider that makes the echo safe drags the
+trigger below the module's threshold on the way out.
 
 That is also the gate on the demonstration the venture plan is built around
 (`~/development/RV9-Venture/05-evidence.md`): a control loop with a real

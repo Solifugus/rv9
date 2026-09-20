@@ -5802,6 +5802,115 @@ has to live in `m_pad` and not in the callers.
 This is §48's observation a second time: a list you read is a list you
 believe, and a list you pipe into something is a list that gets checked.
 
+## 51. Microsecond sensing without the real-time class
+
+The first sensor to hand turned out not to be an I²C part at all: a three-pin
+ultrasonic ranger, SIG/VCC/GND, with `T` and `R` beside its two transducers.
+That is an HC-SR04 with the trigger and echo lines merged onto one wire, and
+what it measures is not a number it hands over — it is the *width of a
+pulse*. Sound goes 343 m/s, the pulse covers the round trip, so a centimetre
+is 58.3 µs.
+
+Which raised a question worth answering properly, because the answer
+generalises: does timing a pulse to the microsecond require the real-time
+class?
+
+### What was already there, and what was missing
+
+Everything but one piece. A pin can be armed for edges (`RV9_PIO_SS_EDGE`),
+the interrupt signals an event, a real-time process can be released by that
+event (§ on reactive work), and the KAL already stamped the microsecond
+clock **inside the handler** — that is how `evlat` reports edge-to-process
+latency, and the header says why:
+
+> The signal carries a timestamp taken in the interrupt handler. That is the
+> whole point: the number a reactive system is judged on is how long after
+> the world changed the software noticed, and that cannot be measured from
+> the far end.
+
+The stamp existed and no program could see it. So anything measuring the
+*world's* timing had to read the clock after being woken, and the number
+then carried the scheduler's jitter — in the middle of `evlat`'s own
+measurement of exactly that jitter.
+
+### The subtraction belongs in the handler
+
+Three getstat codes, all 32-bit, all computed where the clock was read:
+
+```c
+#define RV9_PIO_GS_PULSE_US   24   /* width of the last complete high pulse */
+#define RV9_PIO_GS_PULSES     25   /* how many, a sequence number */
+#define RV9_PIO_GS_PERIOD_US  26   /* last rising edge to the one before */
+```
+
+Doing the subtraction in the handler rather than handing out two timestamps
+is the whole design decision. A program that receives two stamps has to pair
+them correctly, and the case it will get wrong is the one that matters:
+nothing arrived, so the "pair" is half of one pulse and half of the next.
+`GS_PULSES` is what makes that detectable — it is a sequence number, and a
+caller compares it rather than looking at the width.
+
+The consequence is the interesting part. **An ordinary program gets the
+microsecond answer.** Not because it is scheduled well, but because the
+measurement was finished before it was woken; how late it runs affects only
+how promptly the answer is *collected*. So `range` is an ordinary command
+with a poll loop and a `sleep_ms(1)`, and it is not a compromise — a shell
+command that claimed a real-time slot to read a distance would be claiming
+the machine for a measurement it is not making.
+
+Measured against `edgegen` toggling a pin every 5 ms, with WiFi up and a
+shell running:
+
+```
+rv9> edgegen 11 20000 5 &
+rv9> range 11 4
+85 mm  (4998 us)
+85 mm  (5000 us)
+85 mm  (4999 us)
+85 mm  (5000 us)
+```
+
+Two microseconds of spread on a 5000 µs interval, from a program with no
+timing guarantees whatsoever. `rt evlat` still reports 8 µs worst
+edge-to-process, so reading the clock and the level in the handler costs
+nothing measurable.
+
+### Two things it found on a bare pin
+
+**It measured its own trigger.** The first readings were 28 µs and then
+20 µs, reported confidently as zero millimetres. The trigger is a rise and a
+fall on the same wire the echo returns on, so the handler times it like
+anything else — and it is the *first* pulse of every reading. `range` now
+ignores anything under 60 µs: two centimetres is about as close as these
+modules resolve and that is 116 µs of round trip, so the floor discards
+every trigger and no real reading.
+
+**Releasing the pin took it away from another process.** After `range`
+triggered once, `edgegen` on the same pin stopped producing edges. The open
+path computes direction as the union of what every opener wants, precisely
+so that a reader arriving cannot stop a writer driving the pin — and
+`setstat(RV9_PIO_SS_DIRECTION)` called `gpio_set_direction` straight,
+bypassing all of it. The same fault the open path had been fixed for, left
+behind in the other half.
+
+It now goes through the same accounting, with one deliberate difference:
+`s_driving` is sticky against an *arriving reader* and not against an
+explicit request to stop driving. A program that holds the pin and says
+"input" means it, and has to mean it — a bidirectional device answers on the
+wire we triggered it on, and a pin still driving low is a pin the sensor
+cannot raise.
+
+### What this is not
+
+Nothing has been measured against a real sonic ranger; the sensor is not
+wired up yet. What has been measured is the mechanism, against a generator
+whose interval is known, which is the same standing the I²C work has: the
+manager, the driver, the probe and the scan all work and no chip has
+answered. The honest claim is that the timing path is exact to a couple of
+microseconds and that `range` speaks the protocol the datasheets describe.
+Whether this particular module answers is a question about wiring and 3.3 V
+tolerance, and it will be settled with a tape measure.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

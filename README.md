@@ -102,7 +102,8 @@ loadable pieces:
 | `/n0/host/port` | a TCP connection; `/n0/listen/port` accepts |
 | `/ssh0` | SSH sessions, as a character device |
 | `/pipe/name` | a pipe -- what one program writes, another reads |
-| `/gpio/N`, `/pwm0`, `/adc0`, `/tsens` | hardware |
+| `/gpio/N`, `/pwm0`, `/adc0`, `/tsens` | hardware; a pin reports edges, and the interrupt times the pulse between them |
+| `/i2c0/0x68` | a chip on the two-wire bus, through IFM; the register lives on the path so a read is one transaction |
 | `/w0` | a window you draw on by writing SVG to it |
 | `/pub0/NAME` | a published value with an owner and a sequence number |
 
@@ -174,7 +175,7 @@ entirely is the remaining kernel work.
 | `components/rv9_kernel` | the native kernel: RV32 context switch, run queues with aging, its own tick and allocator |
 | `components/rv9_module` | module format, manifest, directory, loader, the system-call table |
 | `components/rv9_proc` | processes: fork, wait, kill, admission, derived priority, budgets, faults |
-| `components/rv9_io` | I/O manager, file managers (SCF, RBF, NFM, PIO, PFM) and drivers |
+| `components/rv9_io` | I/O manager, file managers (SCF, RBF, NFM, PIO, PFM, PIPE, IFM) and drivers |
 | `components/rv9_ssh` | SSH transport, authentication and channels, as a device |
 | `modules/` | about seventy modules: shell, commands, daemons, descriptors, test loops |
 | `main/` | bring-up and the boot test suites |
@@ -262,9 +263,15 @@ The name and the mascot are not covered by that licence; see
 
 Working on the hardware: modules, processes, I/O, RAM disk, flash and
 microSD storage, networking, an SSH server, an SVG window, GPIO/PWM/ADC,
-publication, a shell with pipes and redirection, a complete set of small
-tools, a clock taken from the network, and the real-time class with
-admission, derived priority, watchdog, failsafes and memory reserves.
+I²C, pulse timing measured in the interrupt handler, publication, a shell
+with pipes and redirection, a complete set of small tools, a clock taken
+from the network, and the real-time class with admission, derived priority,
+watchdog, failsafes and memory reserves.
+
+Verified as mechanisms but not yet against real parts: **I²C** has only
+talked to an empty bus, and the **sonic ranger** command has only been
+measured against a generator on a pin (exact to 2 µs, see design §51). Both
+are waiting on a chip to answer.
 
 Still to come:
 - **The kernel owning the CPU from reset**, with its own trap vector and
