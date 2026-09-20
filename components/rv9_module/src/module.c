@@ -627,6 +627,19 @@ static int env_wait(int pid, int *status, uint32_t timeout_ms)
            ? s_proc_ops->wait(pid, status, timeout_ms) : -1;
 }
 
+static int env_wait_why(int pid, int *status, int *fault, uint32_t timeout_ms)
+{
+    if (s_proc_ops && s_proc_ops->wait_why) {
+        return s_proc_ops->wait_why(pid, status, fault, timeout_ms);
+    }
+    /* Falling back loses only the distinction, not the wait. A caller told
+       RV9_FAULT_NONE by a system that cannot tell is being given the more
+       useful of the two wrong answers: it will report the module's own
+       status rather than announcing a crash that did not happen. */
+    if (fault) *fault = RV9_FAULT_NONE;
+    return env_wait(pid, status, timeout_ms);
+}
+
 static int env_signal(int pid, uint32_t signals)
 {
     return s_proc_ops && s_proc_ops->signal
@@ -959,6 +972,7 @@ void rv9_mod_env_init(rv9_mod_env_t *env, void *statics,
     env->write        = env_write;
     env->fork         = env_fork;
     env->wait         = env_wait;
+    env->wait_why     = env_wait_why;
     env->sysinfo      = env_sysinfo;
     env->dup2         = env_dup2;
     env->chain        = env_chain;

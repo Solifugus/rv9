@@ -1076,6 +1076,14 @@ static int proc_wait_op(int pid, int *status, uint32_t timeout_ms)
     return (err == RV9_PROC_OK) ? 0 : -(int)err;
 }
 
+static int proc_wait_why_op(int pid, int *status, int *fault,
+                            uint32_t timeout_ms)
+{
+    rv9_proc_err_t err = rv9_proc_wait_why((rv9_pid_t)pid, status, fault,
+                                           timeout_ms);
+    return (err == RV9_PROC_OK) ? 0 : -(int)err;
+}
+
 /* Fill rv9_sys_proc_t records. buf==NULL just counts, which is how
    sysinfo(RV9_SYS_MEM) learns the process count. */
 static int proc_list_op(void *buf, uint32_t len)
@@ -1266,6 +1274,7 @@ static const rv9_mod_proc_ops_t s_mod_proc_ops = {
     .kill   = proc_kill_op,
     .fork  = proc_fork_op,
     .wait  = proc_wait_op,
+    .wait_why = proc_wait_why_op,
     .procs = proc_list_op,
     .stacks = proc_stacks_op,
     .chain = proc_chain_op,
@@ -2037,6 +2046,30 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
  * works whichever scheduler either party belongs to.
  */
 #define WAIT_POLL_MS 5
+
+rv9_proc_err_t rv9_proc_wait_why(rv9_pid_t pid, int *out_status,
+                                 int *out_fault, uint32_t timeout_ms)
+{
+    /*
+     * The fault is read under the lock at the same moment as the status,
+     * because the two together are one answer: "it ended, and this is why".
+     * Fetched separately they could describe different instants, and the
+     * caller would have no way of knowing.
+     */
+    rv9_proc_err_t err = rv9_proc_wait(pid, out_status, timeout_ms);
+
+    if (out_fault != NULL) {
+        *out_fault = RV9_FAULT_NONE;
+
+        if (err == RV9_PROC_OK) {
+            rv9_lock_acquire(s_lock);
+            rv9_proc_t *p = find_locked(pid);
+            if (p != NULL) *out_fault = p->fault;
+            rv9_lock_release(s_lock);
+        }
+    }
+    return err;
+}
 
 rv9_proc_err_t rv9_proc_wait(rv9_pid_t pid, int *out_status, uint32_t timeout_ms)
 {

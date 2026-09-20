@@ -517,6 +517,7 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
 
     int pid = env->fork_arg(name, 8, arg);
     int status = 0;
+    int fault  = RV9_FAULT_NONE;
 
     bool fallback = false;
     if (pid == -RV9_PE_NOMEM || pid == -RV9_PE_BUDGET) {
@@ -528,7 +529,9 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         /* Until it finishes. Giving up after thirty seconds did not stop
            the command -- it put a second reader on the same terminal, and
            an editor and a shell then fought over every keystroke. */
-        if (env->wait(pid, &status, RV9_WAIT_FOREVER) < 0) status = -1;
+        if (env->wait_why(pid, &status, &fault, RV9_WAIT_FOREVER) < 0) {
+            status = -1;
+        }
     }
 
     if (saved_out >= 0) {
@@ -553,21 +556,33 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         m_say(env, RV9_STDOUT, "] ");
         m_say(env, RV9_STDOUT, name);
         m_say(env, RV9_STDOUT, "\n");
-    } else if (status == -RV9_PE_KILLED) {
-        /* Ended, not returned: these statuses are RV-9's, never the
-           program's, and "returned -12" would say otherwise. */
+    } else if (fault != RV9_FAULT_NONE) {
+        /*
+         * Ended, not returned -- and the *fault* is what says so.
+         *
+         * This used to test the status: -12 meant killed, -13 meant a
+         * missed deadline. The comment here said those statuses were
+         * "RV-9's, never the program's", and that was simply untrue. A
+         * module's return shares the number space, so `i2c` returning -6
+         * for "that address did not answer" was announced as having been
+         * stopped by the scheduler. It had run perfectly.
+         *
+         * env->wait_why hands back both, and only one of them is RV-9
+         * speaking.
+         */
         m_say(env, RV9_STDOUT, name);
-        m_say(env, RV9_STDOUT, ": killed\n");
-    } else if (status == -RV9_PE_DEADLINE) {
-        m_say(env, RV9_STDOUT, name);
-        m_say(env, RV9_STDOUT, ": missed its deadline and was stopped\n");
-    } else if (status == -RV9_PE_RUNAWAY) {
-        m_say(env, RV9_STDOUT, name);
-        m_say(env, RV9_STDOUT, ": stopped waiting for its releases, and "
-                               "was stopped\n");
-    } else if (status == -RV9_PE_FAULT) {
-        m_say(env, RV9_STDOUT, name);
-        m_say(env, RV9_STDOUT, ": stopped by the scheduler (see the log)\n");
+        if (fault == RV9_FAULT_KILLED) {
+            m_say(env, RV9_STDOUT, ": killed\n");
+        } else if (fault == RV9_FAULT_DEADLINE) {
+            m_say(env, RV9_STDOUT, ": missed its deadline and was stopped\n");
+        } else if (fault == RV9_FAULT_RUNAWAY) {
+            m_say(env, RV9_STDOUT, ": stopped waiting for its releases, and "
+                                   "was stopped\n");
+        } else if (fault == RV9_FAULT_STACK) {
+            m_say(env, RV9_STDOUT, ": ran off its stack and was stopped\n");
+        } else {
+            m_say(env, RV9_STDOUT, ": stopped by the scheduler (see the log)\n");
+        }
     } else if (status != 0) {
         m_say(env, RV9_STDOUT, name);
         m_say(env, RV9_STDOUT, " returned ");

@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     13
+#define RV9_MODULE_ABI     14
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -469,6 +469,28 @@ typedef struct {
      */
     int       (*signal)(int pid, uint32_t signals);
     int       (*kill)(int pid);
+
+    /* --- ABI 14: telling a program's answer from the system's verdict --- */
+    /*
+     * Wait, and learn *why* it ended.
+     *
+     * `wait` hands back only a status, and a module's return value shares
+     * a number space with the process manager's own verdicts:
+     * RV9_PE_FAULT is 6, RV9_PE_DEADLINE is 13. So a tool returning -6 to
+     * mean "that address did not answer" was reported by the shell as
+     * having been stopped by the scheduler. It had run perfectly.
+     *
+     * The information was never lost -- the process manager keeps the
+     * fault separately -- it simply could not be asked for. `fault`
+     * receives RV9_FAULT_*, or RV9_FAULT_NONE when the process returned
+     * under its own power, in which case `status` is the module's own and
+     * means whatever that module says it means.
+     *
+     * Appended, so every module built before this still runs; only one
+     * that calls it needs the newer ABI.
+     */
+    int       (*wait_why)(int pid, int *status, int *fault,
+                          uint32_t timeout_ms);
 } rv9_mod_env_t;
 
 /*
@@ -1348,6 +1370,7 @@ void rv9_mod_set_io_ops(const rv9_mod_io_ops_t *ops);
 typedef struct {
     int (*fork)(const char *module, int priority);
     int (*wait)(int pid, int *status, uint32_t timeout_ms);
+    int (*wait_why)(int pid, int *status, int *fault, uint32_t timeout_ms);
     int (*procs)(void *buf, uint32_t len);   /* fills rv9_sys_proc_t records */
     int (*stacks)(void *buf, uint32_t len);  /* fills rv9_sys_stack_t records */
     int (*chain)(const char *module);

@@ -5546,6 +5546,78 @@ hundred bytes is not a margin, and that until the PMP arrives (phase 7
 step 5) the guard is a detector with a known blind spot rather than a
 protection.
 
+## 49. Two numbers sharing one space
+
+`i2c 0x68 0x75` on a bus with nothing on it, and the shell said:
+
+```
+i2c: stopped by the scheduler (see the log)
+```
+
+It had not been stopped by anything. It had run perfectly, found no device
+at that address, and said so by returning `-6`. `RV9_PE_FAULT` is 6.
+
+The shell had been reading the exit status and deciding from its value what
+had happened: `-12` meant killed, `-13` meant a missed deadline, anything
+else negative was the program's own. The comment above that code asserted
+those numbers were "RV-9's, never the program's", and it was simply untrue.
+A module returns whatever it likes; the process manager's verdicts are in
+the same range; nothing distinguished them.
+
+The information had never been lost. `rv9_proc_t` has carried a separate
+`fault` field since §21, set from the kernel's own reason and printed in
+`procs` for the whole history. It was only `wait()` that could not hand it
+back, because its signature has room for one number:
+
+```c
+int (*wait)(int pid, int *status, uint32_t timeout_ms);
+```
+
+### The fix, and why it is an ABI bump
+
+ABI 14 appends one call rather than changing that one:
+
+```c
+int (*wait_why)(int pid, int *status, int *fault, uint32_t timeout_ms);
+```
+
+`fault` receives `RV9_FAULT_*`, or `RV9_FAULT_NONE` when the process
+returned under its own power — in which case `status` is the module's and
+means whatever that module says it means. The two questions are now asked
+separately because they were always two questions.
+
+Appending is what makes it safe. Every module built against ABI 13 or
+earlier still loads and runs: the loader refuses a module declaring an ABI
+*higher* than the firmware's, never a lower one, and a module that does not
+call `wait_why` never notices it exists. `env_wait_why` in the module
+manager also falls back to `wait()` and reports `RV9_FAULT_NONE` when the
+process manager underneath it is older than the call, so the seam holds in
+both directions.
+
+The shell now branches on the fault:
+
+```
+rv9> cat /nosuchfile
+cat returned -4                            # the program's answer
+
+rv9> i2c 0x68 0x75
+i2c returned 7                             # also the program's answer
+
+rv9> rt runaway
+rt: runaway stopped waiting for its releases: stopped from outside,
+    failsafes applied
+rt returned 1                              # RV-9's verdict, then the program's
+
+rv9> smash
+descending...
+smash: ran off its stack and was stopped   # RV-9's verdict, named
+```
+
+That last line used to read "stopped by the scheduler (see the log)" for
+every fault, because the status could not say which. `i2c` was also changed
+to return positive codes, which is the right habit regardless — but the
+habit was never the problem. Reading one number as if it were two was.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

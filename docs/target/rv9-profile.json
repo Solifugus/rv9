@@ -4,7 +4,7 @@
   "generated_by": "tools/mkprofile.py -- regenerate, do not edit",
   "module": {
     "magic": 1295603282,
-    "abi": 13,
+    "abi": 14,
     "header_bytes": 40,
     "types": {
       "PROGRAM": 1,
@@ -468,6 +468,12 @@
       "name": "kill",
       "kind": "call",
       "since_abi": 13,
+      "rt_safe": "no"
+    },
+    {
+      "name": "wait_why",
+      "kind": "call",
+      "since_abi": 14,
       "rt_safe": "no"
     }
   ],

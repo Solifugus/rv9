@@ -272,6 +272,21 @@ rv9_proc_err_t rv9_proc_fork_rt(const char *module_name, uint32_t period_us,
 /* Block until a process exits. timeout_ms may be RV9_WAIT_FOREVER. */
 rv9_proc_err_t rv9_proc_wait(rv9_pid_t pid, int *out_status, uint32_t timeout_ms);
 
+/*
+ * The same wait, and why it ended.
+ *
+ * `out_fault` receives RV9_FAULT_*, or RV9_FAULT_NONE when the process
+ * returned under its own power -- in which case the status is the
+ * module's own and means whatever that module says it means.
+ *
+ * Without this the two are indistinguishable: an exit status and a
+ * scheduler's verdict share one number space, so a module returning -6
+ * reads exactly like one the scheduler stopped. Either argument may be
+ * NULL.
+ */
+rv9_proc_err_t rv9_proc_wait_why(rv9_pid_t pid, int *out_status,
+                                 int *out_fault, uint32_t timeout_ms);
+
 /* Post signals to a process. It sees them next time it asks. */
 rv9_proc_err_t rv9_proc_signal(rv9_pid_t pid, uint32_t signals);
 
