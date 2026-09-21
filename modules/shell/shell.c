@@ -27,14 +27,105 @@
 #define SAVE_OUT  (SAVE_PATH)
 #define SAVE_IN   (SAVE_PATH + 1)
 
+/*
+ * Commands joined by && or ||, on one line.
+ *
+ * Six is more than a legible line holds, and each one costs only a pointer
+ * and a byte here -- the work is done one segment at a time, in the same
+ * two buffers a single command uses.
+ */
+#define COND_MAX  6
+
+#define COND_ALWAYS 0
+#define COND_AND    1       /* run this only if the one before succeeded */
+#define COND_OR     2       /* run this only if the one before did not */
+
 typedef struct {
     char line[LINE_MAX];    /* chopped into tokens */
     char raw[LINE_MAX];     /* kept whole, for multi-word arguments */
     int  term;
     char term_open;
     uint32_t pipe_seq;      /* so two pipelines never share a pipe's name */
+
+    /*
+     * What the last command did, kept apart because they are two
+     * different questions -- see the note above run(), and design §49.
+     * `status` prints them; && and || only care whether it worked.
+     */
+    int  last_status;
+    int  last_fault;
+
+    /* Commands come from here when the shell was given a file to run, and
+       from RV9_STDIN otherwise. */
+    int  script;
+
+    /* What has arrived and not yet been used. See read_line. */
+    char in[LINE_MAX];
+    int  in_len;
+
     rv9_sys_proc_t procs[16];   /* for the fallback `procs`, which cannot fork */
 } shell_statics_t;
+
+/*
+ * One line, from wherever the commands are coming from.
+ *
+ * Three sources with three habits. A terminal hands back a line at a time,
+ * because SCF does the editing. A socket hands back whatever the network
+ * chose, so a line may take several reads or share one with the next. A
+ * *file* hands back as much as was asked for, which is several lines at
+ * once.
+ *
+ * The old reader looked for the first newline and threw away everything
+ * after it. A terminal never noticed, a socket noticed rarely, and a script
+ * would have run every other line -- silently, which is the worst way for a
+ * script to be wrong. So what arrives is kept and consumed a line at a time.
+ *
+ * Returns the line's length, or -1 when the source is finished and nothing
+ * is left over.
+ */
+static int read_line(const rv9_mod_env_t *env, shell_statics_t *st, int src)
+{
+    for (;;) {
+        for (int i = 0; i < st->in_len; i++) {
+            if (st->in[i] != '\n' && st->in[i] != '\r') continue;
+
+            int len = i;
+            for (int k = 0; k < len; k++) st->line[k] = st->in[k];
+            st->line[len] = '\0';
+
+            int drop = i + 1;
+            if (drop < st->in_len && st->in[i] == '\r' && st->in[drop] == '\n') {
+                drop++;                                  /* CRLF is one ending */
+            }
+            st->in_len -= drop;
+            for (int k = 0; k < st->in_len; k++) st->in[k] = st->in[drop + k];
+            return len;
+        }
+
+        /* Full, with no ending in it. Take what there is rather than wait
+           for a newline that cannot fit. */
+        if (st->in_len >= LINE_MAX - 1) {
+            for (int k = 0; k < st->in_len; k++) st->line[k] = st->in[k];
+            st->line[st->in_len] = '\0';
+            int len = st->in_len;
+            st->in_len = 0;
+            return len;
+        }
+
+        int k = env->read(src, st->in + st->in_len, LINE_MAX - 1 - st->in_len);
+        if (k <= 0) {
+            if (st->in_len == 0) return -1;
+            /* A last line with no newline after it is still a line, which
+               is how most editors leave a file. */
+            for (int i = 0; i < st->in_len; i++) st->line[i] = st->in[i];
+            st->line[st->in_len] = '\0';
+            int len = st->in_len;
+            st->in_len = 0;
+            return len;
+        }
+        st->in_len += k;
+    }
+}
 
 /*
  * The way out, when there is no memory to start it.
@@ -140,6 +231,136 @@ static bool take_ampersand(char *raw)
     return true;
 }
 
+/*
+ * Split a line in place on && and ||.
+ *
+ * This is the whole of "a script can make decisions". Without it a script
+ * is a list of things that happen whatever went wrong before them, which
+ * is a transcript rather than a program -- and RV-9's own demonstration is
+ * meant to be run, not typed.
+ *
+ * `op[i]` says what joined this segment to the one before it, so the caller
+ * evaluates left to right against a running status, exactly as `a && b ||
+ * c` reads. The operators do not have precedence over each other and are
+ * not meant to: anyone who needs precedence needs parentheses, and anyone
+ * who needs parentheses needs a real language, which is upstairs in R9.
+ *
+ * `||` is looked for first, because `|` is a prefix of it and a pipeline
+ * that swallowed the first bar of an or would be a bewildering way to
+ * spend an evening.
+ */
+static int split_conditions(char *raw, char *seg[], uint8_t op[], int max)
+{
+    int  n  = 0;
+    char *p = raw;
+
+    seg[n]  = p;
+    op[n++] = COND_ALWAYS;
+
+    for (; *p; p++) {
+        if (p[0] != '&' && p[0] != '|') continue;
+        if (p[1] != p[0])               continue;       /* & or |, not && or || */
+        if (n >= max)                   break;
+
+        uint8_t kind = (p[0] == '&') ? COND_AND : COND_OR;
+
+        /* Trim the segment that ends here, then start the next one after
+           the operator. */
+        char *e = p;
+        while (e > seg[n - 1] && (e[-1] == ' ' || e[-1] == '\t')) e--;
+        *e = '\0';
+
+        p += 2;
+        while (*p == ' ' || *p == '\t') p++;
+
+        seg[n]  = p;
+        op[n++] = kind;
+        p--;                                     /* the for() will step on */
+    }
+
+    return n;
+}
+
+/*
+ * Open a redirection target, truncating or appending.
+ *
+ * RV9_MODE_CREATE truncates what it finds, which is right for `>` and
+ * exactly wrong for `>>`. So append opens the file as it stands and only
+ * creates when there is nothing there, then seeks to the end.
+ *
+ * `>>` exists because without it a file on this machine can only ever hold
+ * what one command wrote. That was tolerable while files were places to put
+ * output; it stopped being tolerable the moment the shell could *run* a
+ * file, because a script with one line in it is not a script and there is
+ * no editor on the board worth writing one in.
+ */
+static int open_target(const rv9_mod_env_t *env, const char *target,
+                       bool append)
+{
+    if (!append) return env->open(target, RV9_MODE_WRITE | RV9_MODE_CREATE);
+
+    int t = env->open(target, RV9_MODE_WRITE);
+    if (t < 0) t = env->open(target, RV9_MODE_WRITE | RV9_MODE_CREATE);
+    if (t >= 0) env->seek(t, 0, RV9_SEEK_END);
+    return t;
+}
+
+/*
+ * Pull `< file`, `> file` and `>> file` off a command, in place.
+ *
+ * This used to be done by walking the token list, which coupled it to
+ * ARG_MAX -- eight. A redirection that fell past the eighth word was simply
+ * not seen, and the command ran with its output still on the terminal:
+ *
+ *     echo # what the board can say for itself > /r0/demo
+ *
+ * wrote the comment to the console and created no file, silently, because
+ * `>` was the tenth token. Nothing about where output goes has anything to
+ * do with how many words precede it, so it is read off the line instead.
+ *
+ * The command's argument ends at the first redirection, which is also what
+ * rest_of_line() assumes -- it finds nothing left to trim once this has
+ * run.
+ */
+static void take_redirections(char *raw, const char **target, bool *append,
+                              const char **source)
+{
+    *target = NULL;
+    *source = NULL;
+    *append = false;
+
+    char *cut = NULL;
+
+    for (char *p = raw; *p; ) {
+        if (*p != '<' && *p != '>') { p++; continue; }
+
+        bool out = (*p == '>');
+        bool app = (out && p[1] == '>');
+        if (cut == NULL) cut = p;
+
+        char *n = p + (app ? 2 : 1);
+        *p = '\0';                     /* ends the argument, or the name before */
+        while (*n == ' ' || *n == '\t') n++;
+
+        char *e = n;
+        while (*e && *e != ' ' && *e != '\t' && *e != '<' && *e != '>') e++;
+
+        char *next = e;
+        if (*e != '\0' && *e != '<' && *e != '>') { *e = '\0'; next = e + 1; }
+
+        if (*n != '\0') {
+            if (out) { *target = n; *append = app; }
+            else     { *source = n; }
+        }
+        p = next;
+    }
+
+    /* The spaces the redirection left on the end of the argument. */
+    while (cut != NULL && cut > raw && (cut[-1] == ' ' || cut[-1] == '\t')) {
+        *--cut = '\0';
+    }
+}
+
 /* Split in place on whitespace. Returns the argument count. */
 static int tokenize(char *line, char *argv[], int max)
 {
@@ -160,14 +381,18 @@ static void help(const rv9_mod_env_t *env)
     m_say(env, RV9_STDOUT,
           "commands are modules; 'mdir' lists them\n"
           "  help              this text\n"
-          "  exit              leave the shell\n"
-          "  <module> [arg] [< file] [> dev]  fork it, redirected\n"
+          "  exit [n]          leave the shell, with a status\n"
+          "  status            what the last command returned, or its fault\n"
+          "  <module> [arg] [< file] [> dev] [>> file]  fork it, redirected\n"
           "  <module> | <module>     what one writes, the next reads\n"
           "  <module> &        run it without waiting; see it in 'procs'\n"
+          "  a && b            b only if a succeeded;  a || b, only if not\n"
           "  kill [-f] <pid>   stop one: ask, then insist\n"
           "\n"
+          "  shell <file>      run a file of commands; '#' is a comment\n"
+          "\n"
           "try: mdir, procs, owns, pubs, free, dir, filetest, netstat\n"
-          "     dir /r0        echo > /term\n"
+          "     dir /r0        echo hello > /term\n"
           "     dir /f0 | count       mdir | match desc\n"
           "     fetch host /path > /r0/file\n"
           "     load /r0/file.mod     then run it by name\n");
@@ -270,7 +495,7 @@ static char *cut_name(char *s, char **out_name)
  * end and the first stage can run, write, exit and take the pipe with it
  * before the reader ever arrives.
  */
-static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
+static int run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
 {
     shell_statics_t *st = (shell_statics_t *)env->statics;
 
@@ -300,7 +525,7 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
         if (saved_out >= 0) env->close(SAVE_OUT);
         if (saved_in  >= 0) env->close(SAVE_IN);
         m_say(env, RV9_STDOUT, "no room to hold my own input and output\n");
-        return;
+        return -1;
     }
 
     int prev_read = -1;
@@ -338,11 +563,13 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
 
         /* The last stage may still redirect, as any command may. */
         const char *target = NULL;
+        bool        append = false;
         if (i == stages - 1) {
             for (char *q = arg; *q; q++) {
                 if (*q == '>') {
+                    append = (q[1] == '>');
                     *q = '\0';
-                    char *t = q + 1;
+                    char *t = q + (append ? 2 : 1);
                     while (*t == ' ') t++;
                     char *e = t;
                     while (*e) e++;
@@ -374,7 +601,7 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
         }
 
         if (target != NULL) {
-            int t = env->open(target, RV9_MODE_WRITE | RV9_MODE_CREATE);
+            int t = open_target(env, target, append);
             if (t < 0) {
                 m_say(env, RV9_STDERR, target);
                 m_say(env, RV9_STDERR, ": cannot open\n");
@@ -441,13 +668,36 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
      * the prompt comes back would write into a terminal the shell is
      * reading from, and the two would fight over it.
      */
+    int last_status = 0;
+    int last_fault  = RV9_FAULT_NONE;
+
     if (!background) {
         for (int i = 0; i < stages; i++) {
             if (pids[i] < 0) continue;
-            int status = 0;
-            env->wait(pids[i], &status, RV9_WAIT_FOREVER);
+            int status = 0, fault = RV9_FAULT_NONE;
+            env->wait_why(pids[i], &status, &fault, RV9_WAIT_FOREVER);
+
+            /*
+             * A pipeline's answer is its last stage's.
+             *
+             * Which is a choice, and the same one Unix makes by default.
+             * `mdir | match nothing` failing because the match found
+             * nothing is the useful reading; `mdir` having failed while
+             * `count` cheerfully reported zero is the one that would be
+             * missed, and it is missed here too. What stops that being a
+             * trap is that a stage which dies says so on stderr, which a
+             * pipe does not carry away.
+             */
+            if (i == stages - 1) { last_status = status; last_fault = fault; }
         }
     }
+
+    shell_statics_t *sts = (shell_statics_t *)env->statics;
+    sts->last_status = last_status;
+    sts->last_fault  = last_fault;
+
+    if (broken) return -1;
+    return (last_fault != RV9_FAULT_NONE || last_status != 0) ? -1 : 0;
 }
 
 /*
@@ -457,8 +707,9 @@ static void run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
  * reference. The shell parks its own stdout, aims stdout at the target,
  * forks -- the child gets the target without knowing -- then puts it back.
  */
-static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
-                const char *target, const char *source, bool background)
+static int run(const rv9_mod_env_t *env, const char *name, const char *arg,
+               const char *target, const char *source, bool append,
+               bool background)
 {
     /*
      * Park first, open second -- both of them, before either.
@@ -474,7 +725,7 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         saved_out = env->dup2(RV9_STDOUT, SAVE_OUT);
         if (saved_out < 0) {
             m_say(env, RV9_STDOUT, "cannot save stdout\n");
-            return;
+            return -1;
         }
     }
     if (source != NULL) {
@@ -482,7 +733,7 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         if (saved_in < 0) {
             if (saved_out >= 0) env->close(SAVE_OUT);
             m_say(env, RV9_STDOUT, "cannot save stdin\n");
-            return;
+            return -1;
         }
     }
 
@@ -490,13 +741,13 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         /* CREATE so that "> /r0/thing" makes a file rather than failing.
            Redirecting to a device ignores it; redirecting to a volume is
            how anything gets onto one. */
-        int t = env->open(target, RV9_MODE_WRITE | RV9_MODE_CREATE);
+        int t = open_target(env, target, append);
         if (t < 0) {
             m_say(env, RV9_STDOUT, target);
             m_say(env, RV9_STDOUT, ": cannot open\n");
             if (saved_in  >= 0) env->close(SAVE_IN);
             env->close(SAVE_OUT);
-            return;
+            return -1;
         }
         env->dup2(t, RV9_STDOUT);
         env->close(t);
@@ -509,7 +760,7 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
             if (saved_out >= 0) { env->dup2(SAVE_OUT, RV9_STDOUT);
                                   env->close(SAVE_OUT); }
             env->close(SAVE_IN);
-            return;
+            return -1;
         }
         env->dup2(f, RV9_STDIN);
         env->close(f);
@@ -589,6 +840,33 @@ static void run(const rv9_mod_env_t *env, const char *name, const char *arg,
         m_num(env, RV9_STDOUT, status);
         m_say(env, RV9_STDOUT, "\n");
     }
+
+    /*
+     * Both kept, one returned.
+     *
+     * `status` reports the pair, because they answer different questions.
+     * && and || want one bit, and the bit has to count a fault as failure:
+     * a program that was stopped for running off its stack did not succeed,
+     * whatever number happened to be in its status register.
+     *
+     * A backgrounded command has not finished, so there is nothing to
+     * report about it -- starting it is the success.
+     */
+    shell_statics_t *st = (shell_statics_t *)env->statics;
+    if (pid < 0) {
+        st->last_status = pid;
+        st->last_fault  = RV9_FAULT_NONE;
+        return fallback ? 0 : -1;
+    }
+    if (background) {
+        st->last_status = 0;
+        st->last_fault  = RV9_FAULT_NONE;
+        return 0;
+    }
+
+    st->last_status = status;
+    st->last_fault  = fault;
+    return (fault != RV9_FAULT_NONE || status != 0) ? -1 : 0;
 }
 
 __attribute__((section(".text.entry")))
@@ -601,114 +879,182 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     shell_statics_t *st = (shell_statics_t *)env->statics;
     if (st == NULL || env->statics_size < sizeof(*st)) return -4;
 
+    st->in_len      = 0;
+    st->last_status = 0;
+    st->last_fault  = RV9_FAULT_NONE;
+    st->script      = -1;
+
+    /*
+     * Given a file, run it instead of talking to anybody.
+     *
+     *     shell /f0/demo
+     *
+     * The same parser either way, which is the entire reason this lives in
+     * the shell rather than in a `script` command: a script wants pipes and
+     * redirection, and those are here. A script is not a second language.
+     *
+     * No banner and no prompt when scripted -- a prompt printed into a log
+     * is noise, and the point of a script is that nobody is watching.
+     */
+    if (env->arg != NULL) {
+        const char *path = env->arg;
+        while (*path == ' ' || *path == '\t') path++;
+        if (*path != '\0') {
+            st->script = env->open(path, RV9_MODE_READ);
+            if (st->script < 0) {
+                m_say(env, RV9_STDERR, "shell: cannot open ");
+                m_say(env, RV9_STDERR, path);
+                m_say(env, RV9_STDERR, "\n");
+                return 1;
+            }
+        }
+    }
+
+    bool scripted = (st->script >= 0);
+    int  src      = scripted ? st->script : RV9_STDIN;
+
     /* Mirror activity to the panel, so the board shows what is happening
        even though the keyboard is at the other end of the cable. */
     st->term = env->open("/term", RV9_MODE_WRITE);
     st->term_open = (st->term >= 0);
 
-    m_say(env, RV9_STDOUT, "\nRV-9 shell. Type 'help'.\n");
-    if (st->term_open) m_say(env, st->term, "shell ready\n");
+    if (!scripted) {
+        m_say(env, RV9_STDOUT, "\nRV-9 shell. Type 'help'.\n");
+        if (st->term_open) m_say(env, st->term, "shell ready\n");
+    }
 
-    for (;;) {
-        m_say(env, RV9_STDOUT, "rv9> ");
+    int leaving = -1;            /* the status `exit` asked for, once it has */
+
+    while (leaving < 0) {
+        if (!scripted) m_say(env, RV9_STDOUT, "rv9> ");
+
+        int n = read_line(env, st, src);
+        if (n < 0) break;                       /* the source is finished */
 
         /*
-         * Read until a line is complete.
+         * Blank lines and comments.
          *
-         * Over a terminal, SCF hands back a whole line at once. Over a
-         * socket the bytes arrive in whatever sizes the network chose, and
-         * a line may take several reads or share one with the next. The
-         * newline is what ends a line, whichever it came from.
+         * A script with no way to say why it does something is a script
+         * nobody will trust enough to run, so `#` is not a luxury.
          */
-        int n = 0;
-        bool closed = false, complete = false;
+        const char *first = st->line;
+        while (*first == ' ' || *first == '\t') first++;
+        if (*first == '\0' || *first == '#') continue;
 
-        while (!complete && n < LINE_MAX - 1) {
-            int k = env->read(RV9_STDIN, st->line + n, LINE_MAX - 1 - n);
-            if (k <= 0) { closed = true; break; }
-
-            for (int i = n; i < n + k; i++) {
-                if (st->line[i] == '\n' || st->line[i] == '\r') {
-                    complete = true;
-                    break;
-                }
-            }
-            n += k;
-        }
-
-        if (closed && n == 0) break;     /* the other end went away */
-
-        st->line[n] = '\0';
-        for (int i = 0; i < n; i++) {
-            if (st->line[i] == '\n' || st->line[i] == '\r') {
-                st->line[i] = '\0';
-                n = i;
-                break;
-            }
-        }
-        if (n == 0) continue;
-
-        /* Keep a whole copy before tokenize() chops the original. */
+        /* Keep a whole copy: tokenize() chops, and every segment needs its
+           own argument with the spaces still in it. */
         for (int i = 0; i <= n; i++) st->raw[i] = st->line[i];
 
-        /* Off both copies, before either is parsed. */
-        bool background = take_ampersand(st->raw);
-        if (background) take_ampersand(st->line);
+        char   *seg[COND_MAX];
+        uint8_t op[COND_MAX];
+        int     nseg = split_conditions(st->raw, seg, op, COND_MAX);
 
-        char *argv[ARG_MAX];
-        int argc = tokenize(st->line, argv, ARG_MAX);
-        if (argc == 0) continue;
+        /* The running answer && and || are asked about, left to right. */
+        int outcome = 0;
 
-        if (m_eq(argv[0], "exit")) break;
-        if (m_eq(argv[0], "help")) { help(env); continue; }
+        for (int s = 0; s < nseg && leaving < 0; s++) {
+            if (s > 0) {
+                if (op[s] == COND_AND && outcome != 0) continue;
+                if (op[s] == COND_OR  && outcome == 0) continue;
+            }
 
-        /*
-         * A pipeline is handled whole, from the untouched copy: tokenize()
-         * has already chopped st->line, and every stage needs its own
-         * argument with the spaces still in it.
-         */
-        bool piped = false;
-        for (const char *q = st->raw; *q; q++) if (*q == '|') piped = true;
+            char *raw = seg[s];
+            bool background = take_ampersand(raw);
 
-        if (piped) {
+            /* A pipeline parses its own redirections, one for the first
+               stage and one for the last, so it has to be spotted before
+               anything is pulled off this line. */
+            bool piped = false;
+            for (const char *q = raw; *q; q++) if (*q == '|') piped = true;
+
+            const char *target = NULL, *source = NULL;
+            bool append = false;
+            if (!piped) take_redirections(raw, &target, &append, &source);
+
+            int k = 0;
+            while (raw[k] != '\0' && k < LINE_MAX - 1) { st->line[k] = raw[k]; k++; }
+            st->line[k] = '\0';
+
+            char *argv[ARG_MAX];
+            int argc = tokenize(st->line, argv, ARG_MAX);
+            if (argc == 0) continue;
+
+            if (m_eq(argv[0], "exit")) {
+                /*
+                 * A script says how it went by how it leaves, so `exit`
+                 * takes a number. Whoever ran the script -- another script,
+                 * or a shell with && after it -- reads that and nothing
+                 * else.
+                 */
+                const char *a = rest_of_line(raw);
+                int code = 0;
+                if (a != NULL) {
+                    while (*a == ' ') a++;
+                    bool neg = (*a == '-');
+                    if (neg) a++;
+                    const char *end = a;
+                    code = (int)m_num_parse(a, &end);
+                    if (neg) code = -code;
+                }
+                leaving = code;
+                break;
+            }
+
+            if (m_eq(argv[0], "help")) { help(env); outcome = 0; continue; }
+
+            if (m_eq(argv[0], "status")) {
+                /*
+                 * Deliberately transparent: it reports and does not become
+                 * the thing reported, so `cmd || status` says what went
+                 * wrong rather than what `status` did.
+                 */
+                if (st->last_fault != RV9_FAULT_NONE) {
+                    m_say(env, RV9_STDOUT, "stopped by RV-9, fault ");
+                    m_num(env, RV9_STDOUT, st->last_fault);
+                    m_say(env, RV9_STDOUT, "\n");
+                } else {
+                    m_say(env, RV9_STDOUT, "returned ");
+                    m_num(env, RV9_STDOUT, st->last_status);
+                    m_say(env, RV9_STDOUT, "\n");
+                }
+                continue;
+            }
+
+            if (piped) {
+                if (st->term_open && m_onscreen(env, st->term)) {
+                    m_say(env, st->term, "> ");
+                    m_say(env, st->term, argv[0]);
+                    m_say(env, st->term, " |\n");
+                }
+                outcome = run_pipeline(env, raw, background);
+                continue;
+            }
+
+            const char *arg = rest_of_line(raw);
+
+            /*
+             * Mirror to the panel, but never take it back.
+             *
+             * Showing what is being typed is a convenience for somebody
+             * glancing at the board. Once a program has drawn on the panel --
+             * a chart, a picture -- that convenience would wipe it at the next
+             * command, which is a poor trade for a line of text nobody asked
+             * to see. Writing to /term deliberately still brings the console
+             * back.
+             */
             if (st->term_open && m_onscreen(env, st->term)) {
                 m_say(env, st->term, "> ");
                 m_say(env, st->term, argv[0]);
-                m_say(env, st->term, " |\n");
+                m_say(env, st->term, "\n");
             }
-            run_pipeline(env, st->raw, background);
-            continue;
-        }
 
-        /* "cmd arg > /dev" -- pull the redirection off the end, and pass
-           whatever is left as the module's argument. */
-        const char *target = NULL, *source = NULL;
-        for (int i = 1; i < argc; i++) {
-            if (m_eq(argv[i], ">") && i + 1 < argc) target = argv[i + 1];
-            if (m_eq(argv[i], "<") && i + 1 < argc) source = argv[i + 1];
+            outcome = run(env, argv[0], arg, target, source, append, background);
         }
-        const char *arg = rest_of_line(st->raw);
-
-        /*
-         * Mirror to the panel, but never take it back.
-         *
-         * Showing what is being typed is a convenience for somebody
-         * glancing at the board. Once a program has drawn on the panel --
-         * a chart, a picture -- that convenience would wipe it at the next
-         * command, which is a poor trade for a line of text nobody asked
-         * to see. Writing to /term deliberately still brings the console
-         * back.
-         */
-        if (st->term_open && m_onscreen(env, st->term)) {
-            m_say(env, st->term, "> ");
-            m_say(env, st->term, argv[0]);
-            m_say(env, st->term, "\n");
-        }
-
-        run(env, argv[0], arg, target, source, background);
     }
 
     if (st->term_open) env->close(st->term);
-    m_say(env, RV9_STDOUT, "shell exiting\n");
-    return 0;
+    if (st->script >= 0) env->close(st->script);
+
+    if (!scripted) m_say(env, RV9_STDOUT, "shell exiting\n");
+    return (leaving > 0) ? leaving : 0;
 }

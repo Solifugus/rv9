@@ -86,6 +86,14 @@ match / procs / shell / sshd
 rv9> log | match error | last 20
 ```
 
+Commands decide, and a file of them is a script the shell runs — `#` for a
+comment, `exit n` for the answer it hands back:
+
+```
+rv9> range 11 || echo no sensor answered
+rv9> shell /f0/checkout && echo the board is fit to fly
+```
+
 Thirteen tools, whole words rather than abbreviations: `match` `count`
 `first` `last` `field` `sort` `unique` `copy` `move` `info` `dump` `log`
 `date`. Each states its limits and refuses rather than answering with part
@@ -264,9 +272,9 @@ The name and the mascot are not covered by that licence; see
 Working on the hardware: modules, processes, I/O, RAM disk, flash and
 microSD storage, networking, an SSH server, an SVG window, GPIO/PWM/ADC,
 I²C, pulse timing measured in the interrupt handler, publication, a shell
-with pipes and redirection, a complete set of small tools, a clock taken
-from the network, and the real-time class with admission, derived priority,
-watchdog, failsafes and memory reserves.
+with pipes, redirection, scripts and conditional execution, a complete set
+of small tools, a clock taken from the network, and the real-time class with
+admission, derived priority, watchdog, failsafes and memory reserves.
 
 Verified as mechanisms but not yet against real parts: **I²C** has only
 talked to an empty bus, and the **sonic ranger** command has only been

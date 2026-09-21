@@ -2254,6 +2254,12 @@ hanging. Three runs in a row cost 816 bytes of heap, which is four retained
 process descriptors and nothing else — the paths were closed, the module
 unlinked and the statics freed by a passer-by.
 
+(Both lines of that transcript have since changed, and each for its own
+reason. The shell now says *"smash: ran off its stack and was stopped"*,
+because reading `-6` as a verdict was reading a number that belonged to the
+program — §49. And `echo` now echoes, because `>>` made it the way a file
+gets written on a board with no editor — §52.)
+
 ## 23. A floor under the heap
 
 The board died like this:
@@ -5910,6 +5916,107 @@ answered. The honest claim is that the timing path is exact to a couple of
 microseconds and that `range` speaks the protocol the datasheets describe.
 Whether this particular module answers is a question about wiring and 3.3 V
 tolerance, and it will be settled with a tape measure.
+
+## 52. A demonstration that is run rather than typed
+
+Phase 11 left two boxes unticked, and they were the two that mattered:
+*scripts*, and *an exit status a script can read*. Without them every
+demonstration of this machine is a person typing, which is a poor way to
+show anything and no way at all to show it twice.
+
+### Scripts belong to the shell, not to a command
+
+A script wants pipes, redirection and `&` — which all live in the shell's
+parser. Writing a `script` command would mean writing that parser twice and
+watching the copies drift. So the shell takes a file:
+
+```
+rv9> shell /r0/demo
+```
+
+Same parser, same everything, with the prompt and the banner suppressed
+because nobody is watching. `#` starts a comment, because a script that
+cannot say why it does something is a script nobody will run.
+
+### Deciding, with two operators rather than a language
+
+`&&` and `||`, evaluated left to right against a running status. Not `if`:
+blocks need nesting, nesting needs lookahead, and lookahead in a shell this
+size is the beginning of a language that already exists upstairs in R9.
+
+What makes them trustworthy is §49. The bit they test counts a **fault** as
+failure, not just a non-zero status — a program stopped for running off its
+stack did not succeed, whatever number happened to be in its status
+register. Before `wait_why` that distinction was not available to ask for.
+
+```
+rv9> cat /nosuchfile && echo never printed
+/nosuchfile: cannot open
+cat returned -4
+
+rv9> cat /nosuchfile || echo recovered
+/nosuchfile: cannot open
+cat returned -4
+recovered
+```
+
+`exit n` gives a script its own answer, and the shell returns it, so scripts
+compose with each other exactly as commands do:
+
+```
+rv9> shell /r0/demo && echo WRONG
+...
+cat returned -4
+shell returned 3
+
+rv9> shell /r0/demo || echo the caller saw it fail
+...
+shell returned 3
+the caller saw it fail
+```
+
+`status` reports the last command's return *or* its fault, for the human.
+It is deliberately transparent — it does not become the thing it reports —
+so `cmd || status` says what went wrong rather than what `status` did.
+
+### Three things that turned out to be load-bearing
+
+None of these were on the list, and none of them could be skipped.
+
+**A file could only ever hold what one command wrote.** `RV9_MODE_CREATE`
+truncates, and there was no append, so `>` was the only way to write a file
+and every file was one command long. A script needs several lines and there
+is no editor on this board worth writing one in. So `>>` — which opens the
+file as it stands, creates only if absent, and seeks to the end.
+
+**`echo` did not echo.** It printed one fixed sentence, *"echo: hello from a
+forked module"*, and had since §11, where it existed to prove that a command
+is just a module. That was fine while nothing composed. The moment `>>`
+arrived, `echo` became the way a file gets written and therefore the way a
+script gets written, and a command called `echo` that ignores its argument
+became quietly absurd. It now says what it was told. The proof still stands.
+
+**A line reader that threw away everything after the first newline.** It
+found the newline, cut there, and dropped the rest of the buffer. A terminal
+never noticed, because SCF hands back one line at a time. A socket noticed
+rarely. A *file* hands back as much as was asked for — so a script would
+have run roughly every other line, silently, which is the worst way for a
+script to be wrong. What arrives is now kept and consumed a line at a time,
+which also quietly fixes pipelined input over SSH.
+
+### And one the script found by being wrong
+
+```
+rv9> echo # what the board can say for itself > /r0/demo
+```
+
+wrote the comment to the console and created no file. The redirection was
+found by walking the *token list*, and `ARG_MAX` is 8: `>` was the tenth
+token, so it was never seen, and the command ran with its output still on
+the terminal. Nothing about where output goes has anything to do with how
+many words precede it, so it is read off the line now instead. The token
+limit remains what it always was — a limit on how many words a module is
+handed — rather than a limit on where its output may go.
 
 ## 9. Migration to a native kernel
 

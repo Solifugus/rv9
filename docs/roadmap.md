@@ -539,11 +539,11 @@ Then, in order of what it unblocks rather than phase number:
    built for both; a chip select is an address, so SPI is a driver rather
    than a discipline.
 2. **Motors** — waiting on hardware, not on code.
-3. **Shell scripts and an exit status a script can read** — the difference
-   between a demonstration that is typed and one that is run. The status
-   half is now askable: ABI 14's `wait_why` separates what a program
-   returned from what RV-9 decided about it (design §49).
-4. **Phase 7 step 3** — the deep work, and the one that can wait.
+3. **Phase 7 step 3** — the deep work, and the one that can wait.
+
+*Also done since: shell scripts and the exit status a script can read
+(phase 11's last two boxes, design §52). A demonstration can now be run
+rather than typed.*
 
 *Done, and previously listed here: the `sdspi` driver and `/sd0` (phase 5,
 see design §42), the PIPE file manager (phase 11, design §47's
@@ -592,8 +592,15 @@ touched, because they already read stdin and write stdout.
 - [x] pipe file manager — PIPEFM over pipemem, `/pipe`
 - [x] `|` in the shell — up to four stages
 - [x] `<` input redirection — on a plain command and on a pipeline's first stage
-- [ ] scripts: a file of commands the shell can run
-- [ ] exit status visible to a script, or tools cannot make decisions
+- [x] scripts: a file of commands the shell can run — `shell /f0/demo`, the
+      same parser as a terminal, `#` for a comment
+- [x] exit status visible to a script, or tools cannot make decisions —
+      `&&`, `||`, `exit n` and a `status` command, on ABI 14's `wait_why`
+      so a fault and a return value are told apart (design §52)
+- [x] `>>`, and an `echo` that echoes — not on the original list, and
+      discovered to be load-bearing: without them a file on this board can
+      only ever hold what one command wrote, so a script could not be
+      written on the machine that runs it
 
 Two notes from building it. Almost nothing read standard input, because
 until pipes existed nothing could: `cat` with no name now copies its input,
