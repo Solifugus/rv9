@@ -6018,6 +6018,101 @@ many words precede it, so it is read off the line now instead. The token
 limit remains what it always was — a limit on how many words a module is
 handed — rather than a limit on where its output may go.
 
+## 53. A loop that never waits for its sensor
+
+`control` has always been the demonstration of the real-time class, and its
+plant is arithmetic: a first-order lag it drives with a PI controller. The
+timing it reports is real, the thing it controls is not. `sonar` is the same
+contract with the world on the other end of it.
+
+It is also where two facts collide. A sonic ranger takes up to 30
+milliseconds to answer. A real-time loop must not spend 30 milliseconds
+waiting. Both are true, and the resolution is not a compromise:
+
+```
+trigger at the top of this activation
+read the answer to the *previous* activation's trigger
+```
+
+The echo arrives about 100 milliseconds before anybody asks about it, and
+§51's interrupt handler has already timed it. So the loop never waits for
+the sensor at all:
+
+```
+rv9> rt sonar
+sonar: 4 activations at 100000 us
+  worst jitter   39 us
+  worst execute  173 us
+  overruns       0
+```
+
+**173 microseconds of activation for a device whose physical response is
+thirty milliseconds** — two getstats, four pin writes and a publish. The
+sensor's latency has not been hidden or absorbed; it has been moved outside
+the activation entirely, where it costs the schedule nothing.
+
+What it costs instead is that every reading is one period old, and that is
+stated rather than swallowed: `stamp_us` in the publication is when the echo
+was *timed*, not when it was handed over, so a watcher asking how stale the
+number is gets a true answer.
+
+### The sequence number, again
+
+The loop tests `GS_PULSES`, never the width. A width is always there once one
+echo has arrived, so testing the width would report the same distance forever
+the moment the sensor was unplugged — which is precisely the failure this
+loop exists to notice. That is the same reasoning as `range`'s and it is
+worth stating twice, because the wrong version of this code works perfectly
+until the wire falls off.
+
+### Two things it does, and one it refuses to do
+
+Below 300 mm it drives the parked pin low **and keeps going**. A control loop
+that exits because it saw something it did not like has not made anything
+safe; it has removed the only thing that was watching.
+
+It stops for one reason: five consecutive silent periods. Half a second is
+longer than a single swallowed echo — a soft or angled surface eats one now
+and then — and shorter than anything moving can travel unobserved. A ranger
+answering nothing for half a second has been unplugged, and steering on a
+reading from three seconds ago is worse than admitting the loop is blind.
+
+So it returns, and **RV-9 applies the failsafe**, not this code:
+
+```
+  the sensor stopped answering; failsafe applied
+W rv9-io: failsafe: /gpio/11 left at 0
+rt returned 9
+```
+
+That is the declaration doing its job. The pin is parked by the system with
+the process already gone, which is the only arrangement that survives the
+process having been the thing that failed. And `rt returned 9` rather than
+"stopped by the scheduler": the loop chose to stop and said why, which ABI
+14 can now distinguish from having been stopped (§49).
+
+### The pin is not an argument, and cannot be
+
+It was, briefly. `sonar` *declares* `/gpio/11` — exclusively, and as its
+failsafe — and RV-9 claims both at fork, before a line of the module runs. A
+pin taken from argv would mean the declaration named one wire while the work
+happened on another: the claim would protect the wrong wire and the failsafe
+would park the wrong wire.
+
+A declared device is therefore a property of the program and not of the
+invocation. That is not a limitation of this module, it is what makes
+admission mean anything — and it is worth noticing that `range` takes a pin
+freely precisely because it declares nothing and promises nothing.
+
+### What has not been tested
+
+No sonic ranger has answered. What ran above is the loop's *failure* path,
+which is a real test of a real path — the misses, the giving up, the failsafe
+and the status all did what they claim. The reading path is the same code
+§51 measured at ±2 µs against a generator, exercised here by nothing.
+
+The success path needs the part. Its test is a tape measure.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

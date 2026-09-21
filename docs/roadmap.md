@@ -517,6 +517,14 @@ absent rather than as a fault.
 on a pin. `range` speaks the three-pin HC-SR04 protocol, including not
 mistaking its own trigger for an echo, but no ranger has answered it.
 
+**The real-time loop around it is done too.** `rt sonar` declares a 100 ms
+period, claims its pin exclusively, publishes `/pub0/DISTANCE`, stops the
+motor pin below 300 mm and gives up after five silent periods so RV-9 applies
+its failsafe. Worst execute **173 µs** for a sensor whose physical response
+is 30 ms, because the loop triggers and reads the *previous* activation's
+answer rather than waiting (design §53). Its failure path is tested; its
+reading path is waiting on the part.
+
 Neither can prove that the numbers coming back mean what the datasheet says,
 and until one part answers, "RV-9 can read sensors" is a claim about code
 rather than about the world. The sonic ranger is probably the shorter path:
