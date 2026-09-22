@@ -249,10 +249,20 @@ shipped has no Ed25519.
 
 ## Documents
 
-- [**Design**](docs/design.md): the architecture and the story of how each
-  piece was built, measured and corrected. The later sections cover
-  admission, device ownership, failsafes, publication, kill, runaways,
-  derived priority, the target profile and memory.
+Three of them do three different jobs, and it is worth knowing which you
+want:
+
+- [**Tutorial**](docs/tutorial.md): learning it with a board in front of
+  you — build, boot, the shell, paths, pipes, scripts, then writing a module
+  and giving it a real-time contract. *Being written.*
+- [**Reference**](docs/reference.md): looking it up — paths, the file manager
+  disciplines, the module format, all twenty manifest tags, the thirty-four
+  environment calls, faults and errors, limits. *Being written.*
+- [**Design**](docs/design.md): why, and what went wrong on the way. The
+  architecture and the story of how each piece was built, measured and
+  corrected — admission, device ownership, failsafes, publication, kill,
+  runaways, derived priority, the target profile, memory, and the attempts
+  that were abandoned with the reasoning kept.
 - [**Roadmap**](docs/roadmap.md): phases, what is done, and what is next.
 - [**Memory**](docs/memory.md): where every kilobyte goes, measured on the
   board.
