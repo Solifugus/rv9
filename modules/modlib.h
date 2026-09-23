@@ -26,9 +26,22 @@ static inline int m_eq(const char *a, const char *b)
     return *a == *b;
 }
 
-static inline void m_say(const rv9_mod_env_t *env, int path, const char *s)
+/*
+ * Write a string. Returns what write returned, which callers may ignore.
+ *
+ * It returned void until a pipeline showed why that was wrong. When the
+ * reader of a pipe goes away -- because a later stage could not be forked,
+ * or because it finished early on purpose, which is exactly what `first`
+ * does -- every subsequent write fails. A tool that cannot see the failure
+ * keeps producing output nobody will ever read, to the end of its input.
+ *
+ * So anything that writes in a loop should stop when this goes negative.
+ * Not an error to report: the reader leaving is a normal end to a pipeline,
+ * and `mdir | first 3` is a reasonable thing to type.
+ */
+static inline int m_say(const rv9_mod_env_t *env, int path, const char *s)
 {
-    env->write(path, s, m_len(s));
+    return env->write(path, s, m_len(s));
 }
 
 /* Signed decimal. No printf here. */

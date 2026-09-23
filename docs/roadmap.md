@@ -645,13 +645,33 @@ real-looking output. The measurements that held were the dull ones —
 `idf.py size` on two builds with the same sdkconfig, and `free` either side of
 N runs of one command on a freshly booted board.
 
-**A real bug found on the way.** `pipe_write` correctly returns an error when
-no reader is left — but the *writer program* ignores the return and keeps
+**A real bug found on the way — fixed.** `pipe_write` correctly returned an
+error when no reader was left, and the *writer program* ignored it and kept
 going, logging a warning per write. run14's serial log is 5.8 MB against
-run13's 400 KB for that reason alone. It is reachable in ordinary use and not
-only under memory pressure: `procs | first 6` orphans its writer **by
-design**, because `first` stops after six lines. A tool that writes into a
-pipe should stop when the pipe says nobody is listening.
+run13's 400 KB for that reason alone. Reachable in ordinary use, not only
+under memory pressure: `procs | first 6` orphans its writer **by design**,
+because `first` stops after six lines.
+
+Two halves to the fix. PIPEFM now warns **once per pipe** rather than once per
+write — once is information, every time is noise that hides it. And `m_say`
+returns what `write` returned instead of discarding it, so a tool can see the
+reader leave; `mdir` and `procs` now stop when it does.
+
+The test is the row's newline rather than a probe, and that detail matters: a
+zero-length write cannot serve, because PIPEFM returns OK for one without
+looking at whether anybody is there. My first version of the fix used
+`m_say(env, path, "")` and could never have fired.
+
+```
+rv9> procs | first 4          rv9> mdir | first 3
+... 3 rows ...                ... 2 rows ...
+W rv9-pipe: /pipe/s0: full and nobody is reading; the writer should stop
+```
+
+One warning each, and `mdir` stops after two rows instead of grinding through
+all 106. Remaining: the other looping producers (`dir`, `log`, `pubs`, `owns`,
+and the filters) still run to the end of their input. Same one-line change
+each; none of them is as loud as `mdir`.
 
 ### Open regression — four-stage pipelines no longer fit in an SSH session
 

@@ -68,7 +68,11 @@ int rv9_module_entry(const rv9_mod_env_t *env)
                 m_num(env, RV9_STDOUT, p->status);
             }
         }
-        m_say(env, RV9_STDOUT, "\n");
+
+        /* The row's newline is also the test: stop if the reader has gone.
+           `procs | first 6` is a reasonable thing to type, and a zero-length
+           write cannot serve -- pipefm returns OK for one without looking. */
+        if (m_say(env, RV9_STDOUT, "\n") < 0) break;
     }
     return 0;
 }

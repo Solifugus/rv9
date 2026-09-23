@@ -56,7 +56,18 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         m_numpad(env, RV9_STDOUT, st->mods[i].revision, 5);
         m_numpad(env, RV9_STDOUT, (int32_t)st->mods[i].size, 6);
         m_num(env, RV9_STDOUT, (int32_t)st->mods[i].links);
-        m_say(env, RV9_STDOUT, "\n");
+
+        /*
+         * The row's newline is also the test: if the reader has gone, stop.
+         * `mdir | first 3` is a reasonable thing to type, and listing the
+         * other hundred rows into a pipe nobody holds is work done for
+         * nobody -- and, until pipefm latched its warning, a hundred
+         * identical lines in the log.
+         *
+         * A zero-length write cannot be the test: pipefm returns OK for one
+         * without looking at whether anybody is there.
+         */
+        if (m_say(env, RV9_STDOUT, "\n") < 0) break;
     }
     return 0;
 }

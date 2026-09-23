@@ -83,6 +83,21 @@ typedef struct {
        writer *yet* is not a pipe that has finished. */
     bool     seen_writer;
 
+    /*
+     * Whether the "nobody is reading" warning has already been given for
+     * this pipe.
+     *
+     * The write returns an error every time, correctly. What it must not do
+     * is *say so* every time: a writer that ignores the error -- which is
+     * every tool here, since m_say discarded the return -- calls write once
+     * per line of its output, and one `mdir` into an abandoned pipe was a
+     * hundred identical warnings. Soak run14's serial log came to 5.8 MB
+     * against the previous run's 400 KB, almost all of it this.
+     *
+     * Once per pipe is information. Once per write is noise that hides it.
+     */
+    bool     warned_no_reader;
+
     uint8_t *data;
 } pipe_t;
 
@@ -254,8 +269,9 @@ static rv9_io_err_t pipe_close(rv9_path_t *path)
          * would read it as the start of its own.
          */
         if (p->readers == 0 && p->writers == 0) {
-            p->in_use      = false;
-            p->seen_writer = false;
+            p->in_use           = false;
+            p->seen_writer      = false;
+            p->warned_no_reader = false;
             p->head        = p->tail = p->count = 0;
         }
 
@@ -366,8 +382,12 @@ static rv9_io_err_t pipe_write(rv9_path_t *path, const void *buf, size_t len,
 
         if (!readers) {
             if (done) *done = written;
-            ESP_LOGW(TAG, "%s/%s: full and nobody is reading",
-                     path->dev->name, p->name);
+            if (!p->warned_no_reader) {
+                p->warned_no_reader = true;
+                ESP_LOGW(TAG, "%s/%s: full and nobody is reading; "
+                              "the writer should stop",
+                         path->dev->name, p->name);
+            }
             return RV9_IO_ERR_IO;
         }
 
