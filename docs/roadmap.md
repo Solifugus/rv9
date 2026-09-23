@@ -557,6 +557,57 @@ rather than typed.*
 see design §42), the PIPE file manager (phase 11, design §47's
 neighbours), and `/i2c0` under IFM (phase 10, above).*
 
+### Open regression — 12 KB of baseline heap, and a soak that collapsed
+
+Soak run14 (2026-09-22, 9 h) did real work for about 2.4 hours and then spent
+six hours refusing everything. 2,021 cycles, 79 of them useful.
+
+**The board never failed.** Zero panics, zero reboots, zero stack overflows,
+zero wifi disconnects, the serial link up throughout, and the real-time loop
+on time in every round that ran. What stopped was *serving*: sshd needs
+10,496 bytes for a session, `for programs` sat at 7,740, and every connection
+was refused. 17,392 refusals. That is the memory floor doing exactly what it
+was built to do — the machine stayed up and declined work rather than dying
+with it.
+
+**It is not a leak**, though it looks like one at first. The level froze dead
+flat at 7,740 for six hours; a leak does not stop. Healthy runs *oscillate* —
+run12 25,524–46,228, run13 23,036–45,620, both settling around 33 K. run14
+oscillated too, around 20 K, until session churn squeezed it to the floor,
+after which nothing could allocate and so nothing could change.
+
+**The cause is baseline.** Measured at the same instant of boot, 13 seconds
+in, with the same harness:
+
+| at 13 s | heap free | for programs |
+|---|---|---|
+| run13, 2026-09-20 | 53,376 | 32,896 |
+| run14, 2026-09-22 | 41,224 | 20,744 |
+
+**12,152 bytes**, gone before the soak did anything. That is the whole story:
+the working level moved from ~33 K to ~20 K, and 10,496 bytes per session no
+longer fits inside what remains once a few things are running.
+
+Of those 12,152, **2,360 are accounted for** — the shell's scripting (§54),
+measured and recorded. The other **~9,800 are not**, and finding them is the
+job. Not yet measured, in rough order of suspicion:
+
+- The firmware grew between those dates: the IFM file manager, the `i2c`
+  driver, the pulse-timing getstat codes, the exit-path stack check and the
+  widened guard. Firmware in IRAM/DRAM comes straight off the heap.
+- Four new modules in the store, and any descriptor loaded at boot.
+- `mdir` holds 128 module records (5,632 bytes of statics) to list 106.
+
+The measurement to make first is a like-for-like `free` at boot against the
+run13 commit, which turns "the firmware grew" from a suspicion into a number.
+
+Two things to fix in the harness as well. Its first snapshot is taken 13
+seconds in, while boot tests are still finishing — useful by accident here,
+since it made the comparison possible, but not a settled baseline. And a
+cycle that cannot reach the board should back off rather than spin: 1,942
+failed cycles in six hours produced 9,180 refused sessions and a great deal
+of log for one fact.
+
 ### Open regression — four-stage pipelines no longer fit in an SSH session
 
 `mdir | field 1 | sort | count lines` works on the console and is refused
