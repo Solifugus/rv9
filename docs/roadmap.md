@@ -557,6 +557,33 @@ rather than typed.*
 see design §42), the PIPE file manager (phase 11, design §47's
 neighbours), and `/i2c0` under IFM (phase 10, above).*
 
+### Open regression — four-stage pipelines no longer fit in an SSH session
+
+`mdir | field 1 | sort | count lines` works on the console and is refused
+inside a session: **`sort: no memory to start it`**.
+
+The numbers. A session has about 15 KB for programs, against roughly 31 KB at
+boot, because sshd, the session's own shell and its stack are already in it.
+`sort` wants 4,736 bytes of statics and 1,536 of stack; `mdir`'s statics are
+larger again; and all four stages are forked before any of them exits. It was
+always close — soak run12 had 305 of these right and 0 wrong, run13 396 and 6
+— and the shell's 2.4 KB of scripting (design §54) took the margin.
+
+352 bytes were recovered immediately by halving the shell's emergency `procs`
+table, which every shell instance carries. That was not enough and the rest
+should not be found by shaving margins at night: §48 records what happened
+the last time a stack was trimmed to fit.
+
+Worth noting where the real weight is, for whoever picks this up: **`mdir`
+holds 128 module records in statics** to list a store of 106, which is the
+single largest static allocation in any tool and the first stage of the
+pipeline that fails. Reducing it is not free — a tool that silently shows a
+fifth of the store is the bug design §48 opens with — but sizing it from the
+store rather than from a constant would be.
+
+The overnight soak checks three stages so that it reports new drift rather
+than re-reporting this one fault four hundred times.
+
 ### Waiting on a normal network
 
 - ~~**Short SSH sessions lose their output on a poor link**~~ (phase 9).

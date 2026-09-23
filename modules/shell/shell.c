@@ -121,7 +121,16 @@ typedef struct {
      */
     int32_t src_pos;
 
-    rv9_sys_proc_t procs[16];   /* for the fallback `procs`, which cannot fork */
+    /*
+     * For the fallback `procs`, which cannot fork. Eight rather than
+     * sixteen, and the difference is not cosmetic: this table sits in
+     * *every* shell's statics, and an SSH session's shell is a second copy
+     * of them. Halving it gave 352 bytes back per session at the moment a
+     * four-stage pipeline needed them -- see design §55. Eight is more
+     * processes than this machine runs outside a fork bomb, and the listing
+     * already says it is the emergency version.
+     */
+    rv9_sys_proc_t procs[8];
 } shell_statics_t;
 
 /* Why a fork was refused, in words. Wanted by three callers above its
@@ -350,7 +359,7 @@ static void fallback_procs(const rv9_mod_env_t *env)
 {
     shell_statics_t *st = (shell_statics_t *)env->statics;
     int n = env->sysinfo(RV9_SYS_PROCS, st->procs, sizeof(st->procs));
-    if (n > 16) n = 16;
+    if (n > 8) n = 8;
 
     m_say(env, RV9_STDOUT, "(no memory to start procs; the shell's own)\n"
                            "pid   par   name        state\n");
