@@ -44,3 +44,9 @@ $CC $FLAGS -o "$OUT/path_test"   "$HERE/path_test.c"   "$OUT/raster.c" "$OUT/fon
 # The target profile is generated from the sources. A stale one tells a
 # compiler something that is no longer true, which is worse than none.
 python3 "$HERE/../mkprofile.py" --check
+
+# And the reference is checked against the profile, so a call added to
+# module.h reaches the documentation without anybody remembering to tell it.
+# Whether the prose is any good cannot be checked here; whether the name is
+# mentioned at all can be.
+python3 "$HERE/../checkdocs.py"

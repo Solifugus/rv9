@@ -9,11 +9,17 @@ something on it.**
 > different from this document, the board is right and this document is a
 > bug.
 
-This is the *learning* document. When you know what you are doing and want
-to look something up, go to the [reference](reference.md). When you want to
-know why something is built the way it is, go to the
-[design log](design.md) — it is long, it is chronological, and it records
-the mistakes as well as the results.
+This is the *learning* document, and it is deliberately terse: it shows each
+thing once and then points at the [reference](reference.md), which is where
+the complete answer lives. When you want to know *why* something is built the
+way it is, go to the [design log](design.md) — long, chronological, and it
+records the mistakes as well as the results.
+
+It is written for somebody who has to be productive quickly, including the
+author six months from now, so it leans towards the things that are easy to
+forget: which two commands flash which half, which pins the board has already
+spoken for, and what the module rules are that the compiler will not warn you
+about.
 
 ---
 
