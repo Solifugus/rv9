@@ -557,7 +557,49 @@ rather than typed.*
 see design §42), the PIPE file manager (phase 11, design §47's
 neighbours), and `/i2c0` under IFM (phase 10, above).*
 
-### Open — a soak that collapsed, and four wrong diagnoses
+### Soak run15 — clean, and it closes run14's question
+
+2026-09-23, 7 hours, from a board the harness reset itself.
+
+| | |
+|---|---|
+| cycles | 347 |
+| 100 Hz loop rounds on time | **347 of 347** |
+| loop rounds stopped or unanswered | 0 |
+| short sessions ok | **1,735**, none refused |
+| pipelines with the right answer | 345 of 347 |
+| flash round trips | 347 of 347 |
+| clock readings sane | 347 of 347 |
+| shell loops with the right answer | 346 of 347 |
+
+Board side: no panics, no stack overflows, no wifi disconnects, no daemon
+restarts, no abandoned sessions. The one reboot is the harness's own reset at
+the start, and the two deadline misses are the boot suite's deliberate ones,
+6.4 and 11.7 seconds in.
+
+**Memory oscillates, which is the point:**
+
+| | first | last | min | max |
+|---|---|---|---|---|
+| for programs | 30,776 | 27,620 | 19,016 | 37,964 |
+
+That is run12 and run13's healthy pattern and nothing like run14's frozen
+7,740. It confirms from the other direction what the measurements had already
+shown: there was never any missing memory. run14 inherited a degraded board
+from six hours of interactive testing, and the harness could not say so
+because it never reset.
+
+**And the serial log is 401 KB against run14's 5.8 MB** — fourteen times
+smaller, matching run13's 400 KB almost exactly. That is the orphaned-writer
+fix, measured.
+
+Three tool checks out of about a thousand failed, all with the same signature
+as before (a stage that could not be forked during an ordinary memory dip).
+run13 had six of 402; this is comparable.
+
+### History — run14, and five wrong diagnoses
+
+Kept because the method is worth more than the conclusion.
 
 Soak run14 (2026-09-22, 9 h) did real work for about 2.4 hours and then spent
 six refusing everything: 2,021 cycles, 79 useful. sshd needs 10,496 bytes for

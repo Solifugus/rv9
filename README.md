@@ -219,10 +219,12 @@ The boot suites cover the following:
 - **sd**: the microSD card -- mounted, written, read back, and survived a
   reboot.
 
-Beyond the boot suites, four soak runs totalling 26 hours have driven the
-board over SSH with a 100 Hz control loop, pipelines, flash round trips
-and session churn: **1,318 real-time loop rounds, every deadline met**, and
-no panic, reboot, WiFi disconnect or stack overflow in any of them.
+Beyond the boot suites, soak runs have driven the board over SSH with a
+100 Hz control loop, pipelines, flash round trips, shell scripts and session
+churn. The most recent is seven hours from a board the harness resets itself:
+**347 of 347 real-time loop rounds on time**, 1,735 SSH sessions with none
+refused, 347 of 347 flash round trips, and no panic, reboot, WiFi disconnect,
+stack overflow or daemon restart.
 
 On the host, `tools/hosttest/run.sh` checks path parsing, the SVG
 rasteriser and the target profile.
