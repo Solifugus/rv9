@@ -557,56 +557,101 @@ rather than typed.*
 see design §42), the PIPE file manager (phase 11, design §47's
 neighbours), and `/i2c0` under IFM (phase 10, above).*
 
-### Open regression — 12 KB of baseline heap, and a soak that collapsed
+### Open — a soak that collapsed, and four wrong diagnoses
 
 Soak run14 (2026-09-22, 9 h) did real work for about 2.4 hours and then spent
-six hours refusing everything. 2,021 cycles, 79 of them useful.
+six refusing everything: 2,021 cycles, 79 useful. sshd needs 10,496 bytes for
+a session, `for programs` sat at 7,740, and every connection was refused —
+17,392 times.
 
-**The board never failed.** Zero panics, zero reboots, zero stack overflows,
-zero wifi disconnects, the serial link up throughout, and the real-time loop
-on time in every round that ran. What stopped was *serving*: sshd needs
-10,496 bytes for a session, `for programs` sat at 7,740, and every connection
-was refused. 17,392 refusals. That is the memory floor doing exactly what it
-was built to do — the machine stayed up and declined work rather than dying
-with it.
+**The board never failed.** No panics, no reboots, no stack overflows, no
+wifi disconnects, serial up throughout, the 100 Hz loop on time in every
+round that ran. The memory floor did exactly what it exists for: the machine
+stayed up and declined work rather than dying with it.
 
-**It is not a leak**, though it looks like one at first. The level froze dead
-flat at 7,740 for six hours; a leak does not stop. Healthy runs *oscillate* —
-run12 25,524–46,228, run13 23,036–45,620, both settling around 33 K. run14
-oscillated too, around 20 K, until session churn squeezed it to the floor,
-after which nothing could allocate and so nothing could change.
+This entry is kept in the order the mistakes were made, because four
+plausible diagnoses were wrong and each was killed by a measurement rather
+than by argument.
 
-**The cause is baseline.** Measured at the same instant of boot, 13 seconds
-in, with the same harness:
+**Wrong 1 — "a leak."** The level froze dead flat at 7,740 for six hours, and
+a leak does not stop. Healthy runs oscillate: run12 25,524–46,228, run13
+23,036–45,620, both settling near 33 K.
 
-| at 13 s | heap free | for programs |
-|---|---|---|
-| run13, 2026-09-20 | 53,376 | 32,896 |
-| run14, 2026-09-22 | 41,224 | 20,744 |
+**Wrong 2 — "12 KB of baseline heap regressed."** It did not. run13's first
+snapshot came from a freshly-booted board; run14's came from one that had been
+poked at interactively for six hours. **`soak.py` never reset the board** — it
+attached to whatever state it found. A fresh boot today gives `for programs`
+**32,720** against run13's 32,896. Fixed in the harness, which now resets
+first: a soak that cannot say what it started from cannot tell drift from
+whatever happened before it was watching.
 
-**12,152 bytes**, gone before the soak did anything. That is the whole story:
-the working level moved from ~33 K to ~20 K, and 10,496 bytes per session no
-longer fits inside what remains once a few things are running.
+**Wrong 3 — "the firmware grew, and firmware comes off the heap."** Measured
+like-for-like by building `d3a5bbf` in a worktree with the same sdkconfig:
 
-Of those 12,152, **2,360 are accounted for** — the shell's scripting (§54),
-measured and recorded. The other **~9,800 are not**, and finding them is the
-job. Not yet measured, in rough order of suspicion:
+| | run13 (d3a5bbf) | current | delta |
+|---|---|---|---|
+| HP SRAM used | 169,225 | 170,183 | **+958** |
+| .text in SRAM | 104,000 | 104,926 | +926 |
+| .bss | 47,120 | 47,152 | +32 |
 
-- The firmware grew between those dates: the IFM file manager, the `i2c`
-  driver, the pulse-timing getstat codes, the exit-path stack check and the
-  widened guard. Firmware in IRAM/DRAM comes straight off the heap.
-- Four new modules in the store, and any descriptor loaded at boot.
-- `mdir` holds 128 module records (5,632 bytes of statics) to list 106.
+958 bytes, not 12 KB. Attaching `/i2c0` costs a further ~1,450, measured by
+removing the descriptor and rebooting.
 
-The measurement to make first is a like-for-like `free` at boot against the
-run13 commit, which turns "the firmware grew" from a suspicion into a number.
+**Wrong 4 — "the new `capture()`, or `calc`/`compare`, leaks."** Five runs of
+a command with `free` on either side, repeatedly: 14 rounds of pipeline +
+flash round trip + `date` + a script loop are **flat at ~15,000** with the
+loop's answer right every time. What looked like 2,354 bytes per fork was a
+one-time settling cost that the same measurement showed happening whichever
+command ran.
 
-Two things to fix in the harness as well. Its first snapshot is taken 13
-seconds in, while boot tests are still finishing — useful by accident here,
-since it made the comparison possible, but not a settled baseline. And a
-cycle that cannot reach the board should back off rather than spin: 1,942
-failed cycles in six hours produced 9,180 refused sessions and a great deal
-of log for one fact.
+**Wrong 5 — "`rt lateloop ontime` is the accumulator."** It looked that way:
+the 14 clean rounds had omitted it, and adding it appeared to take a board
+from 15,028 to unable to fork `free`. The instrument was at fault. `lateloop`
+runs 100 Hz for a minute and says *nothing* while it does, and the probe
+measuring it had an 8-second idle timeout — so it abandoned the loop mid-run
+and then measured a board with a real-time process still running at priority
+15. With an idle gap longer than the thing being measured:
+
+```
+before               for programs 28,092
+after 1st lateloop   28,112    (on time throughout)
+after 2nd lateloop   28,112    (on time throughout)
+```
+
+Flat. Nothing accumulates.
+
+**What is left, and it is consistent.** Nothing tested accumulates: not the
+tools, not the pipelines, not the flash round trip, not the script loop, not
+the real-time loop. The firmware is 958 bytes larger. A fresh boot matches
+run13. So run14's collapse needs no leak to explain it:
+
+- it began on a board already down to 20,744 rather than ~33 K, because it
+  never reset and had inherited six hours of interactive testing;
+- ordinary work oscillates by several kilobytes either way;
+- from 20 K rather than 33 K, one ordinary dip below 10,496 was enough;
+- and past that point the harness's only instrument was the very thing that
+  no longer fitted, so there was no route back.
+
+The fix is the harness reset, already in. What is **not** established is what
+six hours of interactive use retains — that was never measured over hours
+without the soak, and it may be nothing pathological. The way to find out is
+to run the soak again now that it starts from a known machine.
+
+**Two lessons about instruments**, worth more than the bug hunt. Twice the
+measurement was the defect: a `pgrep` that matched its own command line and
+reported a soak stuck for twelve minutes when it had run seventy seconds, and
+the probe timeout above. Both produced confident wrong conclusions from
+real-looking output. The measurements that held were the dull ones —
+`idf.py size` on two builds with the same sdkconfig, and `free` either side of
+N runs of one command on a freshly booted board.
+
+**A real bug found on the way.** `pipe_write` correctly returns an error when
+no reader is left — but the *writer program* ignores the return and keeps
+going, logging a warning per write. run14's serial log is 5.8 MB against
+run13's 400 KB for that reason alone. It is reachable in ordinary use and not
+only under memory pressure: `procs | first 6` orphans its writer **by
+design**, because `first` stops after six lines. A tool that writes into a
+pipe should stop when the pipe says nobody is listening.
 
 ### Open regression — four-stage pipelines no longer fit in an SSH session
 
