@@ -605,6 +605,9 @@ touched, because they already read stdin and write stdout.
 - [x] exit status visible to a script, or tools cannot make decisions —
       `&&`, `||`, `exit n` and a `status` command, on ABI 14's `wait_why`
       so a fault and a return value are told apart (design §52)
+- [x] variables, `set NAME = command` capture, `if`/`while`, and `compare`
+      and `calc` as modules -- logic in modules, control flow in the shell
+      (design §54). Cost 2,360 bytes, about 7% of program memory
 - [x] `>>`, and an `echo` that echoes — not on the original list, and
       discovered to be load-bearing: without them a file on this board can
       only ever hold what one command wrote, so a script could not be

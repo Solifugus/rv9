@@ -6113,6 +6113,122 @@ and the status all did what they claim. The reading path is the same code
 
 The success path needs the part. Its test is a tape measure.
 
+## 54. Logic in modules, control flow in the shell
+
+The shell could run a script and could branch on success, and that was not
+enough to be useful unattended. A script could not hold a number, could not
+count, and could not act on a reading — only on whether something worked.
+
+The question is where to stop, because the honest risk is building a language
+that competes with R9 for the same job while spending the memory R9's runtime
+will want. The answer that made the decision easy:
+
+**Comparison is a program. Arithmetic is a program. The shell needs control
+flow and nothing else.**
+
+```
+rv9> compare 9 lt 10          # a module; 0 when true
+rv9> calc 7 x 6               # a module; writes 42
+42
+```
+
+So the shell gained exactly four things — variables, substitution, capture,
+and `if`/`while` — and every piece of actual logic stayed a separately
+loadable, separately replaceable module. A shell that grows an operator each
+time somebody needs to compare two things ends up being a language by
+accretion, and nobody ever decided to build it.
+
+Two details fell out of the split that are worth keeping. `compare` spells
+its operators `eq ne lt le gt ge`, because `<` and `>` are redirection to this
+shell and `compare $D < 300` would open a file called 300 — spelling it
+removes the trap rather than documenting it. And `calc` uses `x` for multiply,
+because `*` is not special *today*, and relying on that is how a glob added
+later breaks every script ever written.
+
+### Capture is the part that matters
+
+```
+set D = range 11
+```
+
+Everything else added here is control flow; this is the data. Without it a
+script can only react to *success*, which is why `&&` and `||` alone were not
+enough to write anything that watches something.
+
+It is a pipeline with the shell as the reading end, so it inherited the
+discipline the pipeline had already learned painfully: park our own output
+*before* opening any pipe, because `open` hands out the lowest free slot and
+parking afterwards lands on top of the thing just opened. And **read before
+waiting** — waiting first would block the shell on a child that is itself
+blocked writing into a pipe nobody is draining, which is a deadlock reached
+by being tidy.
+
+Only the first word is kept, which is what makes `range`'s `85 mm  (4992 us)`
+usable as `compare $D lt 300` without teaching the shell to parse.
+
+### Loops cost nothing, because RBF can seek
+
+A `while` remembers the offset of its own line; its `end` seeks back to it.
+The body is never buffered and never counted, so nesting costs eight bytes
+and a loop of any length costs nothing at all.
+
+This is also why `while` requires a script and is refused at a terminal: a
+terminal cannot be read twice, and pretending otherwise would mean buffering
+the body and inventing a limit on it.
+
+One small contract gap surfaced here. **`seek` reports whether it worked, not
+where it landed** — there is no "tell" — so the shell counts the bytes it has
+taken from the source and subtracts what is buffered but unused. That works,
+and it is the second place this week where the I/O contract could say
+something it cannot (the other being the getstat codes missing from the
+target profile, reference §9).
+
+### Four states, not two
+
+An `if` nested inside a branch that was not taken must not evaluate its own
+condition, because evaluating it means **forking a process that was never
+supposed to run**. So a level is not simply running-or-skipping: it is
+running, skipping-but-an-`else`-would-help, a-branch-already-ran, or
+enclosed-by-something-dead. Collapsing the first and last is the bug that
+would have made a skipped branch execute its conditions.
+
+### The escape that was not optional
+
+The first loop written on the board came out as:
+
+```
+while compare  le 5
+```
+
+`echo while compare $N le 5 >> /r0/loop` had been expanded by the shell being
+typed at, before `echo` ever saw it. There is no editor here, so `echo` and
+`>>` are how a script gets written — which means a script author must be able
+to write a literal `$`, and that is not a nicety but every line of every
+loop.
+
+`\$` is a dollar and `\\` is a backslash. Nothing else is escapable, because
+inventing a table of escapes is how a shell starts needing a lexer.
+
+### What it cost, measured
+
+| | before | after |
+|---|---|---|
+| shell code | 6,516 | 8,916 |
+| shell statics | 1,528 | 1,928 |
+| heap for programs, at boot | 33,488 | 31,148 |
+
+**2,360 bytes**, about 7% of what was available. The estimate offered before
+building it was "+2 to 2.5 KB of code, +350 bytes of statics, call it 7%",
+which is close enough to be worth recording as an estimate that held.
+
+### Where it stops, deliberately
+
+No functions, no arrays, no arithmetic syntax, no quoting beyond `\$`, no
+globbing. Each of those is where a shell stops being a tool, and the line is
+drawn here rather than discovered later: a script that needs more than this is
+asking for R9, and saying so is more useful than half an expression
+evaluator.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

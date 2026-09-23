@@ -189,10 +189,133 @@ the boot tests, on purpose.
 
 ## 7. Scripts, and letting a tool decide
 
-> **To write:** writing a script with `echo` and `>>` because there is no
-> editor worth using; `shell /r0/checkout`; `#`; `&&` and `||`; `exit n` and
-> `status`. Land the point that the bit `&&` tests counts a *fault* as
-> failure, not merely a non-zero return.
+A file of commands is a script, and the shell runs it with the same parser it
+gives a terminal:
+
+```
+rv9> shell /r0/checkout
+```
+
+No prompt and no banner when scripted, because nobody is watching. `#` starts
+a comment. `exit n` is how a script says how it went, and the shell returns
+that, so scripts compose with each other exactly as commands do.
+
+### Writing one, on the board
+
+There is no editor worth using here, so `echo` and `>>` are how a file gets
+written:
+
+```
+rv9> echo # count to five > /r0/loop
+rv9> echo set N 1 >> /r0/loop
+rv9> echo while compare \$N le 5 >> /r0/loop
+rv9> echo echo turn \$N >> /r0/loop
+rv9> echo set N = calc \$N + 1 >> /r0/loop
+rv9> echo end >> /r0/loop
+rv9> echo echo finished after \$N turns >> /r0/loop
+```
+
+**Note the `\$`.** Without the backslash the shell you are typing at expands
+`$N` before `echo` ever sees it, and what lands in the file is `compare  le
+5`. That is not a corner case; it is every line of every loop. `\$` is a
+dollar and `\\` is a backslash, and nothing else is escapable.
+
+```
+rv9> shell /r0/loop
+turn 1
+turn 2
+turn 3
+turn 4
+turn 5
+finished after 6 turns
+```
+
+### The whole of the syntax
+
+| | |
+|---|---|
+| `set N value` | Remember it. Eight variables, names under 12 characters, values under 32. |
+| `set N = cmd args` | Run the command and keep its **first word of output**. This is the one that lets a script act on a *value* rather than only on success. |
+| `$N` | Substituted anywhere on a line. An undefined name expands to nothing. |
+| `\$`, `\\` | A literal dollar, a literal backslash. |
+| `vars` | What is currently remembered. |
+| `if cmd` … `else` … `end` | The command's success decides. |
+| `while cmd` … `end` | Repeats. **Scripts only** — a terminal cannot be read twice. |
+| `a && b`, `a \|\| b` | b only if a succeeded, or only if it did not. |
+| `exit n` | Leave, with a status the caller can read. |
+| `status` | What the last command returned, or its fault. |
+
+Four levels of `if`/`while` nesting. The condition is **one command** — no
+pipes, no `&&` — which is enough because the deciding is done by commands.
+
+### The logic is not in the shell
+
+`compare` and `calc` are modules, like everything else:
+
+```
+rv9> compare 9 lt 10          # says nothing: 0 is true
+rv9> compare 9 gt 10
+compare returned 1
+rv9> calc 7 x 6
+42
+```
+
+That split is deliberate. The shell knows *which lines run*; every piece of
+actual logic stays a separately loadable, separately replaceable module. A
+shell that grows an operator every time somebody needs to compare two things
+becomes a language, and there is already a language for that.
+
+Two consequences of it being modules. `compare` spells its operators
+`eq ne lt le gt ge` rather than using `<` and `>`, because those are
+redirection — `compare $D < 300` would open a file called 300. And `calc`
+uses `x` for multiply, because relying on `*` not being special today is how
+a glob added later breaks every script ever written.
+
+`compare` returns **2** for a question that made no sense, which is not the
+same as "no" — and it refuses to order two things that are not numbers rather
+than inventing an answer:
+
+```
+rv9> compare abc lt abd
+compare: lt needs two numbers; got 'abc' and 'abd'
+```
+
+### What `&&` actually tests
+
+Not "did it return zero". The bit counts a **fault** as failure too, so a
+program that was stopped for running off its stack does not count as having
+succeeded, whatever number happened to be in its status register. That
+distinction needs `wait_why`, which is why this could not have been built
+before ABI 14 — see [reference §13](reference.md#13-faults-and-errors-two-number-spaces).
+
+### Nesting, all together
+
+```
+set N 1
+while compare $N le 6
+    set R = calc $N % 2
+    if compare $R eq 0
+        if compare $N gt 4
+            echo $N even and big
+        else
+            echo $N even
+        end
+    else
+        echo $N odd
+    end
+    set N = calc $N + 1
+end
+exit 0
+```
+
+Indentation is ignored; it is for you.
+
+### Where this stops
+
+No functions, no arrays, no arithmetic syntax, no quoting beyond `\$`, no
+globbing. Those are the features that turn a shell into a language, and the
+whole shell costs about 2.4 KB of RAM as it stands. A script that needs more
+than this is asking for R9.
 
 ## 8. Getting it on the network
 

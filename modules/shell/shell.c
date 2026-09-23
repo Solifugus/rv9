@@ -40,6 +40,48 @@
 #define COND_AND    1       /* run this only if the one before succeeded */
 #define COND_OR     2       /* run this only if the one before did not */
 
+/*
+ * Variables, and the deliberate smallness of them.
+ *
+ * Eight, with short names and short values, because the job is holding a
+ * limit, a reading and a count -- not being a language. A script that has
+ * outgrown eight variables has outgrown this shell, and the answer to that
+ * is R9 rather than a ninth slot.
+ */
+#define VAR_MAX     8
+#define VAR_NAME    12
+#define VAR_VALUE   32
+
+/*
+ * Nesting of if and while. Four, for the same reason.
+ *
+ * Each level is either running its branch, skipping it and still willing to
+ * consider an `else`, or inside something that is not running at all -- and
+ * the third is not the same as the second: an `if` nested in a skipped
+ * branch must not evaluate its own condition, because evaluating it means
+ * forking a process that was never supposed to run.
+ */
+#define CTL_MAX     4
+
+#define CTL_IF      0
+#define CTL_WHILE   1
+
+#define CTL_EXEC    0       /* this branch is running */
+#define CTL_SKIP    1       /* skipping, but `else` would turn it on */
+#define CTL_DONE    2       /* a branch already ran; the rest is skipped */
+#define CTL_DEAD    3       /* enclosed by something not running */
+
+typedef struct {
+    uint8_t kind;
+    uint8_t state;
+    int32_t offset;         /* CTL_WHILE: where to seek back to */
+} ctl_t;
+
+typedef struct {
+    char name[VAR_NAME];
+    char value[VAR_VALUE];
+} var_t;
+
 typedef struct {
     char line[LINE_MAX];    /* chopped into tokens */
     char raw[LINE_MAX];     /* kept whole, for multi-word arguments */
@@ -63,8 +105,144 @@ typedef struct {
     char in[LINE_MAX];
     int  in_len;
 
+    var_t var[VAR_MAX];
+    ctl_t ctl[CTL_MAX];
+    int   ctl_depth;
+
+    /*
+     * How far into the script we have read.
+     *
+     * Counted rather than asked for, because `seek` reports whether it
+     * worked and not where it landed -- there is no "tell". A `while` needs
+     * the offset of its own line so `end` can go back to it, and the shell
+     * already knows every byte it has taken from the source, so it keeps
+     * the running total. The line about to be read starts at
+     * src_pos - in_len, since that many bytes have arrived and not been used.
+     */
+    int32_t src_pos;
+
     rv9_sys_proc_t procs[16];   /* for the fallback `procs`, which cannot fork */
 } shell_statics_t;
+
+/* Why a fork was refused, in words. Wanted by three callers above its
+   definition, so declared here rather than moved. */
+static void say_fork_error(const rv9_mod_env_t *env, const char *name, int pid);
+
+/* ---------------------------------------------------------------- */
+/* Variables                                                         */
+/* ---------------------------------------------------------------- */
+
+static var_t *var_find(shell_statics_t *st, const char *name, uint32_t len)
+{
+    for (int i = 0; i < VAR_MAX; i++) {
+        if (st->var[i].name[0] == '\0') continue;
+
+        uint32_t k = 0;
+        while (k < len && st->var[i].name[k] == name[k]) k++;
+        if (k == len && st->var[i].name[k] == '\0') return &st->var[i];
+    }
+    return NULL;
+}
+
+/* Returns false when there is no room, which is a thing the script is told
+   rather than a thing that silently does not happen. */
+static bool var_set(shell_statics_t *st, const char *name, const char *value)
+{
+    uint32_t len = 0;
+    while (name[len] != '\0') len++;
+    if (len == 0 || len >= VAR_NAME) return false;
+
+    var_t *v = var_find(st, name, len);
+    if (v == NULL) {
+        for (int i = 0; i < VAR_MAX; i++) {
+            if (st->var[i].name[0] == '\0') { v = &st->var[i]; break; }
+        }
+        if (v == NULL) return false;
+        for (uint32_t i = 0; i < len; i++) v->name[i] = name[i];
+        v->name[len] = '\0';
+    }
+
+    uint32_t i = 0;
+    while (value[i] != '\0' && i < VAR_VALUE - 1) { v->value[i] = value[i]; i++; }
+    v->value[i] = '\0';
+    return true;
+}
+
+/*
+ * Substitute $NAME everywhere, from `in` into `out`.
+ *
+ * Done as the copy that already existed: the line was being copied whole
+ * into a second buffer anyway so that tokenize() could chop the first, and
+ * expanding during that copy costs nothing extra.
+ *
+ * An undefined name expands to nothing, which is the conventional answer
+ * and the only one that does not require a script to declare everything
+ * before using it. `$` followed by something that is not a name is itself,
+ * so a price in dollars survives.
+ *
+ * Returns false if the result would not fit, because a silently truncated
+ * command line is a command that does something other than what was written.
+ */
+static bool expand(shell_statics_t *st, const char *in, char *out, uint32_t cap)
+{
+    uint32_t o = 0;
+
+    for (uint32_t i = 0; in[i] != '\0'; ) {
+        /*
+         * `\$` is a dollar, and `\\` is a backslash. The whole of the
+         * quoting story, and it exists because without it a script cannot
+         * be written on the machine that runs it:
+         *
+         *     echo while compare \$N le 5 >> /r0/loop
+         *
+         * Without the escape the outer shell expands $N before `echo` ever
+         * sees it, and what lands in the file is `compare  le 5`. That is
+         * not a corner case -- it is every line of every loop.
+         *
+         * Nothing else is escapable. A backslash before anything else is a
+         * backslash, because inventing a table of escapes is how a shell
+         * starts needing a lexer.
+         */
+        if (in[i] == '\\' && (in[i + 1] == '$' || in[i + 1] == '\\')) {
+            if (o + 1 >= cap) return false;
+            out[o++] = in[i + 1];
+            i += 2;
+            continue;
+        }
+
+        if (in[i] != '$') {
+            if (o + 1 >= cap) return false;
+            out[o++] = in[i++];
+            continue;
+        }
+
+        uint32_t k = i + 1, len = 0;
+        while ((in[k + len] >= 'A' && in[k + len] <= 'Z') ||
+               (in[k + len] >= 'a' && in[k + len] <= 'z') ||
+               (in[k + len] >= '0' && in[k + len] <= '9') ||
+                in[k + len] == '_') {
+            len++;
+        }
+
+        if (len == 0) {                       /* a lone $, kept as itself */
+            if (o + 1 >= cap) return false;
+            out[o++] = in[i++];
+            continue;
+        }
+
+        var_t *v = var_find(st, in + k, len);
+        if (v != NULL) {
+            for (uint32_t j = 0; v->value[j] != '\0'; j++) {
+                if (o + 1 >= cap) return false;
+                out[o++] = v->value[j];
+            }
+        }
+        i = k + len;
+    }
+
+    out[o] = '\0';
+    return true;
+}
 
 /*
  * One line, from wherever the commands are coming from.
@@ -123,8 +301,39 @@ static int read_line(const rv9_mod_env_t *env, shell_statics_t *st, int src)
             st->in_len = 0;
             return len;
         }
-        st->in_len += k;
+        st->in_len  += k;
+        st->src_pos += k;
     }
+}
+
+/* Are we actually executing, or inside a branch that was not taken? */
+static bool ctl_running(const shell_statics_t *st)
+{
+    for (int i = 0; i < st->ctl_depth; i++) {
+        if (st->ctl[i].state != CTL_EXEC) return false;
+    }
+    return true;
+}
+
+/* The first word of a line, without disturbing it. */
+static void first_word(const char *s, char *out, uint32_t cap)
+{
+    while (*s == ' ' || *s == '\t') s++;
+    uint32_t i = 0;
+    while (s[i] != '\0' && s[i] != ' ' && s[i] != '\t' && i + 1 < cap) {
+        out[i] = s[i];
+        i++;
+    }
+    out[i] = '\0';
+}
+
+/* Past the first word, to whatever it was given. */
+static const char *after_word(const char *s)
+{
+    while (*s == ' ' || *s == '\t') s++;
+    while (*s != '\0' && *s != ' ' && *s != '\t') s++;
+    while (*s == ' ' || *s == '\t') s++;
+    return s;
 }
 
 /*
@@ -229,6 +438,94 @@ static bool take_ampersand(char *raw)
     while (end > raw && (end[-1] == ' ' || end[-1] == '\t')) end--;
     *end = '\0';
     return true;
+}
+
+/*
+ * Run a command and keep its first line of output.
+ *
+ *     set D = range 11
+ *
+ * This is the call that turns a script from something which can only react
+ * to *success* into something which can act on a *value*. Everything else
+ * added here is control flow; this is the data.
+ *
+ * It is a pipeline with the shell as the reading end, so the discipline is
+ * the one the pipeline already learned the hard way: park our own output
+ * first, before a single pipe is opened, because open() hands out the lowest
+ * free slot and parking afterwards lands on top of the thing just opened.
+ * Both ends are opened before the fork, or the child can write, exit and
+ * take the pipe with it before there is a reader.
+ *
+ * Read *then* wait, in that order. Waiting first would block the shell on a
+ * child that is itself blocked writing into a pipe nobody is draining, which
+ * is a deadlock reached by being tidy.
+ *
+ * Only the first line, and the rest is drained rather than ignored: a
+ * command that says more than expected should not leave a writer stuck on a
+ * full pipe. `range` answers "85 mm  (4992 us)" and the useful part is the
+ * first word, so the value is cut at the first space -- which makes
+ * `compare $D lt 300` work without teaching the shell arithmetic.
+ */
+static int capture(const rv9_mod_env_t *env, const char *name, const char *arg,
+                   char *out, uint32_t cap)
+{
+    shell_statics_t *st = (shell_statics_t *)env->statics;
+    out[0] = '\0';
+
+    int saved_out = env->dup2(RV9_STDOUT, SAVE_OUT);
+    if (saved_out < 0) return -1;
+
+    char pipename[24];
+    m_devpath(pipename, "/pipe/c", st->pipe_seq++);
+
+    int pw = env->open(pipename, RV9_MODE_WRITE | RV9_MODE_CREATE);
+    int pr = (pw >= 0) ? env->open(pipename, RV9_MODE_READ) : -1;
+    if (pw < 0 || pr < 0) {
+        if (pw >= 0) env->close(pw);
+        env->dup2(SAVE_OUT, RV9_STDOUT);
+        env->close(SAVE_OUT);
+        m_say(env, RV9_STDERR, "set: no pipe to be had\n");
+        return -1;
+    }
+
+    env->dup2(pw, RV9_STDOUT);
+    int pid = env->fork_arg(name, 8, arg);
+
+    env->dup2(SAVE_OUT, RV9_STDOUT);
+    env->close(SAVE_OUT);
+    env->close(pw);                 /* or the reader never sees an end */
+
+    if (pid < 0) {
+        env->close(pr);
+        say_fork_error(env, name, pid);
+        return -1;
+    }
+
+    uint32_t o = 0;
+    bool done = false;
+    for (;;) {
+        char buf[32];
+        int k = env->read(pr, buf, sizeof(buf));
+        if (k <= 0) break;
+
+        for (int i = 0; i < k && !done; i++) {
+            char c = buf[i];
+            if (c == '\n' || c == '\r' || c == ' ' || c == '\t') {
+                if (o > 0) done = true;         /* the first word is the value */
+                continue;
+            }
+            if (o + 1 < cap) out[o++] = c;
+        }
+    }
+    out[o] = '\0';
+    env->close(pr);
+
+    int status = 0, fault = RV9_FAULT_NONE;
+    env->wait_why(pid, &status, &fault, RV9_WAIT_FOREVER);
+    st->last_status = status;
+    st->last_fault  = fault;
+
+    return (fault != RV9_FAULT_NONE || status != 0) ? -1 : 0;
 }
 
 /*
@@ -390,6 +687,15 @@ static void help(const rv9_mod_env_t *env)
           "  kill [-f] <pid>   stop one: ask, then insist\n"
           "\n"
           "  shell <file>      run a file of commands; '#' is a comment\n"
+          "  set N value       remember it;  set N = cmd   keeps cmd's answer\n"
+          "  $N                substituted;  \\$ is a literal dollar\n"
+          "  vars              what is remembered\n"
+          "  if <cmd> / else / end          one command decides\n"
+          "  while <cmd> / end              in a script, not at a terminal\n"
+          "\n"
+          "  the logic is in modules, not here: compare, calc\n"
+          "    compare 9 lt 10     eq ne lt le gt ge; 0 when true\n"
+          "    calc 7 x 6          + - x / %, two operands\n"
           "\n"
           "try: mdir, procs, owns, pubs, free, dir, filetest, netstat\n"
           "     dir /r0        echo hello > /term\n"
@@ -709,7 +1015,7 @@ static int run_pipeline(const rv9_mod_env_t *env, char *raw, bool background)
  */
 static int run(const rv9_mod_env_t *env, const char *name, const char *arg,
                const char *target, const char *source, bool append,
-               bool background)
+               bool background, bool quiet)
 {
     /*
      * Park first, open second -- both of them, before either.
@@ -834,7 +1140,7 @@ static int run(const rv9_mod_env_t *env, const char *name, const char *arg,
         } else {
             m_say(env, RV9_STDOUT, ": stopped by the scheduler (see the log)\n");
         }
-    } else if (status != 0) {
+    } else if (status != 0 && !quiet) {
         m_say(env, RV9_STDOUT, name);
         m_say(env, RV9_STDOUT, " returned ");
         m_num(env, RV9_STDOUT, status);
@@ -926,7 +1232,13 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     int leaving = -1;            /* the status `exit` asked for, once it has */
 
     while (leaving < 0) {
-        if (!scripted) m_say(env, RV9_STDOUT, "rv9> ");
+        if (!scripted) {
+            m_say(env, RV9_STDOUT, st->ctl_depth > 0 ? "...> " : "rv9> ");
+        }
+
+        /* Where this line starts, for a `while` that has to come back to
+           it. See src_pos. */
+        int32_t line_at = st->src_pos - st->in_len;
 
         int n = read_line(env, st, src);
         if (n < 0) break;                       /* the source is finished */
@@ -941,9 +1253,170 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         while (*first == ' ' || *first == '\t') first++;
         if (*first == '\0' || *first == '#') continue;
 
-        /* Keep a whole copy: tokenize() chops, and every segment needs its
-           own argument with the spaces still in it. */
-        for (int i = 0; i <= n; i++) st->raw[i] = st->line[i];
+        /*
+         * The control words, before anything else and before expansion --
+         * they are literal, and they are the only thing examined while a
+         * branch is being skipped. Everything else is skipped without being
+         * looked at, which is the point: a command inside a branch that was
+         * not taken must not be forked to find out whether it would have
+         * succeeded.
+         */
+        char word[10];
+        first_word(st->line, word, sizeof(word));
+
+        bool was_running = ctl_running(st);
+
+        if (m_eq(word, "if") || m_eq(word, "while")) {
+            bool is_while = m_eq(word, "while");
+
+            if (st->ctl_depth >= CTL_MAX) {
+                m_say(env, RV9_STDERR, "shell: if/while nested deeper than ");
+                m_num(env, RV9_STDERR, CTL_MAX);
+                m_say(env, RV9_STDERR, "\n");
+                continue;
+            }
+            if (is_while && !scripted) {
+                m_say(env, RV9_STDERR, "shell: while needs a script -- a "
+                                       "terminal cannot be read twice\n");
+                continue;
+            }
+
+            ctl_t *c = &st->ctl[st->ctl_depth++];
+            c->kind   = is_while ? CTL_WHILE : CTL_IF;
+            c->offset = line_at;
+            c->state  = CTL_DEAD;
+
+            if (!was_running) continue;       /* do not even evaluate it */
+
+            if (!expand(st, after_word(st->line), st->raw, LINE_MAX)) {
+                m_say(env, RV9_STDERR, "shell: the line got too long\n");
+                c->state = CTL_SKIP;
+                continue;
+            }
+
+            /*
+             * The condition is one command -- no pipes and no && -- because
+             * `compare` and `calc` are commands, so one is enough, and
+             * because a condition that is itself a pipeline needs the
+             * segment machinery re-entered rather than called.
+             */
+            char *cname = NULL;
+            char *carg  = cut_name(st->raw, &cname);
+            if (cname[0] == '\0') {
+                m_say(env, RV9_STDERR, "shell: if/while needs a command\n");
+                c->state = CTL_SKIP;
+                continue;
+            }
+
+            /* Quiet: a condition that is false is an answer, not a
+               complaint, and `compare returned 1` on every turn of a loop
+               would bury whatever the script is actually saying. */
+            int ok = run(env, cname, (carg[0] != '\0') ? carg : NULL,
+                         NULL, NULL, false, false, true);
+            c->state = (ok == 0) ? CTL_EXEC : CTL_SKIP;
+            continue;
+        }
+
+        if (m_eq(word, "else")) {
+            if (st->ctl_depth == 0 || st->ctl[st->ctl_depth - 1].kind != CTL_IF) {
+                m_say(env, RV9_STDERR, "shell: else with no if\n");
+                continue;
+            }
+            ctl_t *c = &st->ctl[st->ctl_depth - 1];
+            if      (c->state == CTL_EXEC) c->state = CTL_DONE;
+            else if (c->state == CTL_SKIP) c->state = CTL_EXEC;
+            continue;                         /* CTL_DEAD and CTL_DONE stay */
+        }
+
+        if (m_eq(word, "end")) {
+            if (st->ctl_depth == 0) {
+                m_say(env, RV9_STDERR, "shell: end with no if or while\n");
+                continue;
+            }
+            ctl_t *c = &st->ctl[--st->ctl_depth];
+
+            /*
+             * A loop goes back by seeking, which is why `while` needs a
+             * script: the body is never buffered and never counted, so
+             * nesting costs eight bytes and a loop of any length costs
+             * nothing at all. The buffered input is dropped because it is
+             * the text after `end`, which is not where we are going.
+             */
+            if (c->kind == CTL_WHILE && c->state == CTL_EXEC) {
+                if (env->seek(src, c->offset, RV9_SEEK_SET) < 0) {
+                    m_say(env, RV9_STDERR, "shell: cannot loop -- this source "
+                                           "cannot be re-read\n");
+                    continue;
+                }
+                st->in_len  = 0;
+                st->src_pos = c->offset;
+            }
+            continue;
+        }
+
+        /* Not a control word, and we are not executing. */
+        if (!was_running) continue;
+
+        if (m_eq(word, "set")) {
+            if (!expand(st, after_word(st->line), st->raw, LINE_MAX)) {
+                m_say(env, RV9_STDERR, "shell: the line got too long\n");
+                continue;
+            }
+
+            char *name = NULL;
+            char *rest = cut_name(st->raw, &name);
+            if (name[0] == '\0') {
+                m_say(env, RV9_STDERR,
+                      "usage: set NAME value   |   set NAME = command args\n");
+                continue;
+            }
+
+            bool ok;
+            if (rest[0] == '=' && (rest[1] == ' ' || rest[1] == '\t')) {
+                /* Capture: the value is what the command says. */
+                char *cname = NULL;
+                char *carg  = cut_name(rest + 1, &cname);
+                if (cname[0] == '\0') {
+                    m_say(env, RV9_STDERR, "set: = needs a command after it\n");
+                    continue;
+                }
+                char value[VAR_VALUE];
+                capture(env, cname, (carg[0] != '\0') ? carg : NULL,
+                        value, sizeof(value));
+                ok = var_set(st, name, value);
+            } else {
+                ok = var_set(st, name, rest);
+            }
+
+            if (!ok) {
+                m_say(env, RV9_STDERR, "set: no room for ");
+                m_say(env, RV9_STDERR, name);
+                m_say(env, RV9_STDERR, " (");
+                m_num(env, RV9_STDERR, VAR_MAX);
+                m_say(env, RV9_STDERR, " variables, names under ");
+                m_num(env, RV9_STDERR, VAR_NAME);
+                m_say(env, RV9_STDERR, ")\n");
+            }
+            continue;
+        }
+
+        if (m_eq(word, "vars")) {
+            for (int i = 0; i < VAR_MAX; i++) {
+                if (st->var[i].name[0] == '\0') continue;
+                m_pad(env, RV9_STDOUT, st->var[i].name, VAR_NAME);
+                m_say(env, RV9_STDOUT, st->var[i].value);
+                m_say(env, RV9_STDOUT, "\n");
+            }
+            continue;
+        }
+
+        /* Substituted during the copy that had to happen anyway. */
+        if (!expand(st, st->line, st->raw, LINE_MAX)) {
+            m_say(env, RV9_STDERR, "shell: the line got too long\n");
+            continue;
+        }
+        n = 0;
+        while (st->raw[n] != '\0') n++;
 
         char   *seg[COND_MAX];
         uint8_t op[COND_MAX];
@@ -1048,7 +1521,8 @@ int rv9_module_entry(const rv9_mod_env_t *env)
                 m_say(env, st->term, "\n");
             }
 
-            outcome = run(env, argv[0], arg, target, source, append, background);
+            outcome = run(env, argv[0], arg, target, source, append,
+                          background, false);
         }
     }
 

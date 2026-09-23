@@ -86,18 +86,27 @@ match / procs / shell / sshd
 rv9> log | match error | last 20
 ```
 
-Commands decide, and a file of them is a script the shell runs — `#` for a
-comment, `exit n` for the answer it hands back:
+A file of them is a script the shell runs, with variables, `if`, `while` and
+`exit n` — and the logic kept in modules rather than in syntax, so the shell
+stays about 2.4 KB and the toolbox is what grows:
 
 ```
-rv9> range 11 || echo no sensor answered
-rv9> shell /f0/checkout && echo the board is fit to fly
+set N 1
+while compare $N le 5
+    echo turn $N
+    set N = calc $N + 1
+end
 ```
 
-Thirteen tools, whole words rather than abbreviations: `match` `count`
+`set D = range 11` keeps what a command *said*, not merely whether it worked,
+which is what lets a script watch something. No functions, arrays or
+globbing: a script that needs those is asking for R9.
+
+Fifteen tools, whole words rather than abbreviations: `match` `count`
 `first` `last` `field` `sort` `unique` `copy` `move` `info` `dump` `log`
-`date`. Each states its limits and refuses rather than answering with part
-of the truth -- `sort` will not return your lines shortened, and says so.
+`date` `compare` `calc`. Each states its limits and refuses rather than
+answering with part of the truth -- `sort` will not return your lines
+shortened, and says so.
 
 ### Everything is a path
 File managers, drivers and device descriptors are separate, independently
