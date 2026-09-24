@@ -6229,6 +6229,91 @@ drawn here rather than discovered later: a script that needs more than this is
 asking for R9, and saying so is more useful than half an expression
 evaluator.
 
+## 55. Code that does not have to be in RAM
+
+RV-9 copied every module image into executable RAM to run it. The shell cost
+**9,348 bytes of RAM for its code**, and the whole resident set paid the same
+way. Meanwhile the firmware's own 919 KB of `.text` executes from flash
+through the cache and costs nothing at all — the same trick a CoCo 3 got from
+putting BASIC in ROM, and RV-9 was using it for itself and not for modules.
+
+The thing that made this a half-hour change rather than a project is what
+"position-independent by construction" had already bought. The whole of
+linking a module was:
+
+```c
+void *copy = rv9_alloc_exec(e->size);
+esp_partition_read(s_store, e->store_offset, copy, e->size);
+e->entry = (rv9_mod_entry_fn)((uint8_t *)copy + h->entry_offset);
+```
+
+A read and a pointer. **No relocation, no fixups, nothing patched.** So the
+copy was not doing any work — it was only spending RAM. Map the store with
+`esp_partition_mmap(..., ESP_PARTITION_MMAP_INST, ...)` and point `image` at
+the mapped bytes instead:
+
+```
+I rv9-mod: store mapped: modules run in place
+I rv9-mod: linked 'shell' in place at 0x4213e2e4, entry 0x4213e314
+```
+
+| for programs | before | after |
+|---|---|---|
+| at services up | 31,060 | **41,416** |
+| console idle | 39,928 | **50,984** |
+
+**Ten and a half kilobytes**, on a machine where an SSH session needs ten.
+
+### Except for anything with a deadline
+
+A flash erase **disables the cache**. Code in mapped flash cannot execute at
+all for its duration, which is milliseconds. That is not a new discovery here
+— it is why `RV9_RT_CODE` exists, and why the GPIO handler is pinned in IRAM
+so that an edge arriving while the cache is off still reaches the process
+waiting for it.
+
+A control loop that stalled because an unrelated program wrote a file would be
+a deadline miss caused by something admission had already approved, which is
+the one thing admission exists to prevent. So the rule is read off the
+manifest RV-9 already parses:
+
+- `class=realtime` → copied into RAM, pays for determinism
+- everything else → runs in place, pays nothing
+
+The class is read from the mapped bytes before deciding, which is safe because
+reading is not executing.
+
+```
+linked 'control'   in RAM      linked 'shell'     in place
+linked 'fastloop'  in RAM      linked 'desc_i2c0' in place
+linked 'heavyloop' in RAM      linked 'deaf'      in place
+linked 'lateloop'  in RAM
+```
+
+Twenty-four in place, fourteen in RAM, and every one of the fourteen is either
+real-time or was registered as a permanently resident image at boot.
+
+### What it cost in timing: nothing measurable, and one thing not tested
+
+All ten boot suites pass — 294 checks — and the fast loop's worst response is
+2,031 µs against a 2,022–2,026 µs baseline, which is noise.
+
+That number is honest but incomplete, and the gap matters: **the boot suites
+never write flash while a control loop is running.** With the real-time class
+excluded that should not matter by construction, but "should not by
+construction" is exactly the kind of claim this document is supposed to
+distrust. The measurement still owed is a loop with a deadline running while
+another process erases a flash sector, in place and in RAM, compared.
+
+### Why this is the lever rather than an optimisation
+
+On this architecture **code is nearly free and data is expensive** — the
+inverse of the machines this design comes from, where both were scarce. The
+consequence for anything built on RV-9 is that a program's RAM cost is its
+*data*: a text editor costs its document, not its editor. That is the property
+that makes a personal-computing direction affordable on a quarter-megabyte
+machine, and it was being thrown away one `memcpy` at a time.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

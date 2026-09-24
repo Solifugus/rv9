@@ -57,7 +57,7 @@
         "tag": 5,
         "encoding": "u8",
         "repeatable": false,
-        "enforced": false,
+        "enforced": true,
         "values": {
           "unspecified": 0,
           "proaction": 1,

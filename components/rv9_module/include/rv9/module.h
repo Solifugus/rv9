@@ -1323,6 +1323,14 @@ typedef struct rv9_mod_entry {
     uint32_t              link_count;   /* processes holding it */
     void                 *image;        /* RAM image, NULL when not loaded */
     bool                  resident;     /* image is permanent, not from store */
+
+    /*
+     * The image is the store itself, mapped, rather than a copy in RAM --
+     * so there is nothing to free when the last link goes, and the code
+     * fetches through the cache rather than out of SRAM. See the spike note
+     * in module.c.
+     */
+    bool                  in_place;
     rv9_mod_entry_fn      entry;        /* valid while loaded */
 
     /* The deepest any process running it has gone, measured at its end --

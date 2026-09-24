@@ -51,6 +51,27 @@ void rv9_mod_set_log_source(uint32_t (*read)(uint32_t, char *, uint32_t),
 #define RV9_MODULE_PARTITION_LABEL "modules"
 
 static const esp_partition_t *s_store;
+
+/*
+ * The store, mapped into the address space so modules can run where they
+ * lie instead of being copied into RAM.
+ *
+ * SPIKE, 2026-09-23. The whole of "linking" a module is a memcpy and a
+ * fence -- no relocation, no fixups, because position independence was paid
+ * for at build time with -mcmodel=medany. So the copy is not doing anything
+ * except spending RAM: 9,348 bytes of it for the shell's code alone.
+ *
+ * What it buys is determinism. Executing from mapped flash goes through the
+ * 32 KB cache, so a miss or a flash write elsewhere stalls the fetch. That
+ * is exactly the trade RV-9 already makes for its own code with
+ * RV9_RT_CODE, and it lands in the right place: an interactive program can
+ * afford a cache miss and a control loop cannot.
+ *
+ * Mapped once, never unmapped: the mapping is the store, not a module.
+ */
+static const void *s_store_map;
+static esp_partition_mmap_handle_t s_store_mmap;
+static bool s_xip;
 static rv9_mod_entry_t       *s_dir;
 static rv9_lock_t            s_lock;
 
@@ -352,6 +373,20 @@ int rv9_mod_dir_init(void)
     ESP_LOGI(TAG, "module store: %s, %lu KB",
              RV9_MODULE_PARTITION_LABEL, (unsigned long)(s_store->size / 1024));
 
+    /*
+     * Map it for execution in place. Not fatal if it fails -- the copy path
+     * below still works, which is the point of trying this as an addition
+     * rather than a replacement.
+     */
+    if (esp_partition_mmap(s_store, 0, s_store->size,
+                           ESP_PARTITION_MMAP_INST,
+                           &s_store_map, &s_store_mmap) == ESP_OK) {
+        s_xip = true;
+        ESP_LOGI(TAG, "store mapped at %p: modules run in place", s_store_map);
+    } else {
+        ESP_LOGW(TAG, "store not mappable; modules will be copied to RAM");
+    }
+
     int found = 0;
     uint32_t offset = 0;
 
@@ -502,37 +537,80 @@ rv9_mod_err_t rv9_mod_link(const char *name, rv9_mod_entry_t **out_entry)
         return RV9_MOD_OK;
     }
 
-    void *image = rv9_alloc_exec(e->size);
-    if (image == NULL) {
-        rv9_lock_release(s_lock);
-        return RV9_MOD_ERR_NOMEM;
+    void *image = NULL;
+    bool  in_place = false;
+
+    if (s_xip) {
+        /*
+         * Where it already lies. Still verified -- the CRC is checked
+         * against the mapped bytes, so a corrupt store is caught exactly as
+         * before; what is skipped is only the copy.
+         *
+         * But not for a real-time component, and the reason is the whole of
+         * why this is safe to do at all: **a flash erase disables the
+         * cache**, so code in mapped flash cannot execute for the duration.
+         * That is milliseconds, and it is why RV9_RT_CODE exists and why the
+         * GPIO handler is pinned in IRAM -- an edge arriving while the cache
+         * is off still has to reach the process waiting for it.
+         *
+         * A control loop that stalled because something else wrote a file
+         * would be a deadline miss caused by an unrelated program, which is
+         * the one thing admission is supposed to make impossible. So
+         * `class=realtime` pays RAM for its code and keeps determinism;
+         * everything else runs in place and pays nothing.
+         *
+         * The class is read from the mapped bytes before deciding, which is
+         * safe: reading is not executing.
+         */
+        const void *mapped =
+            (const uint8_t *)s_store_map + e->store_offset;
+
+        uint8_t cls = RV9_MCLASS_UNSPECIFIED;
+        bool realtime = rv9_mod_manifest_u8(mapped, RV9_MTAG_CLASS, &cls) &&
+                        cls == RV9_MCLASS_REALTIME;
+
+        if (!realtime && rv9_mod_verify(mapped, e->size) == RV9_MOD_OK) {
+            image    = (void *)mapped;
+            in_place = true;
+        }
     }
 
-    rv9_mod_err_t err = RV9_MOD_OK;
-    if (esp_partition_read(s_store, e->store_offset, image, e->size) != ESP_OK) {
-        err = RV9_MOD_ERR_IO;
-    } else {
-        err = rv9_mod_verify(image, e->size);
-    }
+    if (!in_place) {
+        image = rv9_alloc_exec(e->size);
+        if (image == NULL) {
+            rv9_lock_release(s_lock);
+            return RV9_MOD_ERR_NOMEM;
+        }
 
-    if (err != RV9_MOD_OK) {
-        rv9_free(image);
-        rv9_lock_release(s_lock);
-        return err;
+        rv9_mod_err_t err = RV9_MOD_OK;
+        if (esp_partition_read(s_store, e->store_offset, image,
+                               e->size) != ESP_OK) {
+            err = RV9_MOD_ERR_IO;
+        } else {
+            err = rv9_mod_verify(image, e->size);
+        }
+
+        if (err != RV9_MOD_OK) {
+            rv9_free(image);
+            rv9_lock_release(s_lock);
+            return err;
+        }
     }
 
     const rv9_mod_header_t *h = (const rv9_mod_header_t *)image;
     e->image      = image;
+    e->in_place   = in_place;
     e->entry      = (rv9_mod_entry_fn)((uint8_t *)image + h->entry_offset);
     e->link_count = 1;
 
-    /* We just wrote instructions through the data path. */
-    rv9_isync();
+    /* Only needed when instructions were written through the data path. */
+    if (!in_place) rv9_isync();
 
     rv9_lock_release(s_lock);
 
-    ESP_LOGI(TAG, "linked '%s' at %p, entry %p",
-             e->name, e->image, (void *)e->entry);
+    ESP_LOGI(TAG, "linked '%s' %s at %p, entry %p",
+             e->name, in_place ? "in place" : "in RAM",
+             e->image, (void *)e->entry);
 
     *out_entry = e;
     return RV9_MOD_OK;
@@ -549,11 +627,16 @@ rv9_mod_err_t rv9_mod_unlink(rv9_mod_entry_t *entry)
         return RV9_MOD_ERR_INVAL;
     }
 
-    if (--entry->link_count == 0 && !entry->resident) {
+    if (--entry->link_count == 0 && !entry->resident && !entry->in_place) {
         rv9_free(entry->image);
         entry->image = NULL;
         entry->entry = NULL;
         ESP_LOGI(TAG, "unlinked '%s', image freed", entry->name);
+    } else if (entry->link_count == 0 && entry->in_place) {
+        /* Nothing to free: it was never anywhere but the store. */
+        entry->image    = NULL;
+        entry->entry    = NULL;
+        entry->in_place = false;
     }
 
     rv9_lock_release(s_lock);
