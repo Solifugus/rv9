@@ -27,6 +27,7 @@ _Static_assert((int)RV9_PROC_ERR_KILLED   == RV9_PE_KILLED,   "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_DEADLINE == RV9_PE_DEADLINE, "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_RUNAWAY  == RV9_PE_RUNAWAY,  "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_NOPUB    == RV9_PE_NOPUB,    "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_MEANING  == RV9_PE_MEANING,  "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_UNSCHEDULABLE == RV9_PE_UNSCHEDULABLE,
                "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_BUDGET   == RV9_PE_BUDGET,   "ABI drift");
@@ -122,6 +123,7 @@ const char *rv9_proc_strerror(rv9_proc_err_t err)
     case RV9_PROC_ERR_DEADLINE: return "missed its deadline";
     case RV9_PROC_ERR_RUNAWAY:  return "stopped waiting for its releases";
     case RV9_PROC_ERR_NOPUB:    return "it watches something nothing publishes";
+    case RV9_PROC_ERR_MEANING:  return "it watches a cell that means something else";
     case RV9_PROC_ERR_UNSCHEDULABLE:
         return "no placement meets every real-time deadline";
     case RV9_PROC_ERR_BUDGET:   return "over its memory budget";

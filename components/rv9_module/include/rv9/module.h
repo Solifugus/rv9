@@ -573,6 +573,7 @@ typedef struct {
 /* It watches a publication nothing on this machine provides. An admission
    refusal like NODEV, and next to it for the same reason. */
 #define RV9_PE_NOPUB        15
+#define RV9_PE_MEANING      18   /* it watches a cell that means something else */
 
 /* The CPU is not over-promised, but no placement of the real-time work lets
    every loop meet its deadline with this one added: response-time
@@ -1485,6 +1486,22 @@ void rv9_mod_note_stack(rv9_mod_entry_t *entry, uint32_t given, uint32_t used);
  * program providing.
  */
 bool rv9_mod_any_declares(uint16_t tag, const char *value);
+
+/*
+ * The same scan, but comparing the *path* and handing back the declared
+ * meaning: `publishes="/pub0/DISTANCE:mm"` matches a query for
+ * "/pub0/DISTANCE" and answers "mm".
+ *
+ * This is what lets admission refuse a dimensional mismatch with a message
+ * naming both sides, rather than reporting that nothing publishes the cell
+ * when something does and means something else by it.
+ */
+bool rv9_mod_declared_meaning(uint16_t tag, const char *path,
+                              char *out_unit, uint32_t cap);
+
+/* Longest declared unit. Long enough for "deg/s" and "m/s2"; short enough
+   that carrying one per cell is not a memory decision. */
+#define RV9_MEANING_MAX 12
 
 /*
  * Add a module from an image in memory rather than from the store.

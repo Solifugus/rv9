@@ -1188,6 +1188,25 @@ static bool device_retains(const char *resource)
  * refusal is CONTRACT rather than BUSY: the fix is a build.conf line, not
  * stopping something else.
  */
+/*
+ * Split a declaration into its resource and its declared meaning.
+ *
+ * `publishes="/pub0/DISTANCE:mm"` is a path and a unit. A colon is not legal
+ * in a path, so this is unambiguous -- and a declaration without one is
+ * simply a resource that does not say what it means, which stays legal,
+ * because most things have no unit and a system that demanded one would be
+ * lying about pipes and pins.
+ *
+ * Truncates `res` at the colon and returns the unit, or "".
+ */
+static const char *split_meaning(char *res)
+{
+    for (char *p = res; *p; p++) {
+        if (*p == ':') { *p = '\0'; return p + 1; }
+    }
+    return "";
+}
+
 static int claim_failsafes(rv9_pid_t pid, const void *image,
                            const char *progname)
 {
@@ -1305,6 +1324,11 @@ static int io_claim_for_fork(rv9_pid_t pid, const void *image,
         res[n] = '\0';
         if (n == 0) continue;
 
+        /* What it says it writes, if it says. Peeled off before the rest of
+           this treats `res` as a resource name. */
+        split_meaning(res);
+        if (res[0] == '\0') continue;
+
         char devname[16];
         const char *rest = "";
         split_path(res, devname, sizeof(devname), &rest);
@@ -1343,6 +1367,11 @@ static int io_claim_for_fork(rv9_pid_t pid, const void *image,
         res[n] = '\0';
         if (n == 0) continue;
 
+        char wants[RV9_MEANING_MAX];
+        strncpy(wants, split_meaning(res), sizeof(wants) - 1);
+        wants[sizeof(wants) - 1] = '\0';
+        if (res[0] == '\0') continue;
+
         char devname[16];
         const char *rest = "";
         split_path(res, devname, sizeof(devname), &rest);
@@ -1368,12 +1397,37 @@ static int io_claim_for_fork(rv9_pid_t pid, const void *image,
          * its control loop is ordinary, and one naming a control loop that
          * does not exist on this machine will wait forever.
          */
-        if (dev->fmgr->provided(dev, rest)) continue;
-        if (rv9_mod_any_declares(RV9_MTAG_PUBLISHES, res)) continue;
+        char writes[RV9_MEANING_MAX] = { 0 };
+        bool declared = rv9_mod_declared_meaning(RV9_MTAG_PUBLISHES, res,
+                                                 writes, sizeof(writes));
 
-        ESP_LOGE(TAG, "admit '%s': it watches %s, and nothing on this "
-                      "machine publishes it", progname, res);
-        return RV9_PROC_ERR_NOPUB;
+        if (!declared && !dev->fmgr->provided(dev, rest)) {
+            ESP_LOGE(TAG, "admit '%s': it watches %s, and nothing on this "
+                          "machine publishes it", progname, res);
+            return RV9_PROC_ERR_NOPUB;
+        }
+
+        /*
+         * Both sides said what they meant, and they disagree.
+         *
+         * Exact match, deliberately: this refuses metres against
+         * millimetres rather than converting them. Conversion would mean
+         * agreeing a dimensional algebra between two separately compiled
+         * components, and getting *that* wrong is the failure the check
+         * exists to prevent. Refusing is the conservative answer and it is
+         * the one R9 already takes at compile time.
+         *
+         * Silence on either side is not a mismatch. A cell that says nothing
+         * about its meaning is how everything worked until now, and making
+         * that an error would refuse every program already on the board.
+         */
+        if (wants[0] != '\0' && writes[0] != '\0' &&
+            strcmp(wants, writes) != 0) {
+            ESP_LOGE(TAG, "admit '%s': it watches %s in %s, and the "
+                          "publisher writes %s", progname, res, wants, writes);
+            return RV9_PROC_ERR_MEANING;
+        }
+        continue;
     }
 
     return claim_failsafes(pid, image, progname);

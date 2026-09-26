@@ -213,11 +213,26 @@ void rv9_mod_note_stack(rv9_mod_entry_t *entry, uint32_t given, uint32_t used)
     rv9_lock_release(s_lock);
 }
 
-bool rv9_mod_any_declares(uint16_t tag, const char *value)
+/*
+ * Does any module declare this resource under `tag`, and with what meaning?
+ *
+ * A declaration may carry a unit after a colon --
+ * `publishes="/pub0/DISTANCE:mm"` -- so the comparison is on the path and
+ * the suffix is an answer rather than part of the question. That is what
+ * lets admission say "it watches metres and the publisher writes
+ * millimetres" instead of the useless "nothing publishes it".
+ *
+ * `out_unit` may be NULL. When it is not, it receives the declared unit of
+ * the *first* matching declaration, empty if it declared none.
+ */
+static bool declares_scan(uint16_t tag, const char *path,
+                          char *out_unit, uint32_t cap)
 {
-    if (value == NULL) return false;
-    size_t want = strlen(value);
+    if (path == NULL) return false;
+    size_t want = strlen(path);
     bool found = false;
+
+    if (out_unit && cap > 0) out_unit[0] = '\0';
 
     /* Held throughout, so no image is freed from under the walk. The flash
        reads keep a concurrent link waiting a few milliseconds; admission
@@ -262,10 +277,23 @@ bool rv9_mod_any_declares(uint16_t tag, const char *value)
         const void *v = NULL;
         uint16_t len = 0;
         while ((v = rv9_mod_manifest_find(image, tag, v, &len)) != NULL) {
-            if (len == want && memcmp(v, value, want) == 0) {
-                found = true;
-                break;
+            const char *d = (const char *)v;
+
+            /* The path is everything before a colon, or the whole thing. */
+            uint16_t plen = 0;
+            while (plen < len && d[plen] != ':') plen++;
+
+            if (plen != want || memcmp(d, path, want) != 0) continue;
+
+            if (out_unit != NULL && cap > 0) {
+                uint32_t i = 0;
+                for (uint16_t k = plen + 1; k < len && i + 1 < cap; k++) {
+                    out_unit[i++] = d[k];
+                }
+                out_unit[i] = '\0';
             }
+            found = true;
+            break;
         }
 
         if (buf) rv9_free(buf);
@@ -273,6 +301,17 @@ bool rv9_mod_any_declares(uint16_t tag, const char *value)
 
     rv9_lock_release(s_lock);
     return found;
+}
+
+bool rv9_mod_any_declares(uint16_t tag, const char *value)
+{
+    return declares_scan(tag, value, NULL, 0);
+}
+
+bool rv9_mod_declared_meaning(uint16_t tag, const char *path,
+                              char *out_unit, uint32_t cap)
+{
+    return declares_scan(tag, path, out_unit, cap);
 }
 
 /*

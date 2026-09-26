@@ -243,6 +243,18 @@ typedef enum {
 
     /* Starting it would take a process past its memory budget. */
     RV9_PROC_ERR_BUDGET,
+
+    /*
+     * Admission: it watches a cell that means something else.
+     *
+     * A declaration may say what it means -- `watches="/pub0/SPEED:m/s"` --
+     * and a publisher may say what it writes. When both say and they
+     * disagree, the program is refused before it runs and the message names
+     * both units. This is R9's dimensional guarantee surviving past the
+     * compiler: a metres/millimetres confusion between two separately
+     * compiled components is caught by the machine they meet on.
+     */
+    RV9_PROC_ERR_MEANING,
 } rv9_proc_err_t;
 
 const char *rv9_proc_strerror(rv9_proc_err_t err);

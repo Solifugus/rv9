@@ -240,7 +240,8 @@
     "RUNAWAY": 14,
     "NOPUB": 15,
     "UNSCHEDULABLE": 16,
-    "BUDGET": 17
+    "BUDGET": 17,
+    "MEANING": 18
   },
   "io_errors": {
     "NOTFOUND": 1,

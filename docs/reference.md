@@ -426,6 +426,7 @@ something different about **whose fault it is**:
 | `RV9_PE_NODEV` | 10 | It needs a device this machine does not have. |
 | `RV9_PE_BUSY` | 11 | It needs a device *alone* and somebody already has it. |
 | `RV9_PE_NOPUB` | 15 | It `watches` a cell that nothing on this machine `publishes`. |
+| `RV9_PE_MEANING` | 18 | It watches a cell that means something else. Both sides declared a unit and they disagree — see §17. |
 
 *It ran and then ended* — these arrive as an exit status, and are the ones
 `wait_why` exists to disambiguate from a program's own return:
@@ -517,6 +518,54 @@ profile cannot see them at all. A program cannot set a pin's direction, arm an
 edge or read a pulse width from what the profile currently says. That is a
 hole in the contract rather than in the documentation, and it should be
 closed in `mkprofile.py`.
+
+## 17. Declared meaning
+
+A `publishes` or `watches` declaration may say what the value *means*, as a
+unit after a colon:
+
+```
+publishes="/pub0/DISTANCE:mm"        # sonar says millimetres
+watches="/pub0/DISTANCE:mm"          # admitted
+watches="/pub0/DISTANCE:m"           # refused
+```
+
+```
+E rv9-io: admit 'st-watch-m': it watches /pub0/DISTANCE in m,
+          and the publisher writes mm
+```
+
+Checked at **admission**, before the program runs, against the publisher's
+declaration — which works whether or not the publisher is currently running,
+because the declaration is in its manifest and the manifest is on the machine.
+The refusal is `RV9_PE_MEANING`.
+
+This is R9's dimensional guarantee surviving past the compiler. R9 makes a
+metres/feet confusion a compile error *within* a program; this catches it
+*between* two separately compiled components that meet on one machine.
+
+Three rules, each chosen deliberately:
+
+**Exact match, no conversion.** `m` against `mm` is refused, not scaled.
+Converting would mean agreeing a dimensional algebra between separately
+compiled components, and getting that wrong is the failure the check exists to
+prevent. Refusing is the conservative answer and it is what R9 already does at
+compile time.
+
+**Silence is not a mismatch.** A declaration without a unit is legal, and a
+cell nobody has described stays usable. Most things have no unit, and a system
+that demanded one would be lying about pipes and pins. It also means every
+program already on the board still runs.
+
+**Units are free text, bounded at `RV9_MEANING_MAX` (12).** Long enough for
+`deg/s` and `m/s2`. No table of legal units, because a closed set would have to
+be agreed with R9 and with every future device, and disagreeing about the
+*spelling* of a unit is a smaller problem than disagreeing about the unit.
+
+The meaning is not yet visible at runtime — `RV9_PUB_GS_INFO` reports a cell's
+name, sequence, length, capacity, stamp and writer but not its unit. That is
+the next step, and it is what would let a program inspect meaning dynamically
+rather than only having it enforced on its behalf.
 
 ---
 

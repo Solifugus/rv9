@@ -740,6 +740,12 @@ static void say_fork_error(const rv9_mod_env_t *env, const char *name, int pid)
         } else if (pid == -RV9_PE_NOPUB) {
             m_say(env, RV9_STDOUT, ": it watches a publication nothing on "
                                    "this machine provides (see the log)\n");
+        } else if (pid == -RV9_PE_MEANING) {
+            /* Both sides said what they meant and disagreed. The log names
+               the two units; repeating them here would mean the shell
+               parsing a message the I/O manager already wrote well. */
+            m_say(env, RV9_STDOUT, ": it watches a cell that means something "
+                                   "else (see the log)\n");
         } else if (pid == -RV9_PE_BUDGET) {
             m_say(env, RV9_STDOUT, ": over the memory budget of whatever is "
                                    "starting it (see 'budgets')\n");
@@ -752,8 +758,19 @@ static void say_fork_error(const rv9_mod_env_t *env, const char *name, int pid)
                manifest contradicting itself. */
             m_say(env, RV9_STDOUT, ": its declaration contradicts itself "
                                    "(see the log)\n");
-        } else {
+        } else if (pid == -RV9_PE_NOTFOUND) {
             m_say(env, RV9_STDOUT, ": no such module\n");
+        } else {
+            /*
+             * Say the number rather than guess. "no such module" was the
+             * catch-all, so every refusal this shell had not been taught
+             * about was reported as a missing file -- which is how a
+             * dimensional mismatch came to look like a typo. A code is not
+             * friendly, but it is true and it is greppable.
+             */
+            m_say(env, RV9_STDOUT, ": refused, code ");
+            m_num(env, RV9_STDOUT, -pid);
+            m_say(env, RV9_STDOUT, " (see the log)\n");
         }
 }
 
