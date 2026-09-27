@@ -67,7 +67,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     }
 
     m_say(env, RV9_STDOUT,
-          "name                 seq   bytes   cap  age_ms  by   rdrs  torn  "
+          "name                 means  seq   bytes   cap  age_ms  by   rdrs  torn  "
           "note\n");
 
     uint64_t now = env->time_us();
@@ -80,10 +80,17 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 
         rv9_pub_info_t info;
         int r = env->getstat(p, RV9_PUB_GS_INFO, &info);
+
+        /* What the value means, if its publisher said. A separate getstat
+           because growing the info struct would overrun older callers. */
+        char means[RV9_MEANING_MAX] = { 0 };
+        if (env->getstat(p, RV9_PUB_GS_MEANING, means) < 0) means[0] = '\0';
+
         env->close(p);
         if (r < 0) continue;
 
         m_pad(env, RV9_STDOUT, st->ents[i].name, 21);
+        m_pad(env, RV9_STDOUT, means[0] ? means : "-", 7);
         m_numpad(env, RV9_STDOUT, (int32_t)info.seq, 6);
         m_numpad(env, RV9_STDOUT, (int32_t)info.len, 8);
         m_numpad(env, RV9_STDOUT, (int32_t)info.cap, 5);

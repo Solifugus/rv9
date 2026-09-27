@@ -110,6 +110,18 @@ typedef struct {
     uint32_t last_writer;
     uint32_t fault;                    /* RV9_FAULT_* of last_writer, or 0 */
 
+    /*
+     * What the value means, as the publisher's manifest declared it --
+     * "mm", "m/s", or empty when it said nothing. Recorded at the writer's
+     * admission, which is the only moment the declaration and the cell are
+     * both in hand.
+     *
+     * Kept after the writer is gone, with reserved_by and fault, because
+     * "what did this cell mean" is a question asked *about* a component
+     * that has stopped as often as one that is running.
+     */
+    char     meaning[RV9_MEANING_MAX];
+
     uint32_t seq;                      /* odd while writing; 0 = never */
     uint32_t len;
     uint64_t stamp_us;
@@ -665,6 +677,19 @@ static rv9_io_err_t pfm_getstat(rv9_path_t *path, uint32_t code, void *arg)
     case RV9_PUB_GS_WAIT:
         return pfm_wait(path, (rv9_pub_wait_t *)arg);
 
+    case RV9_PUB_GS_MEANING: {
+        char *out = (char *)arg;
+        rv9_lock_acquire(d->lock);
+        uint32_t i = 0;
+        while (st->cell->meaning[i] != '\0' && i < RV9_MEANING_MAX - 1) {
+            out[i] = st->cell->meaning[i];
+            i++;
+        }
+        out[i] = '\0';
+        rv9_lock_release(d->lock);
+        return RV9_IO_OK;
+    }
+
     case RV9_PUB_GS_INFO: {
         if (st->cell == NULL) return RV9_IO_ERR_MODE;
         pub_cell_t *c = st->cell;
@@ -757,7 +782,7 @@ static rv9_io_err_t pfm_seek(rv9_path_t *path, int64_t offset, int whence)
  * state of a component that is admitted and initialising.
  */
 static rv9_io_err_t pfm_reserve_writer(rv9_dev_t *dev, const char *rest,
-                                       rv9_pid_t pid)
+                                       rv9_pid_t pid, const char *meaning)
 {
     pub_dev_t *d = (pub_dev_t *)dev->fmgr_state;
     if (d == NULL) return RV9_IO_ERR_IO;
@@ -797,6 +822,19 @@ static rv9_io_err_t pfm_reserve_writer(rv9_dev_t *dev, const char *rest,
 
     c->reserved_by = pid;
     c->last_writer = pid;
+
+    /* Only when it said something. A publisher that declares no unit must
+       not erase one an earlier declaration established, because the cell
+       outlives the process and the answer would silently become "unknown". */
+    if (meaning != NULL && meaning[0] != '\0') {
+        uint32_t i = 0;
+        while (meaning[i] != '\0' && i < RV9_MEANING_MAX - 1) {
+            c->meaning[i] = meaning[i];
+            i++;
+        }
+        c->meaning[i] = '\0';
+    }
+
     rv9_lock_release(d->lock);
     return RV9_IO_OK;
 }

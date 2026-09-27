@@ -1325,8 +1325,11 @@ static int io_claim_for_fork(rv9_pid_t pid, const void *image,
         if (n == 0) continue;
 
         /* What it says it writes, if it says. Peeled off before the rest of
-           this treats `res` as a resource name. */
-        split_meaning(res);
+           this treats `res` as a resource name, and carried to the cell so
+           the declaration is answerable at runtime and not only enforced. */
+        char means[RV9_MEANING_MAX];
+        strncpy(means, split_meaning(res), sizeof(means) - 1);
+        means[sizeof(means) - 1] = '\0';
         if (res[0] == '\0') continue;
 
         char devname[16];
@@ -1348,7 +1351,7 @@ static int io_claim_for_fork(rv9_pid_t pid, const void *image,
             return RV9_PROC_ERR_CONTRACT;
         }
 
-        rv9_io_err_t err = dev->fmgr->reserve_writer(dev, rest, pid);
+        rv9_io_err_t err = dev->fmgr->reserve_writer(dev, rest, pid, means);
         if (err == RV9_IO_ERR_BUSY)  return RV9_PROC_ERR_BUSY;
         if (err == RV9_IO_ERR_NOMEM) return RV9_PROC_ERR_NOMEM;
         if (err != RV9_IO_OK) {

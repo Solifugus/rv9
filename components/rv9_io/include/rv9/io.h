@@ -260,7 +260,7 @@ typedef struct rv9_filemgr {
 
     /* Reserve `rest` for writing by `pid`, at fork. BUSY if another has it. */
     rv9_io_err_t (*reserve_writer)(struct rv9_dev *dev, const char *rest,
-                                   rv9_pid_t pid);
+                                   rv9_pid_t pid, const char *meaning);
 
     /* Does `rest` exist -- is it something a reader could open now? */
     bool (*provided)(struct rv9_dev *dev, const char *rest);

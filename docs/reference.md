@@ -562,10 +562,35 @@ program already on the board still runs.
 be agreed with R9 and with every future device, and disagreeing about the
 *spelling* of a unit is a smaller problem than disagreeing about the unit.
 
-The meaning is not yet visible at runtime — `RV9_PUB_GS_INFO` reports a cell's
-name, sequence, length, capacity, stamp and writer but not its unit. That is
-the next step, and it is what would let a program inspect meaning dynamically
-rather than only having it enforced on its behalf.
+### Asking at runtime
+
+Enforcement is not the whole of it: a program can also ask.
+`RV9_PUB_GS_MEANING` fills a `char[RV9_MEANING_MAX]` with the cell's declared
+unit, empty when nothing was declared.
+
+```
+rv9> pubs
+name                 means  seq   bytes   cap  age_ms  by   rdrs  torn  note
+LATELOOP             -      35    4       64   23547   -    0     0     killed
+CONTROL              -      203   12      64   23559   -    0     0     killed
+DISTANCE             mm     6     16      64   10423   -    0     0
+```
+
+Two details worth knowing.
+
+**It is a separate getstat code, not a field appended to `rv9_pub_info_t`, and
+that is an ABI rule rather than a preference.** `getstat` passes a pointer and
+no length, so growing that struct would have the firmware write past the buffer
+of every module compiled against the smaller one. `sysinfo` records may grow
+because callers pass the size they know about (§8); getstat structs may not.
+A new code costs nothing and breaks nothing, which is how IFM added its two.
+
+**The meaning outlives its publisher.** It is recorded at the writer's
+admission and kept after the process is gone, beside `reserved_by` and
+`fault` — because "what did this cell mean" is a question asked *about* a
+component that has stopped at least as often as one that is running. A later
+publisher declaring no unit does not erase it, for the same reason: silently
+becoming "unknown" would be worse than staying true.
 
 ---
 

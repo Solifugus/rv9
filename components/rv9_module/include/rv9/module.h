@@ -822,6 +822,20 @@ _Static_assert(sizeof(rv9_pub_t) == 16, "publication head must be 16 bytes");
 #define RV9_PUB_GS_WAIT  48
 #define RV9_PUB_GS_INFO  49   /* rv9_pub_info_t: what this cell is */
 
+/*
+ * What this cell's value *means*: a unit, as its publisher declared it.
+ * `arg` is a char[RV9_MEANING_MAX]; empty when nothing was declared.
+ *
+ * A separate code rather than a field appended to rv9_pub_info_t, and the
+ * reason is an ABI hazard worth naming: getstat passes a pointer and no
+ * length, so growing that struct would have the firmware write past the
+ * buffer of every module compiled against the smaller one. sysinfo can grow
+ * its records because callers pass the size they know about; getstat cannot.
+ * Adding a code costs nothing and breaks nothing -- which is how IFM added
+ * its two.
+ */
+#define RV9_PUB_GS_MEANING 50
+
 typedef struct __attribute__((packed)) {
     uint32_t seq;          /* in: last seen. out: current */
     uint32_t timeout_ms;
