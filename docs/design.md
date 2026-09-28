@@ -6314,6 +6314,118 @@ consequence for anything built on RV-9 is that a program's RAM cost is its
 that makes a personal-computing direction affordable on a quarter-megabyte
 machine, and it was being thrown away one `memcpy` at a time.
 
+## 56. What the window costs on a bigger screen
+
+The P4 board arriving in October has a 1024x600 panel. The renderer was
+written for 172x320 over SPI. The useful question before the hardware lands
+is not whether it works -- it has no dimension it refuses -- but *what it
+costs*, and that is measurable on the host today: `tools/hosttest/scale.c`
+builds `raster.c` and `drv_svgwin.c` natively with the panel stubbed, and
+takes the size as arguments.
+
+Two costs scale differently, which is why the tool takes width and height
+rather than a panel name:
+
+- the buffers scale with **width**: `band = w * BAND_ROWS * 2`, `cov = w * 2`
+- the parse count scales with **height**: the source is re-read once per band
+  of 8 rows, which is what lets a document exceed the RAM to draw it
+
+So a taller screen costs parsing, not bytes, and a wider one is the reverse.
+
+| size | buffers | bands | pic.svg | dense.svg |
+|---|---|---|---|---|
+| 320x172 | 11,904 | 22 | 0.75 ms | 0.88 ms |
+| 480x320 | 14,784 | 40 | 1.01 ms | |
+| 800x480 | 20,544 | 60 | 1.69 ms | |
+| **1024x600** | **24,576** | **75** | **2.21 ms** | **4.60 ms** |
+| 1280x800 | 29,184 | 100 | 3.87 ms | |
+
+`dense.svg` is a synthetic UI scene -- 22 bars, 8 labels, a 40-point
+polyline, 10 circles, 2,592 bytes -- because the three existing test pictures
+are all under 1.3 KB and a GUI is not.
+
+**Resolution is not the problem.** 1024x600 is 11.2 times the pixels of
+320x172 and costs 2.9 times the time and 2.1 times the memory. Sub-linear,
+because the rasteriser's work follows *covered* pixels rather than total ones
+and a mostly-empty band is nearly free.
+
+### It is also correct at that size, and that was measured
+
+"Fast" is worthless if it is wrong, and there is no reference picture at
+1024x600 to compare against. So `scale compare` renders the same document at
+both sizes and checks that the same *relative* positions agree -- 225 sampled
+points, no hardcoded expectation about any colour.
+
+First answer: 218 to 222 of 225 agreed, with every disagreement looking like
+a blend. Rather than assert that, the check now asks whether the missing
+colour appears within one reference pixel's reach in the larger render -- a
+shape boundary lands on a different fraction of a pixel at a different scale,
+so an anti-aliased edge is *supposed* to differ, and a colour that appears
+nowhere nearby is a real fault.
+
+```
+pic.svg       225 of 225 agree (3 only after looking within a reference pixel), 0 wrong
+chart.svg     225 of 225 agree (4 ...), 0 wrong
+labelled.svg  225 of 225 agree (7 ...), 0 wrong
+dense.svg     225 of 225 agree (3 ...), 0 wrong
+```
+
+### What it costs on the actual board
+
+The host is not the machine. `pic.svg` at 320x172:
+
+| | |
+|---|---|
+| host | 0.85 ms |
+| **the C5** | **82 ms** |
+
+A factor of about 96, measured rather than assumed -- which makes the
+extrapolation defensible: **1024x600 is roughly 220 ms for a simple picture
+and 440 ms for the dense one** on a C5-class core. The P4 at 400 MHz with
+better IPC might be two or three times quicker, against a PSRAM framebuffer
+rather than an SPI panel.
+
+**So full-screen redraw is not an interaction model.** A fifth to half a
+second per frame is fine for a picture that is put up and left, which is what
+`/w0` is for today, and hopeless for a user interface. Damage tracking is not
+an optimisation to add later; it is the thing that makes the GUI direction
+possible at all -- a retained object tree with bounding boxes and per-object
+dirty flags, redrawing only what changed. The console already does this per
+row.
+
+That is the same conclusion the "paths all the way to SVG objects" idea
+arrives at from the other side: if an object is addressable, it is also
+separately *invalidatable*.
+
+### The real ceilings are not pixels
+
+`SRC_MAX` is 4,096 bytes, `MAX_PTS` 256, `MAX_CONTOURS` 16, `MAX_DEPTH` 8. A
+GUI scene will meet those long before it meets a resolution limit, and none of
+them move when the screen grows. The 4 KB document limit is the one to think
+about first -- and the band-at-a-time design already points at the answer,
+since a source re-read per band could be re-read from storage instead of RAM.
+
+### A wart found on the way: the log ring cannot hold what the shell quiets
+
+Getting the board number was harder than it should have been. `pic > /w0`
+produced no output, no error and nothing in the log -- and the reason is that
+`main.c` does `esp_log_level_set("*", ESP_LOG_WARN)` when the shell starts, so
+that the console is not scribbled over while somebody is typing.
+
+ESP-IDF filters on level *before* calling the `vprintf` hook the ring is built
+on. So from the moment the shell starts, **the log ring can only ever hold
+warnings and errors.** Every INFO line -- every "drew N bytes in M ms", every
+"forked pid", every "linked in place" -- is invisible to `log`, which is the
+one tool whose whole purpose is being asked afterwards.
+
+The measurement was taken by promoting that one line to `ESP_LOGW`
+temporarily and reverting it. The proper fix is the pattern this codebase uses
+elsewhere: *what the console prints* and *what the ring keeps* are*two
+questions, not one*, and one knob answers both. Keeping the level at INFO and
+filtering in the console sink would fix it, at the cost of formatting every
+INFO line even when nobody prints it -- which is real CPU on this machine, so
+it is a trade to decide rather than an obvious win.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

@@ -742,6 +742,41 @@ store rather than from a constant would be.
 The overnight soak checks three stages so that it reports new drift rather
 than re-reporting this one fault four hundred times.
 
+### Open — damage tracking, before the GUI direction
+
+Measured on the host before the P4 board arrives (design §56), with
+`tools/hosttest/scale.c`:
+
+- 1024x600 costs **24,576 bytes** of buffers and **2.9x** the time of 320x172,
+  for 11.2x the pixels. Resolution is not the problem.
+- It is also **correct** at that size: 225 of 225 sampled points agree at both
+  sizes on four documents, every apparent disagreement an anti-aliased edge.
+- But `pic.svg` takes **82 ms on the C5** against 0.85 ms on the host, a factor
+  of ~96 — so 1024x600 is roughly **220 ms** for a simple picture and **440 ms**
+  for a dense one.
+
+A fifth to half a second per frame is fine for a picture put up and left, and
+hopeless for a user interface. **Damage tracking is therefore a prerequisite
+of the GUI direction, not an optimisation after it:** a retained object tree
+with bounding boxes and per-object dirty flags, redrawing only what changed.
+The console already does this per row.
+
+The ceilings that do *not* move with screen size are the ones to raise first:
+`SRC_MAX` 4,096, `MAX_PTS` 256, `MAX_CONTOURS` 16, `MAX_DEPTH` 8.
+
+### Open — the log ring cannot hold what the shell quiets
+
+`main.c` raises the log level to WARN when the shell starts, so the console is
+not scribbled over. ESP-IDF filters on level *before* the `vprintf` hook the
+ring uses — so from that moment **`log` can only ever show warnings and
+errors.** Every INFO line is lost to the one tool whose purpose is being asked
+afterwards.
+
+*What the console prints* and *what the ring keeps* are two questions with one
+knob. Keeping the level at INFO and filtering in the console sink fixes it, at
+the cost of formatting every INFO line whether or not anybody prints it — real
+CPU here, so it is a trade to decide rather than an obvious win.
+
 ### Waiting on a normal network
 
 - ~~**Short SSH sessions lose their output on a poor link**~~ (phase 9).
