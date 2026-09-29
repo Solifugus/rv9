@@ -45,12 +45,95 @@ needs the firmware rebuilt.
 
 ## 2. Paths
 
-> **To write:** the grammar — `/dev` and `/dev/unit` and `/dev/a/b/c`; which
-> managers take what; the path table's size (`max_paths`, 12) and that slots
-> 0, 1 and 2 are stdin, stdout and stderr by convention rather than by rule;
-> `dup2` and inheritance across `fork`; that `open` returns the lowest free
-> slot, which is a fact you can get wrong (see design §47's neighbours).
-> Table of every path as shipped.
+A path is an open thing. The name is a string, the same shape everywhere:
+
+```
+/device                 the device itself
+/device/rest            something below it
+```
+
+The split is at the **first slash after the leading one**, and RV-9 does no
+more parsing than that. `/r0/notes` is the device `/r0` and the remainder
+`notes`; `/n0/example.com/80` is the device `/n0` and the remainder
+`example.com/80`. Everything after that first slash is the file manager's
+business and RV-9 has no opinion about it — which is why a file manager can
+be added without teaching the I/O manager a new grammar.
+
+A device name is at most 15 characters; anything longer is cut, and the
+device is then simply not found. The full name is used as the key of an
+ownership record, which holds 47 characters and **truncates rather than
+refuses** — so two names agreeing in their first 47 characters would be
+treated as one resource. Nothing shipped can reach that: `rbf` file names stop
+at 27, pipe names at 15. A long enough host name through `nfm` could, which is
+the one place the limit is worth remembering.
+
+### What each manager makes of the remainder
+
+| manager | remainder | empty remainder means |
+|---|---|---|
+| `scf` | ignored | the device; a character stream has no names below it |
+| `rbf` | a file name | **the directory** — read it for `rv9_dirent_t` records |
+| `pio` | a unit number, decimal | refused: a pin has to be said |
+| `ifm` | an address, decimal **or** `0x`-hex | refused |
+| `nfm` | `host/port`, split at the *last* slash; `listen/PORT` to accept | the device, for `getstat` |
+| `pfm` | a cell name | the directory of cells; **read-only** |
+| `pipe` | a pipe name | refused: an unnamed pipe has no other end to find |
+
+`ifm` taking both `0x68` and `104` is deliberate. A datasheet says the first
+and a shell script usually says the second, and refusing either would be a
+small cruelty repeated every time somebody types an address.
+
+`rbf` and `pfm` answering the empty remainder with a directory is what makes
+`dir /r0` and `pubs` ordinary programs rather than built-ins: they open a
+path and read records.
+
+### The path table
+
+Twelve slots per process (§14), private to it, holding descriptors that may
+be shared. Slots 0, 1 and 2 are standard input, output and error **by
+convention rather than by rule** — nothing in the kernel treats them
+specially except the three facts below.
+
+**`open` returns the lowest free slot.** Not an arbitrary one, and not a
+stable one: it depends on what is already open. Code that opens something and
+*then* parks a path into a fixed slot can park on top of what it just opened.
+The shell lost the read end of a pipe exactly this way, with no symptom but a
+command that quietly produced nothing; it now parks before it opens anything.
+
+**`fork` passes down slots 0, 1 and 2, and only those.** The child shares the
+parent's descriptors rather than reopening them, which is what makes
+redirection work: the shell opens the destination, aims its own stdout at it
+with `dup2`, forks, and the child writes there without knowing. Everything the
+parent had open above slot 2 the child does not have. A program that wants a
+child to inherit a path must put it in one of the three.
+
+**`chain` keeps everything.** The process survives — same pid, same table,
+same open paths — and only the code is replaced.
+
+`dup2(from, to)` makes `to` a second name for one descriptor, closing
+whatever `to` held. Both names share the position, the mode and the device;
+closing one leaves the other working.
+
+### Ownership
+
+Every open takes an **ownership record**, keyed on the full path as written,
+and it is taken before the file manager or the driver hears about the open at
+all. `/gpio/2` and `/gpio/3` are two resources on one device because they are
+two pins.
+
+Sharing is the default: five processes open `/term` and there are five
+records, because the question an operator asks is *who has it* and the
+question a failsafe will ask is *whose device was this when it died* —
+neither survives being reduced to a count. A program that must be alone says
+so, either with `RV9_MODE_EXCL` at open or, better, with `exclusive` in its
+manifest, which claims the device at fork: refused before the program starts
+rather than partway through its first control period.
+
+Refusing early is the whole point of doing it here. By the time a driver has
+configured a PWM channel it has already begun driving the pin that the second
+opener is about to be told it cannot have.
+
+Two devices behave differently on last close, and §4 says which and why.
 
 ## 3. The disciplines
 
