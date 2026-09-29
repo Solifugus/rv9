@@ -120,6 +120,67 @@ def structure(text):
     return problems
 
 
+# Where §14's rows live in the profile. The document names the profile's own
+# key so that a reader and a code generator are talking about one quantity;
+# this says which quantity, and limits(), below, insists they agree.
+LIMITS = {
+    "max_paths":                     ("processes", "max_paths"),
+    "history":                       ("processes", "history"),
+    "budget_default":                ("processes", "budget_default"),
+    "budget_ancestors":              ("processes", "budget_ancestors"),
+    "slots":                         ("realtime", "slots"),
+    "utilisation_ceiling_permille":  ("realtime", "utilisation_ceiling_permille"),
+    "watchdog_us":                   ("realtime", "watchdog_us"),
+    "runaway_ms":                    ("realtime", "runaway_ms"),
+    "rt_reserve":                    ("memory", "rt_reserve"),
+    "max_name":                      ("publication", "max_name"),
+    "head_bytes":                    ("publication", "head_bytes"),
+    "abi":                           ("module", "abi"),
+    "header_bytes":                  ("module", "header_bytes"),
+}
+
+
+def limits(text, p):
+    """
+    Does §14 still say what the firmware does?
+
+    The section promises a table of numbers, and a table of numbers in a
+    document is worthless unless something fails when it goes stale -- the
+    failure mode is not a wrong number, it is a number that was right in
+    March. So each row is read back and compared to the profile, which was
+    itself checked against the sources on the way here.
+
+    A row whose value is a range (`pids`, 1-65535) is skipped: it is prose
+    about two numbers rather than one number, and the two are named in §7
+    where being wrong about them would matter.
+    """
+    problems = []
+
+    body = re.search(r"^## 14\..*?(?=^## )", text, re.S | re.M)
+    if not body:
+        problems.append("no section 14 to check")
+        return problems
+
+    seen = set()
+    for m in re.finditer(r"^\| `([a-z_]+)` \| ([0-9]+) \|", body.group(0), re.M):
+        key, shown = m.group(1), int(m.group(2))
+        where = LIMITS.get(key)
+        if where is None:
+            problems.append("section 14 has a row %r the profile has no "
+                            "place for" % key)
+            continue
+        seen.add(key)
+        real = p[where[0]][where[1]]
+        if shown != real:
+            problems.append("section 14 says %s is %d; the profile says %d"
+                            % (key, shown, real))
+
+    for key in sorted(set(LIMITS) - seen):
+        problems.append("section 14 does not give %s" % key)
+
+    return problems
+
+
 def main():
     for path in (PROFILE, REFERENCE):
         if not os.path.exists(path):
@@ -131,7 +192,7 @@ def main():
     with open(REFERENCE) as f:
         text = f.read()
 
-    bad = structure(text)
+    bad = structure(text) + limits(text, p)
     if bad:
         print("checkdocs: docs/reference.md is malformed:", file=sys.stderr)
         for b in bad:

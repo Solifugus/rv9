@@ -700,10 +700,84 @@ makes scanning a bus reasonable instead of a hundred error messages; and
 
 ## 14. Limits
 
-> **To write:** a table straight from the profile — path slots per process,
-> pid range, process history depth, real-time slots, publication name
-> length, the watchdog and runaway intervals, the utilisation ceiling.
-> Generated rather than typed, so it cannot drift.
+Every number here is checked against `docs/target/rv9-profile.json` on each
+run of the host tests, and the profile is checked against the sources. A
+limit that changes in the firmware and not here fails the build — which is
+the only reason to trust a table of numbers in a document.
+
+The name in the first column is the profile's, so that anything generating
+code from the profile and anything reading this page are talking about the
+same quantity.
+
+### A process
+
+| profile | value | |
+|---|---|---|
+| `max_paths` | 12 | Open paths. `open` fails with `RV9_IO_ERR_NOPATHS`, not by growing the table. |
+| `pids` | 1–65535 | 0 is not a pid; `env->pid` is 0 for a module run outside a process. |
+| `history` | 16 | Exited processes remembered, so `wait_why` still answers after the fact. |
+| `budget_default` | 32768 | Bytes a process and everything it starts may hold when its manifest says nothing. Sized so a shell can hold its largest ordinary command — `ed`, 17 KB with its statics — with room left. Say `mem_max` to want more. |
+| `budget_ancestors` | 8 | How far up a charge is carried, so a fork bomb is paid for by whoever started it. |
+
+### Real time
+
+| profile | value | |
+|---|---|---|
+| `slots` | 4 | Real-time processes at once. The fifth is refused at admission (§11). |
+| `utilisation_ceiling_permille` | 700 | 70 %. A set that needs more is refused even when the analysis says it fits. |
+| `watchdog_us` | 2000 | How often the watchdog looks — and so the resolution a deadline is enforced to while a loop is *still running*. |
+| `runaway_ms` | 250 | One activation longer than this, **and** on the CPU for at least half of it, is a runaway. |
+
+### Memory
+
+| profile | value | |
+|---|---|---|
+| `rt_reserve` | 8192 | Bytes ordinary work may not touch, so that admission and a loop's set-up always can (§12). |
+
+### Publication
+
+| profile | value | |
+|---|---|---|
+| `max_name` | 24 | Characters in a cell's name. |
+| `head_bytes` | 16 | The fixed head on every cell, before its payload (§10). |
+
+### The module format
+
+| profile | value | |
+|---|---|---|
+| `abi` | 14 | What this firmware implements. See §7 on `abi_version`. |
+| `header_bytes` | 40 | The fixed header before the manifest (§5). |
+
+Two of these are worth a sentence, because the number is not the interesting
+part.
+
+**The utilisation ceiling is not the admission test.** Admission is
+response-time analysis (§11): it asks whether each component finishes before
+its deadline given everything that can pre-empt it, which is a stronger and
+sometimes stricter question than whether the total fits in the CPU. The
+ceiling sits on top of that as a flat refusal, because a set that passes
+analysis at 95 % has no room for the thing nobody modelled — a slow flash
+erase, a burst of radio work, the next component somebody adds.
+
+**A runaway is measured, not assumed.** Both halves of that test matter. An
+activation blocked for a second in a slow write is late, and being late is
+what `on_deadline` is for; an activation that has not come back to `rt_wait`
+and is *burning* the CPU is a different thing, and the sample count is how
+the one is told from the other. A loop that waits on a slow device is left
+alone.
+
+**`budget_ancestors` is why a fork bomb stops.** Modules cannot allocate:
+everything a process costs is spent on its behalf by RV-9, and nearly all of
+it at fork — the stack, the statics, the descriptor. So the footprint is known
+before the program runs, and it is charged to the process *and* to its eight
+nearest ancestors. A program that forks children which fork children cannot
+escape its own budget by putting the memory one generation further down; it
+stops at its own ceiling and the programs beside it keep working.
+
+Budgets nest, which is the useful consequence: a shell's budget includes the
+commands it runs, and `sshd`'s includes each session's shell and whatever that
+starts. Eight is where the array stops, and it is an array on purpose —
+accounting for the heap must not live on the heap it accounts for.
 
 ## 15. The boot suites
 
