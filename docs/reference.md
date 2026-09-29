@@ -3,11 +3,13 @@
 **The contract: what RV-9 promises a program, what it requires of one, and
 what it enforces.**
 
-> **Status: being written.** Sections marked *To write* are outlines.
+> **Status: all eighteen sections written**, and kept honest by the build
+> rather than by intention.
 >
 > Where this document lists something the firmware defines — a system call, a
-> manifest tag, a fault code — the list is meant to be **complete**, and
-> `tools/hosttest/run.sh` is meant to fail if it stops being. See §16.
+> manifest tag, a fault code, a getstat code — the list is **complete**, and
+> `tools/hosttest/run.sh` fails if it stops being. §14's numbers are compared
+> against the generated profile on every run. See §16.
 
 Three documents, three jobs. This one is for looking things up. The
 [tutorial](tutorial.md) is for learning by doing. The
@@ -1474,10 +1476,122 @@ accounting for the heap must not live on the heap it accounts for.
 
 ## 15. The boot suites
 
-> **To write:** what each of the ten suites proves, and why a system ships
-> with its tests running at every boot. Reading a suite's output is the
-> fastest way to find out whether a board is healthy, and `sched`'s control
-> run is the one to read first.
+RV-9 runs its tests every time it starts. Not in a CI job somewhere, not on
+request: on the board, on the hardware that will be doing the work, against
+the firmware that is about to run.
+
+The reason is that most of what matters here is only true *on a machine*. A
+seqlock's contended path, a failsafe reaching a real pin, a priority
+derivation under a real scheduler, a card that is actually present — none of
+these can be settled by a host test, and a board whose panel is miswired or
+whose card has gone is a board that should say so before a program trusts it.
+
+**Reading a suite's output is the fastest way to find out whether a board is
+healthy.** `sched`'s control run is the one to read first.
+
+### The ten suites
+
+Captured from a boot on 2026-09-29. The suites are the contract; the counts
+are an observation, and they go up as tests are added.
+
+| suite | checks | what it proves |
+|---|---|---|
+| `kal-test` | 45 | The KAL's own contract, against whichever backend is built in — FreeRTOS today, the native kernel when it lands. Backend-agnostic on purpose: these are how a replacement kernel is known to behave. |
+| `conform` | 27 | The portable part of that contract, exercised against an implementation handed in. Host-specific things — DMA memory, heap statistics, critical sections — are not the kernel's business and are checked separately. |
+| `mod-test` | 17 | The manifest, against images built in memory: a length running past the end of the module, an offset pointing into the header, an entry that does not advance, an unknown mandatory tag. |
+| `io-test` | 44 | Device ownership, against the claim table directly. |
+| `pub-test` | 38 | Publication, through `open`, `read` and `write` rather than against PFM's internals. |
+| `fault-test` | 76 | Stopping processes, by forking real ones — `deaf`, `lateloop` — and judging them from outside. |
+| `proc-test` | 11 | How long a process is remembered, by forking dozens. |
+| `sched-test` | 15 | Derived real-time priority, with the workload that needs it. |
+| `mem-test` | 13 | What still works when memory has run out. Runs last, because it uses the memory up on purpose. |
+| `sd-test` | 7 | The card: a driver, a file manager and a volume a program will trust with a file it cannot get back. |
+
+293 checks, and about thirty seconds from reset to a shell prompt. `sched`,
+`sd` and `fault` account for most of that, and all three are waiting on
+something real rather than computing.
+
+### Why each is shaped the way it is
+
+**`mod-test` builds broken modules rather than reading good ones.** A
+manifest comes off flash, which means it is data written by somebody else and
+must be treated as hostile. None of the malformed cases can be produced by
+`mkmodule.py`, so a test that only reads well-formed modules tests nothing
+that matters — and building the images in memory is also how the refusal path
+gets exercised without needing a way to flash a deliberately broken module.
+
+**`io-test` asks the table, not the devices.** Every interesting case is a
+conflict between two processes, and arranging two real processes to race over
+a real pin at boot is both slow and unreliable. The table is what decides, so
+the table is what is asked — with pids that do not exist and resource names
+no device answers to, which is safe precisely because ownership is settled
+above the drivers and never consults one. The names start with `/test-` so
+that a leaked claim shows up in `owns` as obvious wreckage rather than as a
+plausible device.
+
+**`pub-test` goes through the calls a module makes.** Ownership is a table
+and is tested as one; a publication is a *protocol* between two processes,
+and almost everything that could be wrong with it — a sequence that does not
+advance, a set that arrives half old, a second writer let in, a wait that
+sleeps through a change — is only wrong on the far side of `open`. The one
+thing it cannot arrange is a real race, since it runs on one task before
+there is any contention; the seqlock's contended path is exercised on the
+machine instead, by `control` publishing at 1 kHz while `watch` reads. It
+removes its cells at the end, because cells are *not* freed when a publisher
+exits (§10) and two left behind would sit in `pubs` until the next reboot.
+
+**`fault-test` uses a pin as evidence.** The pin is driven to 1 before each
+loop starts, so that reading 0 afterwards means *RV-9 wrote 0* rather than
+that the pin was 0 anyway. Every claim it makes is about something that is
+not the test: a thread it started, a process that will not listen, a loop
+that is late.
+
+**`proc-test` forks dozens because the bug was a slope.** Every process that
+had ever run once kept its descriptor, so the heap went down a little with
+every command and never came back. Nothing about one fork is wrong; the
+forty-first is where it shows.
+
+**`mem-test` spends the memory on purpose** — threads allocate until refused
+and hold what they got — and then asks the questions that matter on a machine
+that moves. Can a control loop still be admitted? Can a dying one's actuator
+still be parked? Does a program that forks without end take the machine with
+it, or stop at its own budget? It runs last and gives everything back.
+
+**`sd-test` must skip cleanly.** A board with no card is the ordinary case,
+not a failure. And it must not disturb what is on the volume: one file of its
+own, read back, removed. Nothing there formats anything.
+
+### `sched`'s control run
+
+The one to read first, because it is the only suite that proves a *negative*
+by demonstration. `fastloop` does 2 ms of work in every 5 and must answer
+within 3; `heavyloop` spends 15 ms of every 100. The pair is run twice — once
+with the derivation on, once with it switched off:
+
+```
+--- a fast loop beside a heavy one, priority derived ---
+  pass  admitting the fast loop moved the running heavy loop below it
+  (bounds: fast 2500 us, heavy 38000 us)
+  (fast loop's worst response 2038 us, status 0)
+  pass  the fast loop met every deadline beside the heavy one
+
+--- the same, at one priority: the control ---
+  (fast loop's worst response 2259 us, status 0)
+  pass  at one priority it answers later than when placed by deadline
+```
+
+If the fast loop survived the control run too, the other run would prove
+nothing. Those bounds — 2,500 and 38,000 µs — are the response-time analysis
+of §11 arriving at the same numbers from a different direction.
+
+What the control run checks is *measured, not assumed*, and that is a
+correction. The first version expected the fast loop to be **stopped** at one
+priority, which was true on some boots and not others: this host serves a
+release of equal priority promptly most of the time, and the false DEADLINE
+fault it causes is real but rare. What is reliably true is that the fast loop
+answers *later* when it can be made to wait — hundreds of microseconds
+against a dozen — so that is what is checked, with a fault counting as later
+too.
 
 ## 16. Keeping this document honest
 
@@ -1492,9 +1606,9 @@ rv9-profile.json  -- checkdocs.py         -->  docs/reference.md
 ```
 
 So a system call added to `module.h` reaches this document without anybody
-remembering to tell it. At the time of writing it checks 123 names: the 34
-calls, the 20 manifest tags, 5 faults, 17 process errors, 12 I/O errors, 13
-sysinfo codes, 7 file managers and 15 drivers.
+remembering to tell it. It checks **167 names**: the 34 environment entries,
+the 20 manifest tags, 5 faults, 17 process errors, 12 I/O errors, 13 sysinfo
+codes, 42 getstat/setstat codes, 7 file managers and 15 drivers.
 
 *Mentioned* means the name appears in backticks somewhere in the file. That
 is a deliberately low bar — a bare substring search would pass vacuously for
@@ -1502,17 +1616,34 @@ is a deliberately low bar — a bare substring search would pass vacuously for
 test for **absence**, not for quality. A low bar that is actually enforced
 beats a high one that is not.
 
-What it cannot check is whether any of the prose is true. That is what the
-board is for.
+### Three other things the build checks
 
-### Known gap
+**Structure.** Numbered headings must appear once each and count from 1
+without gaps. Added after a duplicated `## 4. Devices as shipped` sat here
+for six days: an edit inserted a written section *before* the skeleton it was
+meant to replace, and the name check could not notice — every name was
+mentioned, twice, which reads as fine.
 
-The getstat/setstat codes in §9 are **not** in `rv9-profile.json`, so they are
-not covered by the chain above, and more importantly a compiler reading the
-profile cannot see them at all. A program cannot set a pin's direction, arm an
-edge or read a pulse width from what the profile currently says. That is a
-hole in the contract rather than in the documentation, and it should be
-closed in `mkprofile.py`.
+**§14's numbers.** Every limit is compared against the generated profile, by
+the profile's own key. A table of numbers in a document is worthless unless
+something fails when it goes stale, and the failure mode is not a wrong
+number but a number that was right in March.
+
+**Signatures count.** A backtick span is mined for the identifiers inside it,
+so writing `int close(int path)` documents `close`. The first honest draft of
+§7 failed on thirteen calls because the check only accepted a span that was
+*nothing but* a name — the tool punishing the better documentation. A span
+that is only an identifier is still taken as written, which is how the
+manifest tag `static` can be named at all.
+
+### What it cannot check
+
+Whether any of the prose is true. That is what the board is for, and most of
+what is quoted in this document — the admission refusals in §11, the
+publication table in §10, the `free` breakdown in §12, the header offsets in
+§5, the path grammar in §2 — was captured from a running machine rather than
+written from the source. A log line composed from a format string reads as
+evidence later, which is worse than no line at all.
 
 ## 17. Declared meaning
 
