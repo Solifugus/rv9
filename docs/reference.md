@@ -276,12 +276,104 @@ promise that expires at the moment it matters.
 
 ## 5. The module format
 
-> **To write:** the 40-byte header, the magic, the ABI check (the loader
-> refuses a module declaring a *higher* ABI than the firmware, never a
-> lower), the CRC, the type field, and `.text.entry`. Then the rules a
-> module must obey and the reason for each: no `.data`/`.bss`, no libc, no
-> 64-bit division, no function-scope `static const` arrays, `-mcmodel=medany`
-> — each of which was discovered by breaking it.
+A module is one blob: a 40-byte header, a name, an optional manifest (§6),
+then code and read-only data as a single unit. Little-endian throughout.
+Everything is an offset from the start of the module, never an address, and
+that is the whole of what makes it relocatable.
+
+### The header
+
+| at | field | |
+|---|---|---|
+| 0 | `magic` | `0x4D395652` — `RV9M` little-endian. |
+| 4 | `header_len` | 40. Checked, so a future longer header is refused rather than misread. |
+| 6 | `abi_version` | What it was built against. |
+| 8 | `module_len` | Total bytes, header included. |
+| 12 | `name_offset` | The NUL-terminated name. |
+| 16 | `entry_offset` | Where execution begins. |
+| 20 | `static_size` | Per-instance storage the loader must provide. |
+| 24 | `stack_size` | A hint; 0 means the loader decides. |
+| 28 | `type` | `PROGRAM`, `LIBRARY`, `FILEMGR`, `DRIVER`, `DESCRIPTOR`, `DATA` or `SYSTEM` (1–7). |
+| 29 | `attr` | Reserved. |
+| 30 | `revision` | **Higher wins when names collide.** |
+| 31 | — | Reserved. |
+| 32 | `crc32` | Over the whole image with this field taken as zero. |
+| 36 | `manifest_offset` | 0 when there is no manifest. |
+
+**The ABI check runs one way.** A module declaring an ABI *higher* than the
+firmware is refused with `RV9_MOD_ERR_BADABI`; a lower one runs. Fields are
+only ever appended to the environment, so old modules keep working forever
+and that is a promise rather than an accident — `print` is still in the ABI
+for exactly this reason (§7).
+
+That check is correct and is currently unexercised, which is worth writing
+down rather than leaving to be discovered. `tools/mkmodule.py` stamps every
+module it builds with `abi_version` 1, whatever the module actually uses, so
+no module this toolchain produces can trip the check. A module calling
+`wait_why` — ABI 14 — would be admitted by ABI 13 firmware and would call
+through a null pointer. Nothing shipped is exposed to this, because modules
+and firmware are built and flashed together, but the field does not yet mean
+what the header says it means. The profile records a `since_abi` for every
+environment entry, so the number is computable; deciding *how* to compute it
+is the open part, since a module reaches `write` through `m_say` as often as
+directly.
+
+**The CRC is the zlib polynomial**, so `tools/mkmodule.py` computes it with
+Python's `zlib` and the loader agrees. It is checked with the field taken as
+zero, which the loader does without copying the image: three spans, around
+the hole.
+
+**Revision is how a module is replaced.** `rv9_mod_find` takes the highest
+revision of a name, which is OS-9's behaviour and means upgrading something
+is loading a newer copy — not deleting the old one first, from a machine that
+may be using it.
+
+### Running in place
+
+The store is a flash partition, mapped for execution once at boot. A module
+forked out of it **runs from mapped flash and is never copied into RAM** —
+the shell's image alone is nine and a half KB that no longer has to be
+resident.
+
+**Except a real-time one**, and the exception is the whole reason the rest is
+safe: *a flash erase disables the cache*. Code in mapped flash cannot execute
+while another program is writing a file, for milliseconds at a time. An
+interactive program can afford that and a control loop cannot, so a module
+whose manifest says `class=REALTIME` is copied into RAM and runs from there.
+It is the same trade `RV9_RT_CODE` makes for RV-9's own code, landing in the
+same place.
+
+A module already resident is shared rather than loaded twice. That is what
+reentrancy is for, and it is why the rules below exist.
+
+### The rules, and what broke to find each one
+
+A module has no `.data` and no `.bss`. The linker script asserts both are
+empty, so a module with writable statics **fails to link** rather than
+appearing to work and then corrupting itself the moment two processes share
+it. Private storage comes from `env->statics`, which is per-process by
+construction.
+
+| rule | why |
+|---|---|
+| `-mcmodel=medany` | Every reference becomes PC-relative, so the blob works wherever the loader puts it. |
+| no `.data`, no `.bss` | One copy of the code serves every process. Writable statics would be shared statics. |
+| `-nostdlib`, `-ffreestanding` | There is no libc to link against. `modlib.h` is header-only for the same reason. |
+| no 64-bit division | `uint64_t / n` calls `__udivdi3` in libgcc, which is not there. Narrow to 32 bits first — see `m_age_ms`. |
+| `-fno-jump-tables`, `-fno-tree-switch-conversion` | A jump table holds absolute addresses. A dense `switch` gets silently rewritten into one. |
+| no `static const` array of pointers | The array holds absolute addresses. A `switch` returning string literals compiles to exactly this. |
+| no local array initialised from a literal | `char pre[] = "/gpio/";` becomes a `memcpy` from rodata, and there is no `memcpy`. A pointer to the literal is fine. |
+
+The last three are the ones that bite, because none of them looks like a
+pointer table in the source. So position independence is **proved rather than
+assumed**: `build_modules.sh` links every module twice, at two different base
+addresses, and compares the bytes. PC-relative code is byte-identical
+wherever it lands; anything holding an absolute address differs, and the
+build stops with the usual causes named.
+
+That check is why `have` walks a string of device names with `m_word` instead
+of indexing an array of `const char *`. The array version was correct C, read
+better, and was not position independent.
 
 ## 6. The manifest
 
@@ -327,8 +419,42 @@ starting and quietly not getting it.
 So `mandatory="heap_max"` in a `build.conf` means *refuse me rather than run
 me without this*, and a control loop should say it.
 
-> **To write:** the TLV layout itself, the mandatory bit's position, and
-> `highest_known_tag`.
+### The layout
+
+Entries back to back, each 4-byte aligned, ending at a tag of
+`RV9_MTAG_END` or at the end of the module:
+
+```
+    uint16_t tag        top bit is RV9_MTAG_MANDATORY (0x8000)
+    uint16_t len        bytes of value; padding not counted
+    uint8_t  value[len]
+    padding to the next multiple of four
+```
+
+The tag numbers are the agreement between a compiler and RV-9, fixed once
+published: `RV9_MTAG_DESC` is 1, `RV9_MTAG_STACK` 2, and so on through
+`RV9_MTAG_PLACEMENT` at 0x14, which is `RV9_MTAG_MAX` — the highest this
+build understands. Above it is unknown, and unknown plus mandatory is a
+refusal.
+
+**The mandatory bit belongs to the tag, not to a flags field**, and that is
+a deliberate choice rather than a saving. It makes the advisory and mandatory
+forms of a field two different tags, so a producer decides *per value*
+whether being understood matters. The same compiler can emit `heap_max`
+advisorily for a shell command and mandatorily for a control loop, without
+the format needing to know which is which.
+
+Most of these tags have no consumer in RV-9 yet, and that is the point. A
+program may describe itself completely to a system that acts on part of it,
+and the rest becomes enforcement later without anything being rebuilt.
+
+Multi-value tags — `device`, `exclusive`, `failsafe`, `capability`,
+`publishes`, `watches` — simply repeat. `failsafe` carries a `uint32` value
+followed by the path it applies to.
+
+In `build.conf`, a key is made mandatory by suffixing it with `!`, or by
+naming it in `mandatory=`. `RV9_MTAG_STATIC` is spelled `static` there, which
+is the tag §7's `statics` is sized by.
 
 ## 7. The environment
 
