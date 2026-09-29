@@ -837,11 +837,121 @@ that moment.
 
 ## 12. Memory
 
-> **To write:** the classes and their floors — ordinary work refused 8 KB
-> before a real-time loop would be, the failsafe path lower still; per-process
-> budgets and how a charge is attributed to ancestors; what `free` reports
-> and what each line means. Cross-reference [memory.md](memory.md), which is
-> the measured account.
+RV-9 has one heap, shared with ESP-IDF. What makes it usable on a machine
+that moves is not how it is allocated but **who is refused first**.
+
+[memory.md](memory.md) is the measured account — where the RAM actually goes
+on this board. This section is the rules.
+
+### The floor exists for what RV-9 cannot ask
+
+WiFi, the PHY, the SPI driver and ESP-IDF's own internals allocate straight
+from the heap, and when they cannot get what they need they do not return
+NULL. They abort:
+
+```
+ESP_ERROR_CHECK failed: ESP_ERR_NO_MEM at phy_track_pll_init
+abort() was called
+```
+
+That is a reboot, inside a layer RV-9 does not own, caused by an unrelated
+component's allocation failing. It happened here running the window, an SSH
+session and a control loop together. On a vehicle it is the whole system
+stopping because a display wanted a buffer.
+
+Everything RV-9 allocates goes through the KAL and *can* be told no. So the
+last few kilobytes are never offered to it: a request that would go below the
+floor returns NULL, the process manager says "no memory to start it", and the
+machine stays up.
+
+**The floor does not make more memory exist.** It decides which of two
+failures happens — a refusal RV-9 can report, or an abort it cannot catch —
+and only one of those leaves a system running. It is a convention rather than
+a wall: nothing stops ESP-IDF spending the reserve, the point is that RV-9
+does not spend it first.
+
+`RV9_HEAP_FLOOR` is 12,288 bytes by default. Zero disables it, which is how
+RV-9 behaved before phase 4.
+
+### Three classes, three floors
+
+One floor decided whether RV-9 or ESP-IDF failed. It did not decide *which
+part of RV-9*: a shell session starting background jobs could take the last
+kilobyte, and then a control loop could not be admitted, a failsafe could not
+open the device it had to park — that open allocates — and `kill` could not
+be started to stop whatever was responsible.
+
+So every allocation is made in a class, taken from whoever is asking:
+
+| class | who | stops at |
+|---|---|---|
+| `RV9_MEM_GENERAL` | Every process, by default. | the floor **plus** the 8 KB real-time reserve — 20,480 bytes |
+| `RV9_MEM_REALTIME` | Admitting a real-time loop, and that loop's own set-up. | the floor — 12,288 bytes |
+| `RV9_MEM_SYSTEM` | Failsafes, `init` restarting a service, RV-9's own host tasks. | *half* the floor — 6,144 bytes |
+
+The ordering is the design: **ordinary work is refused 8 KB before a
+real-time loop would be, and the failsafe path lower still.** The other half
+of the floor stays ESP-IDF's, because ESP-IDF aborts rather than fails.
+
+The reserve is sized for what admitting a loop actually costs, not for
+comfort: a control loop's stack and statics are about two kilobytes, its
+set-up opens a few hundred bytes more, and a failsafe's detached open is less
+than that.
+
+The check is asked against the *default* heap for every allocation, including
+the DMA and executable ones — on this board they are the same physical memory
+seen through different capability masks, and treating them as separate pools
+would let the reserve be spent three times over. It is also deliberately
+pessimistic rather than exact, since the allocator has a header and rounds
+up: a floor accurate to the byte is a floor that has been crossed.
+
+### Per-process budgets
+
+A separate mechanism, and a separate refusal. A process is charged for its
+stack, its statics and its descriptor — nearly all of it at fork, because
+modules cannot allocate — and so are its eight nearest ancestors. Exceeding
+`mem_max`, or the 32,768-byte default, gives `RV9_PE_BUDGET`. §14 has the
+numbers and why the accounting is an array.
+
+The two are independent. The floor answers *is there memory on this
+machine*; the budget answers *may this family of processes have it*. A fork
+can fail either test, and `RV9_PE_NOMEM` and `RV9_PE_BUDGET` are different
+answers on purpose.
+
+### Reading `free`
+
+```
+heap free      59340
+  largest block 34816
+available      47052
+  for programs 38860
+  rt reserve   8192
+reserved       12288
+refused        3
+low water      12400  (since boot; the tests spend to the floor)
+  since serving 51636
+executable     59340
+modules        109
+processes      20
+```
+
+| line | |
+|---|---|
+| `heap free` | The total. **Not** what decides whether an allocation succeeds. |
+| `largest block` | What does. A heap free in small pieces refuses a large request while reporting plenty of room. |
+| `available` | Free, less the floor. |
+| `for programs` | What something you type may still take — `available` less the real-time reserve. |
+| `rt reserve` | Held back so a loop can be admitted and a failsafe applied after ordinary work has run out. |
+| `reserved` | The floor itself. |
+| `refused` | Allocations turned away since boot. **Not an error count** — it is the floor doing its job. |
+| `low water` | The lowest free has ever been. The boot suites spend deliberately to the floor, so this is usually the tests. |
+| `since serving` | The same, from the point the machine finished starting — the number that describes ordinary running. |
+| `executable` | Free memory that can hold code. Real-time modules are copied here (§5). |
+
+`low water` and `since serving` are two lines because they answer different
+questions and the first one is misleading alone. 12,400 against a 12,288
+floor looks alarming until you know the suites drove it there on purpose;
+51,636 is what the machine has actually been living on.
 
 ## 13. Faults and errors: two number spaces
 
