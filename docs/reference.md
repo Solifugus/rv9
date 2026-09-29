@@ -682,11 +682,139 @@ and why `RV9_SYS_MEM_MIN` exists to mark the part that may never move.
 
 ## 10. Publication
 
-> **To write:** one writer, declared; `rv9_pub_t`'s 16-byte head; the
-> sequence number and what `torn` means; `stamp_us` being when the reading
-> was *taken*; the blocking `getstat` wait so a watcher re-evaluates on
-> change rather than polling; that closing a cell does not erase it, because
-> the last thing a stopped loop measured is what an investigation wants.
+A cell is where a real-time component leaves **what it observed**, so that
+something slower — a supervisor, a log, an operator — can read it without
+touching the loop that produced it.
+
+It is not a lock, a queue, a mailbox or an RPC. R9 §19's *inputs* are this
+same object with the ownership reversed: the supervisor publishes, the
+control loop observes, and nothing is added for it.
+
+`/pub0` as shipped: **sixteen cells of 64 bytes**, preallocated at boot and
+never freed. Sixteen is more independent components than this machine will
+run, and 64 bytes holds sixteen 32-bit values published together. Names are
+at most 24 characters.
+
+### One writer, declared
+
+A component names the cell it owns in its manifest — `publishes` — not the
+device:
+
+```
+publishes="/pub0/CONTROL"
+```
+
+`/pub0` carries every other component's cells too, and claiming the whole
+device would stop them. The cell is created if need be and **reserved at
+fork**: a second copy of the program is refused before it starts, and another
+process opening that cell to write is refused at open.
+
+A watcher declares `watches` and is admitted when *some module on the machine
+declares it publishes that cell* — whether or not the publisher is running.
+Start order is not a contract; a cell nothing will ever publish is
+`RV9_PE_NOPUB`, refused at fork rather than waited for forever.
+
+§17 covers the other half: both sides may declare what the cell *means*, and
+a disagreement about units is refused at admission with `RV9_PE_MEANING`.
+
+### The head
+
+Every read fills a `rv9_pub_t` and then as much of the value as the buffer
+holds; every write supplies both together. The same object goes both ways on
+purpose — what comes out of one cell can go into another unchanged, which is
+what a bridge or a recorder needs.
+
+| field | |
+|---|---|
+| `seq` | 0 means **never published**; it counts up by one per publication. R9 §18's validity indication and its sequence number in one value. Ignored on write: the cell owns it. |
+| `len` | Bytes of value following the head. Always the **true published length**, even when the caller's buffer was too small. |
+| `stamp_us` | When the **observation was taken**, not when it was published. Passing 0 means "now". |
+
+`stamp_us` being the observation and not the publication is the field people
+get wrong. They differ by however long the computing took, and a reactive
+layer deciding how stale a reading is needs the first one.
+
+A reader that asked for too little gets a truncated value and a `len` that
+tells it so. What is never truncated is **coherence**: the bytes handed back
+are all from one publication.
+
+### Reading without stopping the writer
+
+A cell is a seqlock. Publishing costs two stores and a memcpy with no bound
+it can miss; all the cost of contention lands on the observer, which is the
+process that can afford it. That is what makes the real-time half of R9 §18's
+contract keepable.
+
+An observer that is preempted mid-snapshot needs exactly one retry on one
+core — the writer runs to completion before the reader is scheduled again.
+RV-9 allows eight, and then **gives up and counts it**:
+
+```
+rv9> pubs
+name                 means  seq   bytes   cap  age_ms  by   rdrs  torn  note
+```
+
+`torn` is snapshots abandoned since boot. It is a real condition worth
+seeing — publications arriving faster than a snapshot can be taken — and not
+a reason to spin inside the I/O manager with a deadline running.
+
+### Waiting instead of polling
+
+R9 §21 asks that a watcher re-evaluate when a value changes. `getstat` with
+`RV9_PUB_GS_WAIT` blocks: pass the sequence last seen, and it returns when
+the cell has moved past it, with the current sequence in its place.
+
+- A publication arriving while nobody is waiting is **not lost** — the
+  comparison is against the sequence, not against an edge.
+- Several arriving together **coalesce into one wakeup**, which is what §21
+  wants.
+- `timeout_ms` bounds it. `RV9_WAIT_FOREVER` blocks; **zero makes it a poll**,
+  which is what a real-time observer should use.
+
+Four observers may be blocked at once across the whole device. The semaphores
+are made at mount and handed out, because a semaphore taken from the heap
+while a control loop is running is the kind of thing this file manager exists
+to avoid. *Reading* a cell needs no slot — only blocking on one does.
+
+`RV9_PUB_GS_INFO` fills a `rv9_pub_info_t`: name, sequence, length,
+capacity, stamp, the writer's pid, the reader count, whether it is `held`,
+and the fault its publisher died of. `held` and `writer` are two questions
+because a cell opened by the system has no pid, and reporting that as
+`writer == 0` would make "nobody is publishing this" and "RV-9 itself is" the
+same answer.
+
+**A fault is itself a publication.** R9 §15.1 has a faulted component publish
+that it faulted; the sequence moves on by one, so a watcher blocked in
+`RV9_PUB_GS_WAIT` wakes up and finds out. The fault is recorded in R9's
+names, so a runaway reads as DEADLINE.
+
+### The cell outlives the publisher
+
+Closing a cell does not erase it. A control loop that has stopped leaves
+behind the last value it published and the moment it observed that value,
+which is precisely what an operator or a supervisor arriving afterwards
+needs. Cells are claimed for the life of the system, not the life of a
+process.
+
+Both states at once, with `control` running and `lateloop` long since
+stopped:
+
+```
+rv9> pubs
+name         means  seq   bytes  cap  age_ms   by  rdrs  torn  note
+LATELOOP     -      35    4      64   4294967  -   0     0     killed
+CONTROL      -      4560  12     64   0        83  0     0     declared by 83
+```
+
+`CONTROL` is live: `by 83`, `declared by 83`, a sequence that moved to 4,908
+by the next `pubs` a third of a second later, and `torn 0` — nothing was
+outrun. `LATELOOP` is what a stopped component leaves: its last publication,
+still readable, noted as `killed`.
+
+That `age_ms` of 4,294,967 is a ceiling, not a measurement. `m_age_ms`
+narrows to 32 bits before dividing — a module has no 64-bit division (§5) —
+and anything older than about 71 minutes is reported as the ceiling rather
+than wrapped into a small and plausible lie.
 
 ## 11. The real-time class
 
