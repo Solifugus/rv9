@@ -690,10 +690,150 @@ and why `RV9_SYS_MEM_MIN` exists to mark the part that may never move.
 
 ## 11. The real-time class
 
-> **To write:** admission by response-time analysis rather than utilisation;
-> priority derived from deadlines; the utilisation ceiling; the 2 ms runaway
-> watchdog and what it does; `on_deadline`; the slot count; what a refusal
-> message contains and how to read it.
+A real-time process is one RV-9 has **agreed** to run. The agreement is made
+at `fork_rt`, before the program starts, and either it is kept or the program
+does not run — which is the difference between a deadline and a hope.
+
+Four slots (§14). The contract is:
+
+```c
+env->rt_declare(0);                 /* 0: the period from the manifest */
+for (;;) {
+    int missed = env->rt_wait();
+    if (missed < 0) break;          /* the loop is over */
+    /* ... the work, every period ... */
+}
+```
+
+Everything the loop will touch is opened, allocated and written to **before**
+`rt_declare`. See §7: the first write through a path is measurably the most
+expensive, and a promise made before the expensive part is a promise about
+the wrong number.
+
+### Admission is not arithmetic on load
+
+Two tests, in this order, and they refuse for different reasons.
+
+**The utilisation ceiling** (§14, 70 %) is a flat refusal:
+`RV9_PE_UTILISATION`. What the headroom is for is everything that is *not*
+in the sum at all — the radio, the panel, the SPI driver, RV-9's own kernel,
+and every ordinary process. Admitting real-time work up to the last percent
+starves the system the real-time work depends on.
+
+**Response-time analysis** is the real test, and a set using 8 % of the CPU
+can fail it. For each component, iterate
+
+```
+R = C + sum over j that can run ahead of it of ceil(R / T_j) * C_j
+```
+
+to a fixed point or until it passes the deadline. `C` is the declared
+`wcet_us`, or the worst execution yet *measured* when nothing was declared.
+`T` is the period. `D` is `deadline_us`, or the period when no deadline was
+declared. A component whose `R` exceeds its `D` means the whole set is
+refused with `RV9_PE_UNSCHEDULABLE` — the CPU was sufficient and the
+*ordering* was not.
+
+**The analysis is of the whole set, not of the newcomer.** Admitting one
+component may move the ones already running, and an `RV9_PE_UNSCHEDULABLE`
+refusal names whichever component would miss — frequently not the one being
+admitted. Read it as *there is no arrangement under which everybody makes
+it*: the fix is a period, a deadline or an execution bound somewhere in the
+set, not necessarily in the program that was refused.
+
+Here are both tests on the machine. `heavyloop` (180 ‰) and `fastloop`
+(500 ‰) are running; `control` wants 50 more:
+
+```
+E admit 'control': wants 50 permille, 680 already promised, ceiling 700
+control: the CPU is already promised
+
+rv9> rt
+real-time promised  68.0% of 70.0%
+slots               2 of 4
+declared            2
+measured            0
+unaccounted         0
+
+slot  period  deadline  runs     bound  worst  misses
+0     100000  100000    routine  38000  16395  0
+1     5000    3000      urgent   2500   2036   0
+```
+
+`bound` is the response-time analysis's answer; `worst` is what has actually
+been seen. `heavyloop` moved to **routine** because its deadline is the
+longer, and `fastloop` stayed **urgent** — the derivation below, in one line
+of output.
+
+Its bound of 38,000 µs is the formula, and it is worth following once.
+`heavyloop` is charged for every release of `fastloop` that can land inside
+its own response: 18,000 → ⌈18000/5000⌉·2500 = 10,000 → 28,000 → 15,000 →
+33,000 → … → a fixed point at 38,000, well inside its 100,000 µs deadline.
+`fastloop`, urgent, is charged for nobody: its bound is its own 2,500 against
+a 3,000 deadline.
+
+### Priority is derived, never chosen
+
+R9 §13 asks that nobody pick these numbers. The host offers two useful
+levels, so the derivation is a *placement* rather than a ranking:
+
+1. Everything starts **urgent**. A set whose urgent components all meet their
+   deadlines together stays there — which is every set of one loop.
+2. While some urgent component cannot, the least urgent of them — the longest
+   deadline — moves to **routine**, where the urgent ones no longer wait on
+   it.
+3. Then everything routine must meet its deadline too, counted against every
+   urgent component *and every other routine one*. Components sharing a level
+   time-slice, so each is charged for all of its peers: the analysis is
+   pessimistic there on purpose.
+
+`urgent` sits above every host task, the radio included. `routine` sits above
+every ordinary process and below the radio.
+
+`placement` in a manifest pins a component to one level. A pin **constrains
+the analysis rather than overriding it**: if no arrangement honouring the
+pins meets every deadline, the program is refused rather than admitted into a
+set that cannot work.
+
+This existed because of a specific failure. Before it, every real-time task
+ran at one host priority and time-sliced. A 1 kHz loop with a tight deadline,
+released while a slow loop was in the middle of 20 ms of work, waited for the
+next tick to share the CPU — and was stopped for a deadline **the scheduler
+had missed on its behalf**.
+
+### What cannot be analysed
+
+A component with no release bound — an event source that declared no
+`min_inter_us` — cannot be put in the sum. It stays urgent, counts against
+nobody, and is reported as *unaccounted*. So is a component that declared no
+`wcet_us` and has not run yet.
+
+That is why `rt` prints three counts under the load — `declared`, `measured`
+and `unaccounted` — rather than a single figure, and why admission logs the
+load as *a floor* when any of it is measured or unaccounted. A number with
+`unaccounted` beside it is not wrong; it is incomplete, and it says so.
+
+The analysis also does not see the host's own work. Routine components run
+below the radio, and their bounds are bounds on RV-9's workload only.
+
+### Being late, and stopping
+
+`on_deadline` decides what a miss means. `REPORT` — the default — counts it:
+`rt_wait` returns the number of releases that came and went while the body
+was still running, and the component can report, shed work, or carry on.
+`FAULT` stops it, applies its `failsafe`, and does not release it again;
+`wait_why` then gives `RV9_FAULT_DEADLINE`.
+
+`REPORT` is not permission to stop waiting. Whatever a component declared,
+the watchdog looks every 2 ms, and one activation running longer than 250 ms
+while on the CPU for at least half of that is a **runaway** (§14): stopped
+from outside, failsafe applied, `RV9_FAULT_RUNAWAY`. A late loop is a
+component's problem; a loop that never comes back is the machine's.
+
+Failsafes are applied by RV-9 through a fresh detached open, not through the
+dying process's own paths — because the process this is for is frequently
+one that ran off its stack, and a path it owned is not a thing to trust at
+that moment.
 
 ## 12. Memory
 
