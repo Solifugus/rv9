@@ -40,9 +40,47 @@ PROFILE = os.path.join(ROOT, "docs", "target", "rv9-profile.json")
 REFERENCE = os.path.join(ROOT, "docs", "reference.md")
 
 
+# C spellings that appear inside signatures and are nobody's API name. Only
+# one of them collides with something the firmware defines -- the manifest
+# tag `static` -- which is why the filter applies to the insides of a
+# signature and never to a span that is nothing but a name: `static` on its
+# own, as §6 writes it, is somebody naming the tag.
+NOISE = {
+    "void", "int", "char", "const", "unsigned", "signed", "long", "short",
+    "static", "struct", "union", "enum", "return", "sizeof", "bool", "size_t",
+    "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+    "int8_t", "int16_t", "int32_t", "int64_t",
+}
+
+
 def mentioned(text):
-    """Every identifier the document puts in backticks."""
-    return set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", text))
+    """
+    Every identifier the document puts in backticks.
+
+    Originally this matched only a span that was *entirely* an identifier,
+    which turned out to punish the better documentation: writing the whole
+    signature -- `int close(int path)` -- documents `close` far more usefully
+    than the bare name, and the check called it missing. Thirteen calls
+    failed that way the first time §7 was written properly.
+
+    So identifiers are taken from *within* each span, less the C spellings
+    above. It is still a test for absence and still a low bar; it is now a bar
+    that good prose can clear.
+
+    A span that is *only* an identifier is taken as written, blocklist and
+    all. Otherwise the manifest tag `static` could never be documented: the
+    one way to name it is the one way the filter throws away.
+    """
+    names = set()
+    for span in re.findall(r"`([^`\n]+)`", text):
+        lone = re.fullmatch(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*", span)
+        if lone:
+            names.add(lone.group(1))
+            continue
+        for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", span):
+            if ident not in NOISE:
+                names.add(ident)
+    return names
 
 
 def structure(text):

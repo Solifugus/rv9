@@ -249,29 +249,181 @@ me without this*, and a control loop should say it.
 
 ## 7. The environment
 
-Thirty-four calls, arriving as a struct of function pointers. No libc, no
-globals, no kernel calls: everything a module can do is here.
+Thirty-four entries, arriving as one struct of function pointers and values.
+No libc, no globals, no kernel calls: **everything a module can do is here**,
+and a module that needs something not in this list needs a newer ABI or a
+device.
 
-> **To write:** all thirty-four, grouped — lifecycle, paths, processes,
-> information, real time — each with its signature, what it returns, its
-> error codes, its real-time safety, and the ABI it arrived in. The grouping
-> to use:
->
-> - **itself**: `abi_version`, `statics`, `statics_size`, `pid`, `arg`
-> - **time and yielding**: `time_ms`, `time_us`, `sleep_ms`, `yield`
-> - **paths**: `open`, `close`, `read`, `write`, `seek`, `dup2`, `getstat`,
->   `setstat`, `remove`
-> - **processes**: `fork`, `fork_arg`, `fork_rt`, `wait`, `wait_why`,
->   `chain`, `signal`, `kill`, `signals_take`
-> - **modules**: `load`
-> - **information**: `sysinfo`, `print`
-> - **real time**: `rt_declare`, `rt_declare_event`, `rt_wait`, `rt_stats`
->
-> Two things to be explicit about. `wait_why` (ABI 14) is the one that
-> separates what a program returned from what RV-9 decided about it, and
-> without it the two share a number space — see §13. And `rt_wait` returns
-> the number of releases *coalesced*, which is how a component learns it was
-> too slow without being told by a fault.
+Five are plain values; the other twenty-nine are calls. Unless a call says
+otherwise it returns **0 or a count on success and a negative `RV9_PE_*` or
+`RV9_IO_ERR_*` on failure** — negated, so `-RV9_PE_NOMEM` is what a refused
+`fork` hands back.
+
+**Real-time safety** is the column that decides whether a call may appear
+between `rt_wait`s:
+
+| | |
+|---|---|
+| **yes** | Bounded, and resident in memory that survives flash operations. |
+| **device** | Bounded only if the path's file manager *and* driver are both real-time safe — see §3. `pio` and `pfm` are; nothing else is. |
+| **no** | Not to be called with a deadline pending. |
+
+That classification is read from the `RV9_RT_CODE` attribute on the function
+implementing each entry. What *that* function goes on to call is its
+implementer's responsibility and is not checked, so it is a claim about RV-9's
+own code rather than a proof about the whole path.
+
+### Itself
+
+| | since | |
+|---|---|---|
+| `uint32_t abi_version` | 1 | What this firmware implements. Check it before using anything newer than you must. |
+| `void *statics` | 1 | The module's private storage, zeroed, as many bytes as the manifest's `static` asked for. **NULL when it asked for none.** |
+| `uint32_t statics_size` | 1 | How much was actually given. Check it against your own `sizeof` and refuse rather than overrun — every tool here does. |
+| `uint32_t pid` | 2 | **0 when the module was run outside a process**, which `rv9_mod_run` does at boot. |
+| `const char *arg` | 2 | The rest of the command line. **May be NULL.** |
+
+The `statics_size` check is not ceremony. A module built against a larger
+struct than its manifest declares gets a smaller allocation, and the resulting
+corruption is somebody else's heap. The convention throughout is:
+
+```c
+mything_t *st = (mything_t *)env->statics;
+if (st == NULL || env->statics_size < sizeof(*st)) return 2;
+```
+
+### Time and yielding
+
+| | since | RT | |
+|---|---|---|---|
+| `uint64_t time_ms(void)` | 1 | no | Milliseconds since boot. |
+| `uint64_t time_us(void)` | 11 | **yes** | Microseconds since boot. |
+| `void sleep_ms(uint32_t)` | 2 | no | Give up the CPU for at least this long. |
+| `void yield(void)` | 2 | no | Give up the CPU now; return when scheduled again. |
+
+**A real-time loop must use `time_us`, not `time_ms`** — the millisecond one
+is not resident and is too coarse to measure a loop with anyway. Milliseconds
+cannot express a 2,022 µs response.
+
+**`sleep_ms` is not how a control loop waits.** It asks for *at least* that
+long and drifts; `rt_wait` returns at the next release and reports what it
+cost. A loop that sleeps is a loop with no deadline.
+
+### Paths
+
+| | since | RT | |
+|---|---|---|---|
+| `int open(const char *name, uint32_t mode)` | 3 | no | Returns a path number, or negative. |
+| `int close(int path)` | 3 | no | |
+| `int read(int path, void *buf, uint32_t len)` | 3 | **device** | Bytes read; 0 at end of data, which is not an error. |
+| `int write(int path, const void *buf, uint32_t len)` | 3 | **device** | Bytes written. |
+| `int seek(int path, int32_t offset, int whence)` | 8 | no | `RV9_SEEK_SET/CUR/END`. |
+| `int dup2(int from, int to)` | 5 | no | Point `to` at what `from` names. |
+| `int getstat(int path, uint32_t code, void *arg)` | 8 | no | Ask the device something. |
+| `int setstat(int path, uint32_t code, void *arg)` | 8 | no | Tell the device something. |
+| `int remove(const char *name)` | 7 | no | Delete a file. |
+
+Three things to know before writing code that opens more than one thing.
+
+**`open` returns the lowest free slot.** So parking a path into a fixed slot
+*after* opening something can land on top of what was just opened. The shell
+lost the read end of a pipe this way, and the only symptom was a command that
+quietly produced nothing — it now parks before opening anything. Twelve slots
+per process (§14), of which 0, 1 and 2 are standard input, output and error by
+convention rather than by rule.
+
+**`seek` reports whether it worked, not where it landed.** There is no *tell*.
+A caller that needs the position must count what it has consumed — which is
+what the shell does to make `while` loops work in scripts.
+
+**`read` and `write` are only real-time safe on a real-time safe path.** In
+practice that means `/gpio`, `/pwm0`, `/adc0`, `/tsens` and `/pub0/NAME`. A
+control loop that writes to a file is not a control loop.
+
+### Processes
+
+| | since | RT | |
+|---|---|---|---|
+| `int fork(const char *module, int priority)` | 4 | no | The new pid, or negative. |
+| `int fork_arg(const char *module, int priority, const char *arg)` | 7 | no | As `fork`, with a command line. |
+| `int fork_rt(const char *module, uint32_t period_us, const char *arg)` | 10 | no | Fork into the real-time class; subject to admission. |
+| `int wait(int pid, int *status, uint32_t timeout_ms)` | 4 | no | |
+| `int wait_why(int pid, int *status, int *fault, uint32_t timeout_ms)` | 14 | no | **Use this one.** |
+| `int chain(const char *module)` | 6 | no | Continue as a different module, keeping pid and open paths. |
+| `int signal(int pid, uint32_t signals)` | 13 | no | A request the target notices at `signals_take`. |
+| `int kill(int pid)` | 13 | no | Not a request. |
+| `uint32_t signals_take(void)` | 2 | no | Pending signals; **reading clears them**. |
+
+**`wait` hands back one number where there are two questions.** A module's
+return value and RV-9's own verdicts share a number space, so `wait` alone
+cannot tell "the program returned −6" from "the scheduler stopped it". Use
+`wait_why` and branch on `fault`; see §13, which is written at length because
+getting this wrong is how a working `i2c` command was reported as having been
+stopped by the scheduler.
+
+**The polite way to stop something**, which is what the `kill` command does:
+
+```c
+env->signal(pid, RV9_SIG_STOP);
+if (env->wait(pid, &status, 2000) < 0) env->kill(pid);
+```
+
+`kill` ends the process at the first point where ending it breaks nothing
+else — an ordinary process when it holds no lock, a real-time one between
+activations — and applies its declared failsafes as for any other exit. It
+returns `-RV9_PE_TIMEOUT` when it could not find such a moment, which is not
+the same as having given up.
+
+**`fork_rt` is where admission happens**, and a refusal is specific: see the
+seven codes in §13. `RV9_PE_UNSCHEDULABLE` is the one worth reading — the CPU
+was sufficient and the *ordering* was not.
+
+### Modules and information
+
+| | since | RT | |
+|---|---|---|---|
+| `int load(const char *path)` | 9 | no | Read a module file into the store; it becomes runnable by name. |
+| `int sysinfo(uint32_t what, void *buf, uint32_t len)` | 5 | no | See §8. Returns how many records it filled, or −1. |
+| `int print(const char *s)` | 1 | no | **Do not use.** |
+
+`print` predates SCF — it existed when there was nowhere to write. Anything
+now should `write` to standard output, so that it composes through a pipe and
+can be redirected. It remains in the ABI because removing it would break
+modules built against ABI 1, which is the promise the ABI makes.
+
+`load` is how a module fetched over the network becomes a command without
+reflashing: `fetch host /path > /r0/thing.mod`, then `load /r0/thing.mod`.
+
+### Real time
+
+| | since | RT | |
+|---|---|---|---|
+| `int rt_declare(uint32_t period_us)` | 10 | no | Declare the period and begin. **0 means the one in the manifest.** |
+| `int rt_declare_event(int event_id, uint32_t min_interval_us)` | 12 | no | Released by an event rather than a period. |
+| `int rt_wait(void)` | 10 | **yes** | Wait for the next release. Returns **releases coalesced**. |
+| `int rt_stats(rv9_rt_report_t *out)` | 10 | no | Activations, worst jitter, worst execution, overruns. |
+
+**Pass 0 to `rt_declare`.** The rate is a property of the control law and
+belongs written down beside it in `build.conf`, where admission and a compiler
+can both read it — not as a constant in the code that nothing outside the
+module can see.
+
+**`rt_wait`'s return value is the loop learning it was too slow.** A positive
+number is releases that came and went while the body was still running.
+Nothing faults; the component is simply told, and can report it, shed work, or
+declare `on_deadline=FAULT` and be stopped instead. Negative means the loop is
+over — stop.
+
+**The initialisation-then-execution split is load-bearing.** Open every path,
+allocate everything, and write once to each before calling `rt_declare`. The
+first write through a path is measurably the most expensive: `control` spent
+30 µs of a 50 µs budget on activation one warming up a path it had opened but
+never used. Anything a loop will touch should be touched before it makes a
+promise about how long it takes.
+
+An event-driven component declares `min_interval_us` — the shortest gap it
+will tolerate — and admission treats that as the period. Events closer
+together than declared are counted as `floods` rather than accepted silently.
 
 ## 8. sysinfo
 
