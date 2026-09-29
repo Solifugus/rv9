@@ -949,6 +949,26 @@ _Static_assert(sizeof(rv9_pub_info_t) == 56, "rv9_pub_info_t is frozen");
 /* The LCD console's own settings. */
 /* RV9_LCD_SS_CLEAR is superseded by RV9_CON_SS_CLEAR, which every console
    answers. Kept because clearing the screen is not worth breaking. */
+/*
+ * The SVG window: redraw only the rows that changed.
+ *
+ * arg is a uint32_t packing y0 << 16 | y1 -- the half-open row range that
+ * needs repainting. It applies to the **next** document written and then
+ * clears itself, because a document is a whole picture by default and a
+ * clip left set by accident would be a window that never fully repaints
+ * again.
+ *
+ * Why this exists: a full 1024x600 redraw costs about 640 ms on a C5-class
+ * core, and a 48-row strip about 80 ms (design §56, measured). Tap-and-flash
+ * feedback needs the second number, and the renderer already works in 8-row
+ * bands, so clipping is a matter of which bands it visits. The panel keeps
+ * its own framebuffer, so the rows left alone simply stay as they were.
+ *
+ * Bands are full width, so a tall narrow widget costs what a tall wide one
+ * does -- which is a hint to lay widgets out in horizontal bands.
+ */
+#define RV9_SVG_SS_ROWS       (RV9_SS_DRIVER_BASE + 8)
+
 #define RV9_LCD_SS_CLEAR      (RV9_SS_DRIVER_BASE + 0)
 #define RV9_LCD_SS_BRIGHTNESS (RV9_SS_DRIVER_BASE + 1)   /* 0..100 percent */
 

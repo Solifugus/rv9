@@ -756,10 +756,23 @@ Measured on the host before the P4 board arrives (design §56), with
   for a dense one.
 
 A fifth to half a second per frame is fine for a picture put up and left, and
-hopeless for a user interface. **Damage tracking is therefore a prerequisite
-of the GUI direction, not an optimisation after it:** a retained object tree
-with bounding boxes and per-object dirty flags, redrawing only what changed.
-The console already does this per row.
+hopeless for a user interface — so *some* clipping is a prerequisite. But the
+cheap half turned out to be enough, and **band clipping is now done**
+(`RV9_SVG_SS_ROWS`, design §56):
+
+```
+flick: full 59 ms, press 15 ms, release 15 ms   (a tap is press+release)
+```
+
+A whole tap costs 30 ms against 59 for one full redraw, on the board at
+320x172. Widening to 1024 costs only 1.7x (not 3.2x — the per-band re-parse
+does not care about width), so a tap is about **52 ms at 1024x600** against
+~640 ms for the full screen.
+
+That makes **tap-to-act with a flash to confirm** affordable today. A retained
+object tree with per-object bounding boxes is now an optimisation for later
+rather than a gate — what it would buy is dropping the per-band re-parse and
+clipping horizontally as well as vertically.
 
 The ceilings that do *not* move with screen size are the ones to raise first:
 `SRC_MAX` 4,096, `MAX_PTS` 256, `MAX_CONTOURS` 16, `MAX_DEPTH` 8.

@@ -6397,6 +6397,45 @@ That is the same conclusion the "paths all the way to SVG objects" idea
 arrives at from the other side: if an object is addressable, it is also
 separately *invalidatable*.
 
+### Tap and flash, measured rather than estimated
+
+The conclusion above -- that damage tracking is a prerequisite -- was right in
+substance and too strong in form. It implied the whole retained-object-tree
+machinery before anything interactive could work. What is actually needed is
+the cheap half: **skip the bands that did not change.** The renderer already
+works in 8-row bands, so this is a matter of which bands it visits.
+
+`RV9_SVG_SS_ROWS` says which rows the next document should repaint, packed
+y0 << 16 | y1, one-shot -- because a document is a whole picture by default
+and a clip left set by accident would be a window that never fully repaints
+again. The panel holds its own framebuffer, so untouched rows simply stay.
+
+`flick` draws a button, presses it and releases it, timing each. On the board
+at 320x172:
+
+```
+flick: full 59 ms, press 15 ms, release 15 ms  (a tap is press+release)
+```
+
+**A whole tap costs 30 ms against 59 for one full redraw.** Four times cheaper
+per draw, and the two draws together still cost half a single full one.
+
+Scaling that to the P4's panel needs one more measurement, because bands are
+full *width*: a 6-band strip costs 0.28 ms at 320 wide and 0.48 ms at 1024 on
+the host -- **1.7x for 3.2x the width**, not 3.2x, because the per-band
+document re-parse does not care how wide the band is. So the board's 15 ms
+strip becomes about **26 ms at 1024 wide, and a tap about 52 ms** on a
+C5-class core, against roughly 640 ms for the full screen. On the P4, less.
+
+Fifty milliseconds is a tap that feels instant. So the interaction model that
+fits this hardware is: **tap to act, a brief flash to confirm, and nothing
+that repaints the whole screen while a finger is moving.** Continuous drag is
+the thing to avoid, not interactivity itself.
+
+One consequence to design around rather than fight: bands are full width, so a
+tall narrow widget costs what a tall wide one does. Laying widgets out in
+horizontal bands is cheaper than scattering them.
+
 ### The real ceilings are not pixels
 
 `SRC_MAX` is 4,096 bytes, `MAX_PTS` 256, `MAX_CONTOURS` 16, `MAX_DEPTH` 8. A

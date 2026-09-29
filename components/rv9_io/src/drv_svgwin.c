@@ -51,6 +51,10 @@ typedef struct {
     size_t    len;
     bool      overflow;
 
+    /* Rows the next document should repaint; 0,0 means all of them.
+       See RV9_SVG_SS_ROWS. */
+    int       clip_y0, clip_y1;
+
     uint16_t *band;       /* w * BAND_ROWS */
     uint16_t *cov;        /* w */
     int32_t  *pts;        /* MAX_PTS * 2, 8.8 fixed */
@@ -1136,7 +1140,25 @@ static void render(svgwin_t *s)
        the meantime rather than being eaten a row at a time. */
     rv9_panel_take(s);
 
-    for (int y = 0; y < s->h; y += BAND_ROWS) {
+    /*
+     * Which bands to visit. A clip is snapped outward to band boundaries --
+     * the band is the unit the renderer works in, and drawing part of one
+     * would mean clearing pixels it is not going to repaint.
+     *
+     * Every band still re-parses the whole document, so the saving is in
+     * bands not in parsing: a 48-row strip is 6 bands of 75, and costs about
+     * that fraction. See RV9_SVG_SS_ROWS.
+     */
+    int from = 0, to = s->h;
+    if (s->clip_y1 > s->clip_y0) {
+        from = (s->clip_y0 / BAND_ROWS) * BAND_ROWS;
+        to   = s->clip_y1;
+        if (from < 0)    from = 0;
+        if (to > s->h)   to = s->h;
+        if (from >= to)  from = to = 0;      /* nothing to do */
+    }
+
+    for (int y = from; y < to; y += BAND_ROWS) {
         b.y0 = y;
         b.rows = (y + BAND_ROWS <= s->h) ? BAND_ROWS : s->h - y;
 
@@ -1146,6 +1168,9 @@ static void render(svgwin_t *s)
 
         rv9_panel_blit(0, y, s->w, y + b.rows, s->band);
     }
+
+    /* One-shot: the next document is a whole picture unless told otherwise. */
+    s->clip_y0 = s->clip_y1 = 0;
 
     ESP_LOGI(TAG, "drew %u bytes in %u ms", (unsigned)s->len,
              (unsigned)((rv9_time_us() - t0) / 1000));
@@ -1201,6 +1226,8 @@ static rv9_io_err_t svgwin_open(rv9_dev_t *dev, uint32_t mode)
 
     s->len = 0;
     s->overflow = false;
+    s->clip_y0 = 0;
+    s->clip_y1 = 0;          /* 0,0 means "all of it" */
     return RV9_IO_OK;
 }
 
@@ -1257,6 +1284,29 @@ static rv9_io_err_t svgwin_write(rv9_dev_t *dev, const void *buf, size_t len,
     return RV9_IO_OK;
 }
 
+static rv9_io_err_t svgwin_setstat(rv9_dev_t *dev, uint32_t code, void *arg)
+{
+    svgwin_t *s = (svgwin_t *)dev->drv_state;
+    if (s == NULL || arg == NULL) return RV9_IO_ERR_IO;
+
+    if (code == RV9_SVG_SS_ROWS) {
+        uint32_t v = *(uint32_t *)arg;
+        int y0 = (int)(v >> 16), y1 = (int)(v & 0xFFFF);
+
+        /* Nonsense is refused rather than clamped: a caller that asked for
+           rows 400 to 200 has a bug, and silently drawing something else
+           would hide it. Zero-zero is the documented way to say "all". */
+        if (y1 < y0) return RV9_IO_ERR_INVAL;
+
+        rv9_lock_acquire(s->lock);
+        s->clip_y0 = y0;
+        s->clip_y1 = y1;
+        rv9_lock_release(s->lock);
+        return RV9_IO_OK;
+    }
+    return RV9_IO_ERR_UNSUPPORTED;
+}
+
 static rv9_io_err_t svgwin_getstat(rv9_dev_t *dev, uint32_t code, void *arg)
 {
     svgwin_t *s = (svgwin_t *)dev->drv_state;
@@ -1273,6 +1323,7 @@ static const rv9_driver_t svgwin_driver = {
     .name    = "svgwin",
     .init    = svgwin_init,
     .open    = svgwin_open,
+    .setstat = svgwin_setstat,
     .close   = svgwin_close,
     .write   = svgwin_write,
     .getstat = svgwin_getstat,
