@@ -86,6 +86,36 @@ static inline uint32_t m_age_ms(uint64_t now_us, uint64_t then_us)
     return (uint32_t)delta / 1000u;
 }
 
+/*
+ * Does this machine have it? See RV9_SYS_HAVE.
+ *
+ *     rv9_sys_device_t d;
+ *     if (m_have(env, "svgwin", &d)) { ... open d.name ... }
+ *
+ * A name starting with '/' asks for that device; anything else asks for a
+ * driver or a file manager, which is the form that lets one binary run on two
+ * boards -- "is there anything I can draw on" without knowing it is called
+ * /w0 here.
+ *
+ * `out` may be NULL when only the yes-or-no is wanted, in which case a
+ * throwaway record is used: the call needs somewhere to put the name.
+ */
+static inline bool m_have(const rv9_mod_env_t *env, const char *what,
+                          rv9_sys_device_t *out)
+{
+    rv9_sys_device_t spare;
+    rv9_sys_device_t *rec = (out != NULL) ? out : &spare;
+
+    uint32_t i = 0;
+    while (what[i] != '\0' && i < sizeof(rec->name) - 1) {
+        ((char *)rec)[i] = what[i];
+        i++;
+    }
+    ((char *)rec)[i] = '\0';
+
+    return env->sysinfo(RV9_SYS_HAVE, rec, sizeof(*rec)) == 1;
+}
+
 /* Split "a b" into the first word and the rest. */
 /* ------------------------------------------------------------------ */
 /* Reading input a line at a time                                      */

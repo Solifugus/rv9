@@ -1541,8 +1541,69 @@ static int io_devices_op(void *buf, uint32_t len)
     return n;
 }
 
+/*
+ * One device, by name, driver or file manager. See RV9_SYS_HAVE.
+ *
+ * The record is filled from the same fields io_devices_op reports, because
+ * two answers to the same question that could drift apart is one answer too
+ * many.
+ */
+static int io_have_op(void *buf, uint32_t len)
+{
+    if (buf == NULL || len < sizeof(rv9_sys_device_t)) return -1;
+
+    /* The name arrives in the caller's buffer and is overwritten by the
+       answer, so it is copied out before anything is written back. */
+    char want[16];
+    strncpy(want, (const char *)buf, sizeof(want) - 1);
+    want[sizeof(want) - 1] = '\0';
+    if (want[0] == '\0') return -1;
+
+    bool by_device = (want[0] == '/');
+    rv9_sys_device_t *out = (rv9_sys_device_t *)buf;
+    int found = 0;
+
+    rv9_lock_acquire(s_lock);
+    for (rv9_dev_t *d = s_devs; d != NULL; d = d->next) {
+        bool hit;
+        if (by_device) {
+            hit = (strcmp(d->name, want) == 0);
+        } else {
+            hit = (d->drv  != NULL && strcmp(d->drv->name,  want) == 0) ||
+                  (d->fmgr != NULL && strcmp(d->fmgr->name, want) == 0);
+        }
+        if (!hit) continue;
+
+        memset(out, 0, sizeof(*out));
+        strncpy(out->name, d->name, sizeof(out->name) - 1);
+        if (d->fmgr != NULL) {
+            strncpy(out->filemgr, d->fmgr->name, sizeof(out->filemgr) - 1);
+        }
+        if (d->drv != NULL) {
+            strncpy(out->driver, d->drv->name, sizeof(out->driver) - 1);
+            out->retains  = d->drv->retains ? 1 : 0;
+            out->sessions = (d->drv->open != NULL) ? 1 : 0;
+        }
+        out->open_count = (uint16_t)d->open_count;
+        found = 1;
+        break;                    /* the first is the answer; see the note */
+    }
+    rv9_lock_release(s_lock);
+
+    /*
+     * The first match, not all of them. Asking by driver can match several
+     * devices -- three RBF volumes share one file manager -- and a caller
+     * wanting the whole set should enumerate with RV9_SYS_DEVICES. This
+     * answers "is there one, and what is it called", which is the question
+     * that was expensive.
+     */
+    if (!found) memset(out, 0, sizeof(*out));
+    return found;
+}
+
 static const rv9_mod_io_ops_t s_mod_io_ops = {
     .devices = io_devices_op,
+    .have    = io_have_op,
     .open  = io_open_op,
     .close = io_close_op,
     .read  = io_read_op,

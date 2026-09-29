@@ -312,6 +312,7 @@ and why `RV9_SYS_MEM_MIN` exists to mark the part that may never move.
 | `RV9_SYS_STACK_PEAKS` | one per module run | The high-water mark a module reached last time it ran, which is how a `stack_size` gets right-sized instead of guessed. |
 | `RV9_SYS_LOG` | bytes | The log ring, oldest first. What `log` prints, and what makes `log \| match error \| last 20` possible. |
 | `RV9_SYS_CLOCK` | one `rv9_sys_clock_t` | Wall-clock time and whether it has ever been set. UTC only. It says *false* rather than lying when the network has never been asked. |
+| `RV9_SYS_HAVE` | one `rv9_sys_device_t` | **A question, not an enumeration.** Name in, device record out, returns 1 or 0. See §18. |
 
 ## 9. Device settings: getstat and setstat
 
@@ -591,6 +592,84 @@ admission and kept after the process is gone, beside `reserved_by` and
 component that has stopped at least as often as one that is running. A later
 publisher declaring no unit does not erase it, for the same reason: silently
 becoming "unknown" would be worse than staying true.
+
+## 18. Asking what this machine can do
+
+RV-9 runs on boards that differ in kind, not only in size — a C5 has a radio
+on the chip and a P4 does not; one panel is 172×320 over SPI and another
+1024×600. A program that must work on both needs a way to ask.
+
+**There are three questions, and they already had three answers.**
+
+| question | how |
+|---|---|
+| Is it here at all? | `RV9_SYS_HAVE`, or `RV9_SYS_DEVICES` to enumerate |
+| How much of it? | `getstat` the device — `RV9_GS_SIZE`, `RV9_PIO_GS_RANGE` |
+| What are the system's numbers? | `RV9_SYS_LIMITS` |
+
+### RV9_SYS_HAVE
+
+On entry the buffer holds a NUL-terminated name; on success it is overwritten
+with that device's `rv9_sys_device_t` and the call returns 1, or 0 when the
+machine has no such thing.
+
+```c
+rv9_sys_device_t d;
+if (m_have(env, "svgwin", &d)) { /* ... open d.name ... */ }
+```
+
+What the name matches:
+
+| | |
+|---|---|
+| starts with `/` | the device: `"/i2c0"` |
+| anything else | the driver, then the file manager: `"svgwin"`, `"scf"` |
+
+**The second form is the one that makes a portable program possible.** *"Is
+there anything I can draw on"* is a question about a **driver**, and asking by
+driver means not needing to know the device is `/w0` here and something else
+there. Only the first match is returned; a caller wanting every RBF volume
+should enumerate instead.
+
+`RV9_SYS_DEVICES` answered this already, and remains the right call for a
+toolchain interrogating the board. `RV9_SYS_HAVE` exists because a *program*
+asking one question had to buffer every record — about 900 bytes of statics on
+this machine, which is why nothing did it. One record is 56.
+
+### Why there is no list of capability flags
+
+A fixed list — `HAS_TOUCH`, `HAS_CAMERA` — is a closed set, and every new kind
+of hardware needs a new bit and an ABI bump to carry it. A device already
+describes itself in three open-ended fields: **name, file manager, driver**. So
+a device nobody has invented yet is answerable by this call on the day its
+descriptor is written, with no change to the ABI at all.
+
+This is the same reasoning that keeps units as free text rather than a table
+(§17), and it is the payoff of the manager/driver/descriptor split being real
+rather than notional.
+
+### The convention
+
+| | |
+|---|---|
+| **Must have it** | Declare it in the manifest. Admission refuses the program with `RV9_PE_NODEV` *before it runs*, naming what was missing. |
+| **Would like it** | Ask with `RV9_SYS_HAVE` and do without when the answer is 0. |
+| **How much of it** | `getstat` the device once open. |
+
+That is what lets one binary serve a small board and a large one: **require
+only what is essential, and ask about the rest.** `ed` is the worked example
+already in the tree — it asks the screen its size on every redraw, so the same
+binary runs at 236 columns over SSH and 30×8 on the panel.
+
+The `have` command is this at the shell, and its exit status is the answer so
+it composes:
+
+```
+rv9> have svgwin && echo can draw
+can draw
+rv9> have camera || echo no camera here
+no camera here
+```
 
 ---
 

@@ -991,6 +991,50 @@ _Static_assert(sizeof(rv9_pub_info_t) == 56, "rv9_pub_info_t is frozen");
 #define RV9_SYS_CLOCK   13     /* rv9_sys_clock_t, what time it is */
 
 /*
+ * Is this thing here? A question, not an enumeration.
+ *
+ * On entry `buf` holds a NUL-terminated name. On success it is overwritten
+ * with that device's rv9_sys_device_t and the call returns 1; it returns 0
+ * when the machine has no such thing. `len` must be at least
+ * sizeof(rv9_sys_device_t).
+ *
+ * RV9_SYS_DEVICES already answers this by enumeration, and that is what a
+ * toolchain asking the board about itself should use. This exists because a
+ * *program* asking one question had to buffer every record to do it -- about
+ * 900 bytes of statics on this machine -- which is why nothing did. One
+ * record is 56.
+ *
+ * WHAT THE NAME MATCHES
+ *
+ *   starts with '/'  the device: "/i2c0"
+ *   anything else    the driver, then the file manager: "svgwin", "scf"
+ *
+ * The second form is the useful one for writing a program that runs on more
+ * than one board: "is there anything I can draw on" is a question about a
+ * *driver*, and asking it by driver name means not having to know the device
+ * is called /w0 here and something else there.
+ *
+ * WHY THERE IS NO LIST OF CAPABILITY FLAGS
+ *
+ * Because a fixed list is a closed set, and every new kind of hardware would
+ * need a new bit and an ABI bump to go with it. A device already describes
+ * itself in three open-ended fields -- name, file manager, driver -- so a
+ * device nobody has invented yet is answerable by this call the day its
+ * descriptor is written.
+ *
+ * HOW THIS IS MEANT TO BE USED
+ *
+ *   must have it     declare it in the manifest; admission refuses the
+ *                    program with RV9_PE_NODEV before it runs
+ *   would like it    ask here, and do without when the answer is 0
+ *   how much of it   getstat the device once it is open
+ *
+ * Which is what lets one binary serve a small board and a large one: require
+ * only what is essential, ask about the rest.
+ */
+#define RV9_SYS_HAVE    14     /* name in, rv9_sys_device_t out; 1 or 0 */
+
+/*
  * What time it is, as opposed to how long the machine has been up.
  *
  * `set` is the field that matters. This board has no clock that survives
@@ -1445,6 +1489,7 @@ typedef struct {
     int (*setstat)(int path, uint32_t code, void *arg);
     int (*claims)(void *buf, uint32_t len);  /* fills rv9_sys_claim_t records */
     int (*devices)(void *buf, uint32_t len); /* fills rv9_sys_device_t records */
+    int (*have)(void *buf, uint32_t len);    /* name in, one record out; see RV9_SYS_HAVE */
 } rv9_mod_io_ops_t;
 
 void rv9_mod_set_io_ops(const rv9_mod_io_ops_t *ops);

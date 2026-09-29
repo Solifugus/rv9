@@ -275,7 +275,8 @@
     "BUDGETS": 10,
     "STACK_PEAKS": 11,
     "LOG": 12,
-    "CLOCK": 13
+    "CLOCK": 13,
+    "HAVE": 14
   },
   "calls": [
     {
