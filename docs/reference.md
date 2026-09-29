@@ -669,16 +669,205 @@ and why `RV9_SYS_MEM_MIN` exists to mark the part that may never move.
 
 ## 9. Device settings: getstat and setstat
 
-> **To write:** the codes, by discipline. Generic PIO
-> (`SS_DIRECTION`, `SS_PULL`, `SS_FREQUENCY`, `GS_RANGE`, `SS_EDGE`,
-> `GS_EVENT`, `GS_PULSE_US`, `GS_PULSES`, `GS_PERIOD_US`), IFM
-> (`SS_REG`, `GS_PRESENT`), console (`GS_SIZE`, `SS_CURSOR`, `SS_COLOUR`,
-> `SS_ATTR`, `SS_CLEAR`, `SS_CURSOR_ON`, `GS_ONSCREEN`), publication and
-> RBF.
->
-> **Known gap:** these are not in `rv9-profile.json`, which means a compiler
-> reading the profile cannot see them. They should be. Raised here rather
-> than quietly omitted.
+`read` and `write` move data. Everything else you can ask a device — how big
+it is, where the cursor goes, which edge to interrupt on, what the radio can
+see — is a numbered code through `getstat` or `setstat`.
+
+A device that does not recognise a code answers `RV9_IO_ERR_UNSUPPORTED`,
+which is an answer rather than a failure: `m_screen` falls back to 80×24 when
+`RV9_CON_GS_SIZE` is refused, so a caller always has something to lay out
+against.
+
+Every code is in `rv9-profile.json` under `stat_codes`, with its discipline
+and its direction, and this section is checked against it.
+
+### The number space
+
+| range | whose | unique across the machine? |
+|---|---|---|
+| 1–255 | Generic, or a discipline's. Every device that can answer one, answers it the same way. | **yes** |
+| 256+ (`RV9_SS_DRIVER_BASE`) | The driver's own. | **no** |
+| 256+64 and up | The file manager's own, kept above the drivers' so the two cannot be confused. | **no** |
+
+The second row is the one to understand. `RV9_LCD_SS_CLEAR` and
+`RV9_NET_SS_CONNECT` are **both 256**, and that is correct: a driver code is
+only meaningful on a path open to that driver. Nothing is centrally allocated
+above the base, which is what lets a new driver define its settings without
+asking anyone.
+
+### Generic — any character device
+
+| code | | |
+|---|---|---|
+| `RV9_SS_ECHO` | 1 | Echo what is read. |
+| `RV9_SS_AUTOLF` | 2 | Turn a newline into carriage-return-newline on the way out. |
+| `RV9_GS_READY` | 3 | Is there input waiting? |
+| `RV9_GS_SIZE` | 4 | The size of the thing — a file's length, on RBF. |
+| `RV9_SS_RAW` | 5 | 0 = lines, 1 = keystrokes. |
+| `RV9_SS_HANGUP` | 6 | End the session this path belongs to. |
+
+**`RV9_SS_RAW` belongs to the path, not the device.** SCF normally reads a
+*line*: it buffers until return, echoes, handles rubout and discards
+anything unprintable — right for a shell and wrong for anything that draws,
+because an arrow key is `ESC [ A` and the first byte would be thrown away
+before any program saw it. In raw mode a read returns whatever has arrived as
+soon as it arrives. Ask for several bytes: an escape sequence is more than
+one. It is inherited across `fork` with the path, which is what makes setting
+it on standard input mean something — so put it back before exiting.
+
+**`RV9_SS_HANGUP` exists because the last close is the wrong moment.** For
+`/ssh0`, whoever established the session says when it is over. A background
+job started in that session inherited its terminal and would otherwise hold
+the session — and the device — for as long as it runs, so nobody else could
+log in. After a hangup the next open starts a new session; paths left from
+the old one get `RV9_IO_ERR_IO` and **the processes holding them keep
+running**. A control loop started over a network link must not stop because
+the link did.
+
+### PIO — any device that is a value
+
+Shared by every PIO device, so a program need not know which driver is
+underneath.
+
+| code | | |
+|---|---|---|
+| `RV9_PIO_SS_DIRECTION` | 16 | 0 = input, 1 = output. |
+| `RV9_PIO_SS_PULL` | 17 | 0 = none, 1 = up, 2 = down. |
+| `RV9_PIO_SS_FREQUENCY` | 18 | Hz, for anything periodic. |
+| `RV9_PIO_GS_RANGE` | 19 | The largest value a write may carry. |
+| `RV9_PIO_SS_EDGE` | 20 | 0 = off, 1 = rising, 2 = falling, 3 = both. |
+| `RV9_PIO_GS_EVENT` | 21 | The event id this unit signals, or 0 if not armed. |
+| `RV9_PIO_GS_PULSE_US` | 24 | Width of the last complete high pulse. |
+| `RV9_PIO_GS_PULSES` | 25 | How many complete pulses have been seen — a sequence number. |
+| `RV9_PIO_GS_PERIOD_US` | 26 | Last rising edge to the one before it. |
+
+**Interrupts are a device setting, not a pin feature.** Arm a unit with
+`RV9_PIO_SS_EDGE`, read the event id from `RV9_PIO_GS_EVENT`, and a
+real-time process asks `rt_declare_event` to be released by that number.
+Nothing about it is specific to a pin: a UART with a character waiting, or a
+card finishing a transfer, answers the same two codes.
+
+**The pulse codes are microsecond sensing without the real-time class.**
+Whole families of sensor are a pulse whose duration *is* the measurement — a
+sonic ranger's echo, a servo frame, a tachometer, a wheel encoder. Both edges
+are stamped in the interrupt handler and the subtraction happens there, so
+the scheduler's jitter cancels and an ordinary program gets an answer good to
+a couple of microseconds. The accuracy comes from where the clock was read,
+not from when the program ran.
+
+`RV9_PIO_GS_PULSES` is a sequence number and not decoration — it is how a
+caller knows the width it just read belongs to the pulse it was waiting for
+rather than to the last one, which matters most when nothing arrived at all:
+
+```c
+uint32_t seen = 0, n, width;
+env->getstat(p, RV9_PIO_GS_PULSES, &seen);
+/* ... provoke the pulse ... */
+env->getstat(p, RV9_PIO_GS_PULSES, &n);
+if (n != seen) env->getstat(p, RV9_PIO_GS_PULSE_US, &width);
+```
+
+A pulse longer than about an hour reads as an hour. The interval is narrowed
+to 32 bits, no physical measurement this is for comes close, and a saturating
+answer beats a wrapped one.
+
+### IFM — transactions
+
+| code | | |
+|---|---|---|
+| `RV9_IFM_SS_REG` | 22 | The register a read should be preceded by. `RV9_IFM_REG_NONE` for a plain read. |
+| `RV9_IFM_GS_PRESENT` | 23 | Non-zero if anything acknowledged at this address. |
+
+Setting the register makes a read into *write-this-byte-then-read* — one
+transaction with a repeated start, which is what almost every sensor
+documents and several require. It is a property of the **path**, so two
+programs reading different registers of the same chip do not disturb each
+other. `RV9_IFM_GS_PRESENT` costs one byte on the bus and is how `i2c scan`
+works.
+
+### Console — anything with a screen at the far end
+
+| code | | |
+|---|---|---|
+| `RV9_CON_GS_SIZE` | 32 | `rows << 16 \| cols`. Get only. |
+| `RV9_CON_SS_CURSOR` | 33 | `row << 16 \| col`, both 0-based. |
+| `RV9_CON_SS_COLOUR` | 34 | `fg \| bg << 8`; sixteen `RV9_COL_*` names. |
+| `RV9_CON_SS_ATTR` | 35 | `RV9_CON_ATTR_*`, the whole set each time. |
+| `RV9_CON_SS_CLEAR` | 36 | `RV9_CON_CLEAR_SCREEN`, `_EOL` or `_EOS`. |
+| `RV9_CON_SS_CURSOR_ON` | 37 | 0 hides it, 1 shows it. |
+| `RV9_CON_GS_ONSCREEN` | 38 | Is this path what the screen is showing? Get only. |
+
+**These are codes and not escape sequences, which is the whole point.**
+`/term` is not a terminal — it is a panel with a font renderer, and teaching
+it to parse ANSI would be absurd when it has no need of one. A program says
+*cursor to 10,20* once and the device decides what that means: `ESC[11;21H`
+down a wire, a change of render position on the glass. SCF supplies the
+escape sequences for any driver with no opinion of its own, so a new
+character driver gets all of this for free. `modlib.h` wraps them as
+`m_cursor`, `m_colour`, `m_attr`, `m_clear` and `m_cursor_on`.
+
+Colours are named rather than RGB. A text console thinks in named colours and
+a palette is something a device can honour; truecolour, if it is ever wanted,
+belongs in a driver code where the dishonesty would at least be local.
+
+**`RV9_CON_GS_ONSCREEN` exists so an incidental write can decline to steal
+the screen.** The panel shows whoever painted last, which is the only
+workable rule with one display and no spare framebuffer — but it makes no
+distinction between a program that meant to draw and a shell echoing the
+command you just typed, and the second should not destroy the first. A
+terminal at the end of a wire always says yes, because nothing else can be
+using it.
+
+### Driver codes
+
+Relative to `RV9_SS_DRIVER_BASE`, and meaningful only on that driver's paths.
+
+| code | | |
+|---|---|---|
+| `RV9_LCD_SS_CLEAR` | +0 | Superseded by `RV9_CON_SS_CLEAR`, kept because clearing a screen is not worth breaking. |
+| `RV9_LCD_SS_BRIGHTNESS` | +1 | 0–100 percent. |
+| `RV9_SVG_SS_ROWS` | +8 | `y0 << 16 \| y1` — the half-open row range to repaint. |
+| `RV9_NET_SS_CONNECT` | +0 | `rv9_net_creds_t`. Saved. |
+| `RV9_NET_SS_DISCONNECT` | +1 | |
+| `RV9_NET_GS_STATUS` | +2 | `rv9_net_status_t`. |
+| `RV9_NET_GS_SCAN` | +3 | `rv9_net_scan_t`, up to twelve access points. |
+| `RV9_NET_SS_FORGET` | +4 | Clear the saved credentials. |
+| `RV9_NET_SS_NOWAIT` | +5 | 0 blocks (the default); 1 returns `RV9_IO_ERR_WOULDBLOCK`. |
+| `RV9_NET_SS_SHUTDOWN` | +6 | Shut the connection both ways **without closing the path**. |
+| `RV9_NET_SS_TRY` | +7 | `rv9_net_creds_t`, not saved. |
+| `RV9_SSH_SS_PASSWORD` | +16 | `rv9_ssh_pw_t`, on `/sshcfg`. |
+| `RV9_SSH_GS_INFO` | +17 | `rv9_ssh_info_t`: host key fingerprint and who is logged in. |
+| `RV9_RBF_SS_FORMAT` | +64 | Empty the volume this path is open on. A *file manager's* code. |
+| `RV9_RBF_GS_SPACE` | +65 | `rv9_rbf_space_t`, asked of the volume (`/sd0`, not `/sd0/notes`). |
+
+**`RV9_SVG_SS_ROWS` applies to the next document written and then clears
+itself**, because a document is a whole picture by default and a clip left
+set by accident would be a window that never fully repaints again. A full
+1024×600 redraw costs about 640 ms on a C5-class core and a 48-row strip
+about 80 ms, which is the difference between tap feedback being affordable
+and not. Bands are full width, so a tall narrow widget costs what a tall wide
+one does — a hint to lay widgets out in horizontal bands.
+
+**`RV9_NET_SS_NOWAIT` exists for closing tidily.** TCP sends a reset instead
+of a clean finish when a socket is closed with data still unread, and a reset
+throws away whatever was in flight — including the last thing the program
+printed. Draining before closing needs a read that can come back empty.
+
+**`RV9_NET_SS_SHUTDOWN` is for a different thread than the one using the
+path.** A read waiting on a peer that will never send returns at once, as if
+the peer had closed, and the path stays valid until its owner closes it.
+Closing it instead would free the socket underneath the read. This is how a
+hung-up SSH session gets a background job's read to let go.
+
+**`RV9_SSH_SS_PASSWORD` is on `/sshcfg` and not on `/ssh0`** because `/ssh0`
+blocks: a password that could only be set through a device that waits for a
+login would be a password you could never set the first time.
+
+**`RV9_RBF_GS_SPACE` is asked of the volume, not of a file.** `RV9_GS_SIZE`
+answers for a file and there was no way to ask about the device — which
+mattered little on a 16 KB RAM disk and matters on a 32 GB card. It is
+counted from the bitmap when asked rather than kept running, because a wrong
+cached figure would be worse than a slow true one.
 
 ## 10. Publication
 

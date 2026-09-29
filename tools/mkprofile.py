@@ -50,6 +50,9 @@ sys.path.insert(0, HERE)
 import mkmodule  # noqa: E402  -- the manifest producer is the source of truth
 
 MODULE_H = "components/rv9_module/include/rv9/module.h"
+
+# The one number a driver code is written relative to.
+DRIVER_BASE = 256
 KAL_H = "components/rv9_kal/include/rv9/kal.h"
 PROC_H = "components/rv9_proc/include/rv9/proc.h"
 
@@ -91,11 +94,76 @@ def defines(text, prefix):
         val = m.group(2).strip()
         shift = re.fullmatch(r"\(\s*1u?\s*<<\s*(\d+)\s*\)", val)
         plain = re.fullmatch(r"\(?\s*(-?(?:0x[0-9A-Fa-f]+|\d+))u?\s*\)?", val)
+        # A driver's own code, written as an offset from the shared base so
+        # that the base is stated once. Resolved here rather than left out,
+        # which is what hid every driver code from the profile.
+        rel = re.fullmatch(r"\(\s*RV9_SS_DRIVER_BASE\s*\+\s*(\d+)\s*\)", val)
         if shift:
             out[m.group(1)] = 1 << int(shift.group(1))
         elif plain:
             out[m.group(1)] = int(plain.group(1), 0)
+        elif rel:
+            out[m.group(1)] = DRIVER_BASE + int(rel.group(1))
     return out
+
+
+# Where each discipline's getstat/setstat codes live.
+#
+# They were the one part of the contract this profile did not carry, which
+# made them the one part a compiler targeting RV-9 had to learn by reading
+# headers. A code is identified by its spelling -- _GS_ asks, _SS_ tells --
+# because that is the convention the codes themselves already encode.
+STAT_HEADERS = [
+    ("generic",  MODULE_H,                                 "RV9_GS_"),
+    ("generic",  MODULE_H,                                 "RV9_SS_"),
+    ("pio",      MODULE_H,                                 "RV9_PIO_"),
+    ("ifm",      MODULE_H,                                 "RV9_IFM_"),
+    ("pfm",      MODULE_H,                                 "RV9_PUB_"),
+    ("console",  MODULE_H,                                 "RV9_CON_"),
+    ("svgwin",   MODULE_H,                                 "RV9_SVG_"),
+    ("lcdcon",   MODULE_H,                                 "RV9_LCD_"),
+    ("rbf",      "components/rv9_io/include/rv9/io.h",     "RV9_RBF_"),
+    ("net",      "components/rv9_io/include/rv9/net.h",    "RV9_NET_"),
+    ("ssh",      "components/rv9_ssh/include/rv9/sshd.h",  "RV9_SSH_"),
+]
+
+
+def stat_codes():
+    """
+    Every getstat and setstat code, by discipline.
+
+    Codes at or above RV9_SS_DRIVER_BASE are the driver's own and are
+    reported relative to it as well as absolutely, because that is the
+    whole of what the base means: /w0's code 264 and the RBF format code
+    320 are different questions that share a number space only by device.
+    Two drivers may and do use the same absolute value.
+    """
+    base = defines(read(MODULE_H), "RV9_SS_DRIVER_BASE")["RV9_SS_DRIVER_BASE"]
+
+    out = {}
+    for group, header, prefix in STAT_HEADERS:
+        for name, value in defines(read(header), prefix).items():
+            if name.endswith("_DRIVER_BASE"):
+                continue
+            if "_GS_" in name:
+                direction = "get"
+            elif "_SS_" in name:
+                direction = "set"
+            elif name.startswith("RV9_GS_"):
+                direction = "get"
+            elif name.startswith("RV9_SS_"):
+                direction = "set"
+            else:
+                continue
+            rec = {"name": name, "value": value, "direction": direction,
+                   "discipline": group}
+            if value >= base:
+                rec["driver_relative"] = value - base
+            out[name] = rec
+
+    if not out:
+        fail("no getstat/setstat codes found")
+    return sorted(out.values(), key=lambda r: (r["discipline"], r["value"]))
 
 
 def enum_values(text, prefix, typename):
@@ -330,6 +398,7 @@ def profile():
         "signals": short(defines(module_h, "RV9_SIG_"), "RV9_SIG_"),
         "sysinfo": short(defines(module_h, "RV9_SYS_"), "RV9_SYS_"),
         "calls": env_calls(module_h),
+        "stat_codes": stat_codes(),
         "rt_safety": {
             "yes": "bounded; resident in memory that survives flash operations",
             "device": "bounded when the device's file manager and driver "

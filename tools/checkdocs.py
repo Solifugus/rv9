@@ -220,6 +220,9 @@ def main():
     for name in p["io_errors"]:
         wanted.append(("I/O error", "RV9_IO_ERR_" + name, "RV9_IO_ERR_" + name))
 
+    for c in p.get("stat_codes", []):
+        wanted.append(("getstat/setstat code", c["name"], c["name"]))
+
     for name in p["sysinfo"]:
         wanted.append(("sysinfo code", "RV9_SYS_" + name, "RV9_SYS_" + name))
 

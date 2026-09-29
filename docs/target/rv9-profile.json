@@ -479,6 +479,275 @@
       "rt_safe": "no"
     }
   ],
+  "stat_codes": [
+    {
+      "name": "RV9_CON_GS_SIZE",
+      "value": 32,
+      "direction": "get",
+      "discipline": "console"
+    },
+    {
+      "name": "RV9_CON_SS_CURSOR",
+      "value": 33,
+      "direction": "set",
+      "discipline": "console"
+    },
+    {
+      "name": "RV9_CON_SS_COLOUR",
+      "value": 34,
+      "direction": "set",
+      "discipline": "console"
+    },
+    {
+      "name": "RV9_CON_SS_ATTR",
+      "value": 35,
+      "direction": "set",
+      "discipline": "console"
+    },
+    {
+      "name": "RV9_CON_SS_CLEAR",
+      "value": 36,
+      "direction": "set",
+      "discipline": "console"
+    },
+    {
+      "name": "RV9_CON_SS_CURSOR_ON",
+      "value": 37,
+      "direction": "set",
+      "discipline": "console"
+    },
+    {
+      "name": "RV9_CON_GS_ONSCREEN",
+      "value": 38,
+      "direction": "get",
+      "discipline": "console"
+    },
+    {
+      "name": "RV9_SS_ECHO",
+      "value": 1,
+      "direction": "set",
+      "discipline": "generic"
+    },
+    {
+      "name": "RV9_SS_AUTOLF",
+      "value": 2,
+      "direction": "set",
+      "discipline": "generic"
+    },
+    {
+      "name": "RV9_GS_READY",
+      "value": 3,
+      "direction": "get",
+      "discipline": "generic"
+    },
+    {
+      "name": "RV9_GS_SIZE",
+      "value": 4,
+      "direction": "get",
+      "discipline": "generic"
+    },
+    {
+      "name": "RV9_SS_RAW",
+      "value": 5,
+      "direction": "set",
+      "discipline": "generic"
+    },
+    {
+      "name": "RV9_SS_HANGUP",
+      "value": 6,
+      "direction": "set",
+      "discipline": "generic"
+    },
+    {
+      "name": "RV9_IFM_SS_REG",
+      "value": 22,
+      "direction": "set",
+      "discipline": "ifm"
+    },
+    {
+      "name": "RV9_IFM_GS_PRESENT",
+      "value": 23,
+      "direction": "get",
+      "discipline": "ifm"
+    },
+    {
+      "name": "RV9_LCD_SS_CLEAR",
+      "value": 256,
+      "direction": "set",
+      "discipline": "lcdcon",
+      "driver_relative": 0
+    },
+    {
+      "name": "RV9_LCD_SS_BRIGHTNESS",
+      "value": 257,
+      "direction": "set",
+      "discipline": "lcdcon",
+      "driver_relative": 1
+    },
+    {
+      "name": "RV9_NET_SS_CONNECT",
+      "value": 256,
+      "direction": "set",
+      "discipline": "net",
+      "driver_relative": 0
+    },
+    {
+      "name": "RV9_NET_SS_DISCONNECT",
+      "value": 257,
+      "direction": "set",
+      "discipline": "net",
+      "driver_relative": 1
+    },
+    {
+      "name": "RV9_NET_GS_STATUS",
+      "value": 258,
+      "direction": "get",
+      "discipline": "net",
+      "driver_relative": 2
+    },
+    {
+      "name": "RV9_NET_GS_SCAN",
+      "value": 259,
+      "direction": "get",
+      "discipline": "net",
+      "driver_relative": 3
+    },
+    {
+      "name": "RV9_NET_SS_FORGET",
+      "value": 260,
+      "direction": "set",
+      "discipline": "net",
+      "driver_relative": 4
+    },
+    {
+      "name": "RV9_NET_SS_NOWAIT",
+      "value": 261,
+      "direction": "set",
+      "discipline": "net",
+      "driver_relative": 5
+    },
+    {
+      "name": "RV9_NET_SS_SHUTDOWN",
+      "value": 262,
+      "direction": "set",
+      "discipline": "net",
+      "driver_relative": 6
+    },
+    {
+      "name": "RV9_NET_SS_TRY",
+      "value": 263,
+      "direction": "set",
+      "discipline": "net",
+      "driver_relative": 7
+    },
+    {
+      "name": "RV9_PUB_GS_WAIT",
+      "value": 48,
+      "direction": "get",
+      "discipline": "pfm"
+    },
+    {
+      "name": "RV9_PUB_GS_INFO",
+      "value": 49,
+      "direction": "get",
+      "discipline": "pfm"
+    },
+    {
+      "name": "RV9_PUB_GS_MEANING",
+      "value": 50,
+      "direction": "get",
+      "discipline": "pfm"
+    },
+    {
+      "name": "RV9_PIO_SS_DIRECTION",
+      "value": 16,
+      "direction": "set",
+      "discipline": "pio"
+    },
+    {
+      "name": "RV9_PIO_SS_PULL",
+      "value": 17,
+      "direction": "set",
+      "discipline": "pio"
+    },
+    {
+      "name": "RV9_PIO_SS_FREQUENCY",
+      "value": 18,
+      "direction": "set",
+      "discipline": "pio"
+    },
+    {
+      "name": "RV9_PIO_GS_RANGE",
+      "value": 19,
+      "direction": "get",
+      "discipline": "pio"
+    },
+    {
+      "name": "RV9_PIO_SS_EDGE",
+      "value": 20,
+      "direction": "set",
+      "discipline": "pio"
+    },
+    {
+      "name": "RV9_PIO_GS_EVENT",
+      "value": 21,
+      "direction": "get",
+      "discipline": "pio"
+    },
+    {
+      "name": "RV9_PIO_GS_PULSE_US",
+      "value": 24,
+      "direction": "get",
+      "discipline": "pio"
+    },
+    {
+      "name": "RV9_PIO_GS_PULSES",
+      "value": 25,
+      "direction": "get",
+      "discipline": "pio"
+    },
+    {
+      "name": "RV9_PIO_GS_PERIOD_US",
+      "value": 26,
+      "direction": "get",
+      "discipline": "pio"
+    },
+    {
+      "name": "RV9_RBF_SS_FORMAT",
+      "value": 320,
+      "direction": "set",
+      "discipline": "rbf",
+      "driver_relative": 64
+    },
+    {
+      "name": "RV9_RBF_GS_SPACE",
+      "value": 321,
+      "direction": "get",
+      "discipline": "rbf",
+      "driver_relative": 65
+    },
+    {
+      "name": "RV9_SSH_SS_PASSWORD",
+      "value": 272,
+      "direction": "set",
+      "discipline": "ssh",
+      "driver_relative": 16
+    },
+    {
+      "name": "RV9_SSH_GS_INFO",
+      "value": 273,
+      "direction": "get",
+      "discipline": "ssh",
+      "driver_relative": 17
+    },
+    {
+      "name": "RV9_SVG_SS_ROWS",
+      "value": 264,
+      "direction": "set",
+      "discipline": "svgwin",
+      "driver_relative": 8
+    }
+  ],
   "rt_safety": {
     "yes": "bounded; resident in memory that survives flash operations",
     "device": "bounded when the device's file manager and driver operations are both marked real-time safe below",
