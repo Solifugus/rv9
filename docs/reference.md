@@ -191,14 +191,6 @@ running because a program exited is a bad surprise. Declaring a failsafe
 value for a PWM channel is therefore refused at admission: it would be a
 promise that expires at the moment it matters.
 
-## 4. Devices as shipped
-
-> **To write:** all fifteen drivers and their descriptors, with the
-> descriptor options each takes (`opt[0..]`) and its default — for example
-> `/i2c0` takes SDA, SCL and kHz, defaulting to 8, 9 and 100. Note which
-> pins are reserved by the board and refused (`/gpio` refuses the USB
-> console, display and card pins).
-
 ## 5. The module format
 
 > **To write:** the 40-byte header, the magic, the ABI check (the loader

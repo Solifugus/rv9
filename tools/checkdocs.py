@@ -45,6 +45,43 @@ def mentioned(text):
     return set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", text))
 
 
+def structure(text):
+    """
+    Is the document still shaped like a document?
+
+    Added after a duplicated "## 4. Devices as shipped" sat in the reference
+    for six days: an edit inserted a written section *before* the skeleton it
+    was meant to replace, and nothing noticed. The name check could not --
+    every name was mentioned, twice, which it reads as fine.
+
+    So this is a different question from completeness, and a cheap one:
+    numbered headings should appear once each and count from 1 without gaps.
+    It would not catch a section that is merely wrong, and is not meant to.
+    """
+    problems = []
+    seen = {}
+
+    for line in text.splitlines():
+        m = re.match(r"^## (\d+)\. (.+)$", line)
+        if not m:
+            continue
+        n = int(m.group(1))
+        if n in seen:
+            problems.append("section %d appears twice: %r and %r"
+                            % (n, seen[n], m.group(2)))
+        else:
+            seen[n] = m.group(2)
+
+    if seen:
+        want = list(range(1, max(seen) + 1))
+        missing = [n for n in want if n not in seen]
+        if missing:
+            problems.append("no section " +
+                            ", ".join(str(n) for n in missing))
+
+    return problems
+
+
 def main():
     for path in (PROFILE, REFERENCE):
         if not os.path.exists(path):
@@ -55,6 +92,13 @@ def main():
         p = json.load(f)
     with open(REFERENCE) as f:
         text = f.read()
+
+    bad = structure(text)
+    if bad:
+        print("checkdocs: docs/reference.md is malformed:", file=sys.stderr)
+        for b in bad:
+            print("  - %s" % b, file=sys.stderr)
+        return 1
 
     seen = mentioned(text)
 
