@@ -764,10 +764,13 @@ cheap half turned out to be enough, and **band clipping is now done**
 flick: full 56 ms, press 19 ms, release 19 ms   (a tap is press+release)
 ```
 
-A whole tap costs 38 ms against 56 for one full redraw, on the board at
-320x172. Widening to 1024 costs only 1.7x (not 3.2x — the per-band re-parse
-does not care about width), so a tap is about **66 ms at 1024x600** against
-~640 ms for the full screen.
+A whole tap costs 38 ms of **work** against 56 for one full redraw, on the
+board at 320x172 — but the **latency** a finger waits for is **19 ms**, the
+press alone. The release repaint happens after the finger has lifted. Keep the
+two apart: 19 ms is the perceived-response budget, 38 ms is what an
+interaction costs the CPU. Widening to 1024 costs only 1.7x (not 3.2x — the
+per-band re-parse does not care about width), so at 1024x600 that is about
+**33 ms perceived and 66 ms of work**, against ~640 ms for the full screen.
 
 *Corrected 2026-09-29 from 59 / 15 / 15 and a 30 ms tap.* Those were measured
 on a repaint that left two black strips beside the button: a band is cleared

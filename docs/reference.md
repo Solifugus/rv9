@@ -872,6 +872,34 @@ Relative to `RV9_SS_DRIVER_BASE`, and meaningful only on that driver's paths.
 | `RV9_RBF_SS_FORMAT` | +64 | Empty the volume this path is open on. A *file manager's* code. |
 | `RV9_RBF_GS_SPACE` | +65 | `rv9_rbf_space_t`, asked of the volume (`/sd0`, not `/sd0/notes`). |
 
+#### Laying out text on `/w0`
+
+A program that places a label has to know how wide it will be, and on `/w0`
+that is arithmetic rather than a font query. One fixed-width face, glyph cell
+`RV9_GLYPH_W` 10 by `RV9_GLYPH_H` 20, baseline at `RV9_FONT_BASELINE` 15:
+
+| | |
+|---|---|
+| advance per character | `font_size * 10 / 20` — **half the font size** |
+| cell height | `font_size` (the em box, not the cap height) |
+| cell top | `y - font_size * 15 / 20`; SVG puts `y` on the baseline |
+| glyphs | 32..126. Anything else is blank **and still advances** |
+
+`text-anchor` is honoured and is computed on that same advance box, so
+centring a label costs **one attribute** rather than a computed `x` — and the
+attribute is the cheaper thing to emit.
+
+Three details that a layout calculation gets wrong if it assumes otherwise:
+
+- **Leading and trailing whitespace is stripped before anything is measured.**
+  `" OK "` is laid out, anchored and advanced as `"OK"`.
+- **`\n` and `\t` inside the string become spaces.** They advance a cell;
+  nothing wraps.
+- The advance is scaled by the current transform, so it is in user units
+  *after* any `transform` on an enclosing `<g>`.
+
+#### Repainting part of a window
+
 **`RV9_SVG_SS_ROWS` applies to the next document written and then clears
 itself**, because a document is a whole picture by default and a clip left
 set by accident would be a window that never fully repaints again.

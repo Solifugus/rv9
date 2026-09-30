@@ -6417,7 +6417,15 @@ at 320x172:
 flick: full 56 ms, press 19 ms, release 19 ms  (a tap is press+release)
 ```
 
-**A whole tap costs 38 ms against 56 for one full redraw.**
+**A whole tap costs 38 ms of work against 56 for one full redraw — but what a
+finger waits for is 19.** The two are different numbers and conflating them
+overstates the latency by double. Press is 19 ms and release is 19 ms, and the
+finger lifts between them: the person waits for the press, and the release
+repaint happens after they have gone. So **19 ms is the latency budget and
+38 ms is the cost budget**, and a design that spends 38 ms of them against a
+perceived-response target is being twice as pessimistic as the hardware
+deserves. (Pointed out by the whisker session, 2026-09-30, reading this
+paragraph rather than the board.)
 
 *These numbers were 59 / 15 / 15, and a tap 30 ms, until 2026-09-29.* The old
 ones were measured on a repaint that was **visually wrong**, and the
