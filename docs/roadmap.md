@@ -761,13 +761,20 @@ cheap half turned out to be enough, and **band clipping is now done**
 (`RV9_SVG_SS_ROWS`, design §56):
 
 ```
-flick: full 59 ms, press 15 ms, release 15 ms   (a tap is press+release)
+flick: full 56 ms, press 19 ms, release 19 ms   (a tap is press+release)
 ```
 
-A whole tap costs 30 ms against 59 for one full redraw, on the board at
+A whole tap costs 38 ms against 56 for one full redraw, on the board at
 320x172. Widening to 1024 costs only 1.7x (not 3.2x — the per-band re-parse
-does not care about width), so a tap is about **52 ms at 1024x600** against
+does not care about width), so a tap is about **66 ms at 1024x600** against
 ~640 ms for the full screen.
+
+*Corrected 2026-09-29 from 59 / 15 / 15 and a 30 ms tap.* Those were measured
+on a repaint that left two black strips beside the button: a band is cleared
+to the **device** background, not to what the scene drew, so a clipped
+document must carry the backing for its own rows. `flick` did not, and nobody
+saw it because black beside dark navy is not what an eye looks for. Found by
+rendering through `tools/hosttest` and looking. See design §56.
 
 That makes **tap-to-act with a flash to confirm** affordable today. A retained
 object tree with per-object bounding boxes is now an optimisation for later

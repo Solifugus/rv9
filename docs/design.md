@@ -6414,20 +6414,39 @@ again. The panel holds its own framebuffer, so untouched rows simply stay.
 at 320x172:
 
 ```
-flick: full 59 ms, press 15 ms, release 15 ms  (a tap is press+release)
+flick: full 56 ms, press 19 ms, release 19 ms  (a tap is press+release)
 ```
 
-**A whole tap costs 30 ms against 59 for one full redraw.** Four times cheaper
-per draw, and the two draws together still cost half a single full one.
+**A whole tap costs 38 ms against 56 for one full redraw.**
+
+*These numbers were 59 / 15 / 15, and a tap 30 ms, until 2026-09-29.* The old
+ones were measured on a repaint that was **visually wrong**, and the
+correction is worth more than the number. A band is cleared to the *device*
+background before anything is drawn into it -- not to what the scene left
+there -- so `flick`'s clipped documents, which held only the button, repainted
+the rows either side of it in black and left two strips where the scene's
+#10203a had been. They stayed until something redrew the whole window.
+
+Nobody saw it for as long as `flick` existed, because black beside dark navy
+on a 320x172 panel is not what an eye goes looking for. It was found by
+rendering the three documents through `tools/hosttest` and *looking at the
+picture* -- the same lesson as the lumpy circles, which also had the right
+geometry. A geometric check cannot catch this: every shape the document
+contains is in the right place.
+
+So a clipped repaint must carry every pixel of its rows, backing included --
+59 more bytes here, re-parsed once per band, which is the whole of the 4 ms
+each draw gained. **Only the rows, though:** a full-screen background rect
+would be bytes re-parsed per band for pixels outside the clip.
 
 Scaling that to the P4's panel needs one more measurement, because bands are
 full *width*: a 6-band strip costs 0.28 ms at 320 wide and 0.48 ms at 1024 on
 the host -- **1.7x for 3.2x the width**, not 3.2x, because the per-band
-document re-parse does not care how wide the band is. So the board's 15 ms
-strip becomes about **26 ms at 1024 wide, and a tap about 52 ms** on a
+document re-parse does not care how wide the band is. So the board's 19 ms
+strip becomes about **32 ms at 1024 wide, and a tap about 66 ms** on a
 C5-class core, against roughly 640 ms for the full screen. On the P4, less.
 
-Fifty milliseconds is a tap that feels instant. So the interaction model that
+Sixty-odd milliseconds is still a tap that feels immediate. So the interaction model that
 fits this hardware is: **tap to act, a brief flash to confirm, and nothing
 that repaints the whole screen while a finger is moving.** Continuous drag is
 the thing to avoid, not interactivity itself.

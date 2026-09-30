@@ -966,6 +966,24 @@ _Static_assert(sizeof(rv9_pub_info_t) == 56, "rv9_pub_info_t is frozen");
  *
  * Bands are full width, so a tall narrow widget costs what a tall wide one
  * does -- which is a hint to lay widgets out in horizontal bands.
+ *
+ * THE DOCUMENT MUST CARRY EVERY PIXEL OF ITS ROWS.
+ *
+ * A band is cleared to the *device* background (the OPT_BG descriptor
+ * option) before anything is drawn into it -- not to what the scene left
+ * there. So a clipped document holding only the widget repaints the rest of
+ * its rows in the device colour, and whatever the scene had drawn beside the
+ * widget is gone until something redraws the whole window.
+ *
+ * `flick` did exactly that for as long as it existed, leaving two black
+ * strips beside its button, and nobody saw it because black beside dark navy
+ * is not what an eye goes looking for. A geometric check cannot catch it:
+ * every shape in the document is in the right place. It was found by
+ * rendering through tools/hosttest and looking at the picture.
+ *
+ * So a clipped repaint carries its own backing -- but for its rows only. A
+ * full-screen background rect would be bytes re-parsed once per band, for
+ * pixels outside the clip.
  */
 #define RV9_SVG_SS_ROWS       (RV9_SS_DRIVER_BASE + 8)
 

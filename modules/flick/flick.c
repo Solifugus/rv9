@@ -20,6 +20,23 @@
  * The button is drawn at the same place by the same SVG both times, with
  * only its fill changed -- because the point is to measure the redraw, not
  * to demonstrate that a rectangle can be a different colour.
+ *
+ * Both clipped documents carry a backing rect across their whole rows, and
+ * that is not decoration. A band is cleared to the *device* background
+ * (OPT_BG, black here) before anything is drawn into it, not to whatever the
+ * scene left there -- so a document holding only the button repaints the
+ * rows either side of it in black and leaves two strips where the scene's
+ * #10203a used to be. They stay until something redraws the whole window.
+ *
+ * This was in flick for as long as flick existed and nobody saw it, because
+ * black beside dark navy at 320x172 is not what an eye goes looking for. It
+ * was caught by rendering the three documents through tools/hosttest and
+ * looking at the picture -- the same lesson as the lumpy circles, which also
+ * had the right geometry.
+ *
+ * So the rule for any clipped repaint: the document must carry every pixel
+ * of its rows, backing included. Only the rows, though -- a full-screen
+ * background rect would cost bytes that are re-parsed once per band.
  */
 #include "modlib.h"
 
@@ -36,15 +53,18 @@ static const char *SCENE =
       "<text x=\"96\" y=\"126\" font-size=\"12\" fill=\"#fff\">CONFIRM</text>"
     "</svg>";
 
-/* The same button, pressed. Only the fill differs. */
+/* The same button, pressed. Only the fill differs -- and the backing rect,
+   which covers the clipped rows so the band does not come back black. */
 static const char *PRESSED =
     "<svg viewBox=\"0 0 320 172\">"
+      "<rect x=\"0\" y=\"96\" width=\"320\" height=\"48\" fill=\"#10203a\"/>"
       "<rect x=\"40\" y=\"96\" width=\"240\" height=\"48\" fill=\"#8fd0ff\"/>"
       "<text x=\"96\" y=\"126\" font-size=\"12\" fill=\"#123\">CONFIRM</text>"
     "</svg>";
 
 static const char *NORMAL =
     "<svg viewBox=\"0 0 320 172\">"
+      "<rect x=\"0\" y=\"96\" width=\"320\" height=\"48\" fill=\"#10203a\"/>"
       "<rect x=\"40\" y=\"96\" width=\"240\" height=\"48\" fill=\"#2a6b8f\"/>"
       "<text x=\"96\" y=\"126\" font-size=\"12\" fill=\"#fff\">CONFIRM</text>"
     "</svg>";

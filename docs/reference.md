@@ -844,7 +844,17 @@ Relative to `RV9_SS_DRIVER_BASE`, and meaningful only on that driver's paths.
 
 **`RV9_SVG_SS_ROWS` applies to the next document written and then clears
 itself**, because a document is a whole picture by default and a clip left
-set by accident would be a window that never fully repaints again. A full
+set by accident would be a window that never fully repaints again.
+
+**A clipped document must carry every pixel of its rows.** The band is
+cleared to the *device* background — the `OPT_BG` descriptor option — and not
+to what the scene drew there, so a document holding only the widget repaints
+the rest of its rows in the device colour and loses whatever was beside it.
+`flick` did this for as long as it existed, leaving two black strips beside
+its button; no geometric check catches it, because every shape in the
+document is where it should be. Carry the backing for the clipped rows only:
+a full-screen background rect is bytes re-parsed once per band for pixels
+outside the clip. A full
 1024×600 redraw costs about 640 ms on a C5-class core and a 48-row strip
 about 80 ms, which is the difference between tap feedback being affordable
 and not. Bands are full width, so a tall narrow widget costs what a tall wide
