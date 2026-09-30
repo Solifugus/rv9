@@ -45,9 +45,10 @@ LDFLAGS=(-nostdlib -nostartfiles -T"$ROOT/modules/module.ld" -Wl,--gc-sections)
 mkdir -p "$OUT"
 : > "$STORE"
 
-# Same script, different base, for the position-independence check below.
-PROBE_LD="$OUT/module_probe.ld"
-sed 's/^    \. = 0;$/    . = 0x4000;/' "$ROOT/modules/module.ld" > "$PROBE_LD"
+# The probe link, for the position-independence check below: the same script
+# at a different base. Both bases are above the reach of a 12-bit immediate,
+# so neither link can be relaxed into an absolute load -- see module.ld.
+PROBE_BASE=(-Wl,--defsym,RV9_BASE=0x8000)
 
 shopt -s nullglob
 for dir in "$ROOT"/modules/*/; do
@@ -121,8 +122,8 @@ for dir in "$ROOT"/modules/*/; do
     # linked; anything holding an absolute address differs. This catches the
     # constructs that quietly break the loader -- pointer tables built from
     # a switch over string literals being the one that actually bit us.
-    "$CC" "${CFLAGS[@]}" -nostdlib -nostartfiles -T"$PROBE_LD" \
-        -Wl,--gc-sections -o "$OUT/$name.probe.elf" "${srcs[@]}"
+    "$CC" "${CFLAGS[@]}" "${LDFLAGS[@]}" "${PROBE_BASE[@]}" \
+        -o "$OUT/$name.probe.elf" "${srcs[@]}"
     "$OBJCOPY" -O binary "$OUT/$name.probe.elf" "$OUT/$name.probe.bin"
 
     if ! cmp -s "$OUT/$name.bin" "$OUT/$name.probe.bin"; then
@@ -132,6 +133,9 @@ for dir in "$ROOT"/modules/*/; do
         echo "  Usual causes: a table of pointers (often a switch over" >&2
         echo "  string literals), or a static array of function pointers." >&2
         echo "  Use if/else returning literals, or index into a char array." >&2
+        echo "  Plain 'static const' data is fine -- a byte table, a string" >&2
+        echo "  blob with integer offsets, inline char[N] in a struct. It is" >&2
+        echo "  addresses in rodata that break this, not constants." >&2
         exit 1
     fi
 

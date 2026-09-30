@@ -35,13 +35,22 @@
  * had the right geometry.
  *
  * So the rule for any clipped repaint: the document must carry every pixel
- * of its rows, backing included. Only the rows, though -- a full-screen
- * background rect would cost bytes that are re-parsed once per band.
+ * of its *bands*, backing included.
+ *
+ * Bands and not rows. The clip snaps outward to a band boundary, so asking
+ * for rows 100..140 repaints 96..143 and a backing over exactly 100..140
+ * leaves a strip at each end. This module is right only because BTN_Y0 and
+ * BTN_Y1 are multiples of BAND_ROWS on purpose -- see the note on them.
+ *
+ * A full-screen background rect is the other way to be wrong: bytes
+ * re-parsed once per band for pixels outside the clip entirely.
  */
 #include "modlib.h"
 
 /* Where the button lives. Rows chosen to sit on band boundaries so the clip
-   costs exactly the bands the button occupies and not one more. */
+   costs exactly the bands the button occupies and not one more -- and so the
+   backing rect above covers whole bands, which is what the rule actually
+   requires. A button at 100..140 would need its backing at 96..144. */
 #define BTN_Y0   96
 #define BTN_Y1   144
 

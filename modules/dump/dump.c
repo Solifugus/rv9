@@ -17,10 +17,14 @@
 
 typedef struct { uint8_t buf[WIDTH]; } dump_statics_t;
 
-/* Arithmetic rather than a lookup table: a `static const` array inside a
-   function is a variable at a fixed address, and a module that refers to
-   one is no longer position independent. The linker says so, which is the
-   rule earning its keep. */
+/* Arithmetic rather than a lookup table. It had to be, until 2026-09-30:
+   modules were linked at base 0, where the linker relaxes the PC-relative
+   pair into an absolute load, so *any* named `static const` object failed
+   the position-independence check. This comment used to blame the shape --
+   "a static const array is a variable at a fixed address" -- which was the
+   symptom and not the cause. Modules now link above the immediate's reach
+   and a table like this would be accepted; the arithmetic stays because it
+   works, not because it must. See modules/module.ld. */
 static char nybble(uint8_t v)
 {
     v &= 0xF;

@@ -797,6 +797,102 @@ knob. Keeping the level at INFO and filtering in the console sink fixes it, at
 the cost of formatting every INFO line whether or not anybody prints it — real
 CPU here, so it is a trade to decide rather than an obvious win.
 
+### Three defects in the window, found by review and fixed — 2026-09-30
+
+The whisker project (`~/development/whisker`) read this driver as a substrate
+for a widget layer and asked harder questions of it than writing pictures by
+hand ever had. Three things came out. Two were defects nobody had met; the
+third was a rule that had been costing more than it was worth.
+
+All three now have a reproduction in `tools/hosttest/svgwin_test.c`, which
+runs in `tools/hosttest/run.sh`. Two of its checks failed when it was written.
+
+**A document over `SRC_MAX` wedged the window for good.** Not "the picture is
+truncated": the path stopped answering for the life of the open, and said
+nothing. The terminator was looked for in the *buffer* — `memcmp(&s->src[s->len
+- 6], "</svg>", 6)` — and past `SRC_MAX` the buffer stops changing, so those six
+bytes were frozen mid-element and could never be `</svg>` again. `render` was
+never called, `len` was never reset, and every later document on that path was
+swallowed too. There was no diagnostic either: the *"document over %d bytes"*
+warning sat inside the branch that no longer ran.
+
+The terminator is now matched against the **stream**, with a match counter
+rather than a buffer compare — no backtracking is needed, because `</svg>` has
+no repeated prefix beyond its first byte. An overflowed document is **dropped**
+rather than half-drawn: half a picture is a silent wrong answer, where an
+unchanged screen and a line in the log is a legible one. On the board, with a
+4,195-byte document:
+
+```
+W rv9-svgwin: document over 4096 bytes; dropped, screen unchanged
+```
+
+and the two documents written after it both drew.
+
+**A raw `<` in text content never returned.** `<text>a < b</text>` did not draw
+wrongly — it hung, inside `svgwin_write`, holding the lock, on one core.
+`attr()` scanned an attribute name, stopped on `/` or `>`, and then did
+`if (*p != '=') continue;` *without advancing `p`*. A raw `<` makes the tag
+scanner read the rest of the text as a tag, and every element ends `</…>`, so
+the scan always reached that `/` and spun there. Measured at three seconds and
+still going, where a whole frame is 0.3 ms.
+
+Fixed by stepping over a byte the name scan refused to take, which restores the
+invariant the loop needs: every iteration advances `p`. Verified on the board —
+the document returns and the shell is still there.
+
+Worth recording beside it, because it decides what a caller must do:
+**entities are not decoded.** `a &lt; b` draws the characters `&`, `l`, `t`,
+`;` on the panel, measured. So a caller cannot escape text — it can only keep
+`<` out of it — and a program generating a label from data has to know that
+before it writes. Text outside 32..126 is the quiet version: it advances a cell
+and draws nothing.
+
+**The position-independence rule was stricter than it needed to be, and the fix
+was free.** `modules/dump/dump.c` gave up a hex lookup table with the note that
+*"a `static const` array inside a function is a variable at a fixed address"*.
+That was the symptom. The cause was the **link base**.
+
+Modules linked at `. = 0`, where the linker relaxes the PC-relative pair
+`-mcmodel=medany` emits into a single absolute load, because the address fits
+in a 12-bit immediate:
+
+```
+linked at 0:        linked at 0x4000:
+  li   s0,96          auipc s0,0x0
+                      addi  s0,s0,92     # 406c <TREE>
+```
+
+So the *shipped* blob was the one holding an absolute address, and the
+double-link check was right to refuse it — but it refused the **shape** rather
+than the base, so any named `static const` object failed: a byte table, a
+string blob with integer offsets, a struct array of inline `char[N]`. None of
+them holds a pointer.
+
+Modules now link at `0x4000` and the probe at `0x8000`, both above the
+immediate's reach, via `RV9_BASE` in `modules/module.ld` — overridable with
+`--defsym`, so the probe no longer needs a `sed`-patched copy of the script.
+Measured over all 84 modules:
+
+```
+today:    pass 84, fail 0; 71,732 bytes in all
+nonzero:  pass 84, fail 0; 71,732 bytes in all
+--no-relax: pass 84, fail 0; 78,572 bytes in all
+```
+
+Byte for byte identical, and the store is unchanged at 79,752 bytes. The check
+keeps its teeth: a table of `const char *` and a table of function pointers
+still fail — confirmed by building one deliberately, which stopped the build.
+`--no-relax` also works and costs 9.5%, which is why it is not the answer.
+
+Nothing in the store needed this: no module declares `static const` data at
+all, which is why it had never been met. It is done now because the thing that
+will want it — a widget tree, a font table, a units table — is being designed,
+and because the comment in `dump.c` was teaching a rule that was not true.
+
+The evidence programs are in
+`~/development/whisker/tools/evidence/module_shapes` and run against this tree.
+
 ### Waiting on a normal network
 
 - ~~**Short SSH sessions lose their output on a poor link**~~ (phase 9).

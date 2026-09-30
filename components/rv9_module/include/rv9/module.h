@@ -981,9 +981,16 @@ _Static_assert(sizeof(rv9_pub_info_t) == 56, "rv9_pub_info_t is frozen");
  * every shape in the document is in the right place. It was found by
  * rendering through tools/hosttest and looking at the picture.
  *
- * So a clipped repaint carries its own backing -- but for its rows only. A
- * full-screen background rect would be bytes re-parsed once per band, for
- * pixels outside the clip.
+ * So a clipped repaint carries its own backing -- over **the bands, not the
+ * rows**. The clip snaps outward to a band boundary at the low end and the
+ * last band runs to its full height at the other, so asking for rows 100..140
+ * repaints 96..143: a backing rect covering exactly 100..140 leaves a strip of
+ * device colour at each end. `flick` is correct only because it picks
+ * band-aligned rows on purpose.
+ *
+ * Round the backing out to multiples of BAND_ROWS, or pick band-aligned rows
+ * as `flick` does. What is not wanted is a full-screen background rect: those
+ * are bytes re-parsed once per band, for pixels outside the clip entirely.
  */
 #define RV9_SVG_SS_ROWS       (RV9_SS_DRIVER_BASE + 8)
 

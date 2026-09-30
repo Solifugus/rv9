@@ -6434,10 +6434,23 @@ picture* -- the same lesson as the lumpy circles, which also had the right
 geometry. A geometric check cannot catch this: every shape the document
 contains is in the right place.
 
-So a clipped repaint must carry every pixel of its rows, backing included --
-59 more bytes here, re-parsed once per band, which is the whole of the 4 ms
-each draw gained. **Only the rows, though:** a full-screen background rect
-would be bytes re-parsed per band for pixels outside the clip.
+So a clipped repaint must carry every pixel of its **bands**, backing included
+-- 59 more bytes here, re-parsed once per band, which is the whole of the 4 ms
+each draw gained.
+
+**Bands, not rows**, and the difference is a second trap inside the first. The
+clip snaps outward to a band boundary at the low end and the last band runs to
+its full height at the other, so asking for rows 100..140 repaints 96..143 and
+a backing covering exactly 100..140 leaves a strip of device colour at each
+end. `flick` is right only because it chooses band-aligned rows deliberately;
+a caller that computes rows from a widget's geometry will not. Round the
+backing out to multiples of BAND_ROWS. (Found 2026-09-30 by the whisker
+session, by writing the rule down as a test with a control --
+`tools/hosttest/svgwin_test.c` check 3 -- which is a better way to find out
+that a rule is half-right than reading it again.)
+
+What is still not wanted is a full-screen background rect: those are bytes
+re-parsed per band for pixels outside the clip entirely.
 
 Scaling that to the P4's panel needs one more measurement, because bands are
 full *width*: a 6-band strip costs 0.28 ms at 320 wide and 0.48 ms at 1024 on

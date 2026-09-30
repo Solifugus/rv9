@@ -50,6 +50,7 @@ typedef struct {
     char     *src;        /* the document, as written */
     size_t    len;
     bool      overflow;
+    uint8_t   term;       /* how much of "</svg>" has matched, in the STREAM */
 
     /* Rows the next document should repaint; 0,0 means all of them.
        See RV9_SVG_SS_ROWS. */
@@ -128,6 +129,21 @@ static bool attr(const char *tag, const char *tend, const char *want,
         const char *ns = p;
         while (p < tend && *p != '=' && !is_space(*p) && *p != '>' && *p != '/') p++;
         size_t nl = (size_t)(p - ns);
+
+        /*
+         * Step over a byte the name scan refused to take, or this loop does
+         * not terminate.
+         *
+         * The scan stops on '/' and '>' as well as on '=' and space, so p
+         * can come to rest on a byte no later step consumes -- and the
+         * `continue` below then restarts the iteration on the same byte,
+         * forever, inside svgwin_write with the lock held, on one core.
+         *
+         * Any raw '<' in content reaches it: the tag scanner reads the rest
+         * of the text as a tag, and every element ends with a '/'. So
+         * `<text>a < b</text>` did not draw wrongly -- it never returned.
+         */
+        if (nl == 0) { if (p < tend) p++; continue; }
 
         while (p < tend && is_space(*p)) p++;
         if (p >= tend || *p != '=') continue;
@@ -1225,6 +1241,7 @@ static rv9_io_err_t svgwin_open(rv9_dev_t *dev, uint32_t mode)
     }
 
     s->len = 0;
+    s->term = 0;
     s->overflow = false;
     s->clip_y0 = 0;
     s->clip_y1 = 0;          /* 0,0 means "all of it" */
@@ -1257,6 +1274,7 @@ static rv9_io_err_t svgwin_write(rv9_dev_t *dev, const void *buf, size_t len,
     if (s == NULL || s->src == NULL) return RV9_IO_ERR_IO;
 
     const char *in = (const char *)buf;
+    static const char TERM[6] = { '<', '/', 's', 'v', 'g', '>' };
 
     rv9_lock_acquire(s->lock);
 
@@ -1267,12 +1285,41 @@ static rv9_io_err_t svgwin_write(rv9_dev_t *dev, const void *buf, size_t len,
             s->overflow = true;
         }
 
-        if (s->len >= 6 && memcmp(&s->src[s->len - 6], "</svg>", 6) == 0) {
+        /*
+         * The terminator is looked for in the *stream*, not in the buffer.
+         *
+         * It used to be `memcmp(&s->src[s->len - 6], "</svg>", 6)`, which
+         * works right up until a document passes SRC_MAX -- and then the
+         * buffer stops changing, so those six bytes are frozen mid-element
+         * and can never be "</svg>" again. render() was never called, len
+         * was never reset, and every later document on that path was
+         * swallowed too. The window went quiet for the life of the open
+         * path, and silently: the warning below sat inside the branch that
+         * no longer ran.
+         *
+         * No backtracking is needed because "</svg>" has no repeated prefix
+         * beyond its first byte, so the only partial match a mismatch can
+         * start is at '<'.
+         */
+        if (in[i] == TERM[s->term]) s->term++;
+        else                        s->term = (in[i] == '<') ? 1 : 0;
+
+        if (s->term == 6) {
+            s->term = 0;
             if (s->overflow) {
-                ESP_LOGW(TAG, "document over %d bytes; drew what fitted",
-                         SRC_MAX);
+                /*
+                 * Dropped rather than drawn. Half a picture is a silent
+                 * wrong answer -- it looks like a picture, and nothing on
+                 * the glass says it is short -- where an unchanged screen
+                 * and a line in the log is a legible one.
+                 */
+                ESP_LOGW(TAG, "document over %d bytes; dropped, screen "
+                              "unchanged", SRC_MAX);
+                s->clip_y0 = s->clip_y1 = 0;   /* the clip was one-shot and
+                                                  this document consumed it */
+            } else {
+                render(s);
             }
-            render(s);
             s->len = 0;
             s->overflow = false;
         }

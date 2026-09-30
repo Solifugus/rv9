@@ -377,6 +377,36 @@ That check is why `have` walks a string of device names with `m_word` instead
 of indexing an array of `const char *`. The array version was correct C, read
 better, and was not position independent.
 
+**Plain `static const` *data* is fine**, and that is worth stating because it
+was not true until 2026-09-30 and the tree still carries the scar. Modules
+used to link at base 0, where the linker relaxes the PC-relative pair
+`-mcmodel=medany` emits into a single absolute load — the address fits in a
+12-bit immediate:
+
+```
+linked at 0:        linked at 0x4000:
+  li   s0,96          auipc s0,0x0
+                      addi  s0,s0,92     # 406c <TREE>
+```
+
+So the *shipped* blob held the absolute address and the check was right to
+refuse it — but it refused the shape rather than the base, and **any** named
+`static const` object failed: a byte table, a string blob with integer
+offsets, a struct array of inline `char[N]`. None of them holds a pointer.
+`dump` gave up a hex lookup table over this and blamed the wrong cause in its
+own comment.
+
+Modules now link at `0x4000` and the probe at `0x8000`, both above the
+immediate's reach. All 84 modules build **byte for byte identically** either
+way — 71,732 bytes in total — and the check keeps its teeth: a table of
+`const char *` and a table of function pointers still fail, because those
+hold real addresses in rodata. The base is `RV9_BASE` in `modules/module.ld`,
+overridable with `--defsym` so the probe needs no second copy of the script.
+
+*Found by the whisker session, which asked why a widget tree could not be a
+`static const` array and did not accept the comment in `dump.c` as the
+answer.*
+
 ## 6. The manifest
 
 A module's TLV manifest is what it says it needs. RV-9 reads it **before the
@@ -852,9 +882,15 @@ to what the scene drew there, so a document holding only the widget repaints
 the rest of its rows in the device colour and loses whatever was beside it.
 `flick` did this for as long as it existed, leaving two black strips beside
 its button; no geometric check catches it, because every shape in the
-document is where it should be. Carry the backing for the clipped rows only:
-a full-screen background rect is bytes re-parsed once per band for pixels
-outside the clip. A full
+document is where it should be.
+
+**Carry the backing over the bands, not the rows.** The clip snaps outward to
+a band boundary and the last band runs to its full height, so asking for rows
+100–140 repaints 96–143 and a backing covering exactly 100–140 leaves a strip
+of device colour at each end. Round out to multiples of 8, or choose
+band-aligned rows as `flick` does. What is *not* wanted is a full-screen
+background rect: those are bytes re-parsed once per band for pixels outside
+the clip entirely. A full
 1024×600 redraw costs about 640 ms on a C5-class core and a 48-row strip
 about 80 ms, which is the difference between tap feedback being affordable
 and not. Bands are full width, so a tall narrow widget costs what a tall wide
