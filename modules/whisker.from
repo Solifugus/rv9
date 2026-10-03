@@ -1,0 +1,24 @@
+# Where modules/whisker.h came from.
+#
+# It is a byte-for-byte copy, so the provenance cannot live inside it without
+# breaking the one check that matters. It lives here instead.
+#
+# Vendored rather than included from ~/development/whisker, and that is a
+# decision rather than a convenience: an include path into another working
+# tree breaks every clean checkout of this repository, which is on GitHub and
+# cloned by people who do not have whisker at all. A copy is a dependency made
+# explicit and pinned. A module built against an older copy is not drift --
+# that is what pinning is for.
+#
+# To see whether this copy is current, if you have the upstream:
+#
+#     diff modules/whisker.h ~/development/whisker/src/whisker.h
+#
+# Deliberately not in tools/hosttest/run.sh: a gate that passes or fails on
+# what happens to be on the machine is worse than no gate.
+
+upstream  = ~/development/whisker/src/whisker.h
+commit    = d6b24c4
+dated     = 2026-10-02
+subject   = input: a field you can type into, with a mouse, today
+refreshed = 2026-10-02
