@@ -40,7 +40,14 @@ static const char *TAG = "rv9-svgwin";
 #define SRC_MAX    4096
 #define BAND_ROWS  8
 #define MAX_PTS    256
-#define MAX_CONTOURS 16
+/*
+ * Subpaths in one <path>. Was 16, which a 36-key keyboard drawn as one path
+ * walked straight past -- and the twenty keys it lost were lost silently, so
+ * it read as a styling choice rather than as a defect. 64 costs 512 bytes of
+ * the window's own heap (the buffer moved off the stack with it), and at four
+ * points a subpath it is MAX_PTS that binds next, at 64 quads exactly.
+ */
+#define MAX_CONTOURS 64
 #define MAX_DEPTH  8
 
 typedef struct {
@@ -59,6 +66,11 @@ typedef struct {
     uint16_t *band;       /* w * BAND_ROWS */
     uint16_t *cov;        /* w */
     int32_t  *pts;        /* MAX_PTS * 2, 8.8 fixed */
+    rcontour_t *cs;       /* MAX_CONTOURS, beside pts and for the same reason:
+                             a per-caller stack cost would be paid by every
+                             program that writes to this window */
+    uint16_t  lost_c;     /* subpaths dropped this document, and points */
+    uint16_t  lost_p;
 
     rv9_lock_t lock;
 } svgwin_t;
@@ -505,6 +517,7 @@ typedef struct {
     int         max, n;
     rcontour_t *cs;
     int         max_c, nc;
+    int         lost_c, lost_p;   /* refused for want of room, not for shape */
     int         start;          /* first point index of the open contour */
     int32_t     cx, cy;         /* current point */
     int32_t     ox, oy;         /* where this subpath began */
@@ -514,7 +527,7 @@ typedef struct {
 
 static void emit(pathbuf_t *pb, int32_t x, int32_t y)
 {
-    if (pb->n >= pb->max) return;
+    if (pb->n >= pb->max) { pb->lost_p++; return; }
     pb->pts[2 * pb->n] = x;
     pb->pts[2 * pb->n + 1] = y;
     pb->n++;
@@ -525,6 +538,10 @@ static void emit(pathbuf_t *pb, int32_t x, int32_t y)
 static void end_contour(pathbuf_t *pb, bool closed)
 {
     int n = pb->n - pb->start;
+
+    /* Out of contour slots is a different thing from too short to be one,
+       and only the first is worth telling anybody about. */
+    if (n >= 2 && pb->nc >= pb->max_c) pb->lost_c++;
 
     if (n >= 2 && pb->nc < pb->max_c) {
         pb->cs[pb->nc].n = n;
@@ -742,7 +759,8 @@ static int parse_flag(const char *p, const char *end, const char **out)
 }
 
 static int parse_path(const char *d, size_t dn, const gstate_t *g,
-                      int32_t *pts, int max_pts, rcontour_t *cs, int max_c)
+                      int32_t *pts, int max_pts, rcontour_t *cs, int max_c,
+                      int *lost_c, int *lost_p)
 {
     pathbuf_t pb;
     memset(&pb, 0, sizeof(pb));
@@ -906,13 +924,24 @@ static int parse_path(const char *d, size_t dn, const gstate_t *g,
             break;
         }
 
-        if (pb.n >= pb.max) break;
+        /*
+         * Out of points. The loop leaves here rather than at `end`, so this
+         * is where the truncation is, and counting it in emit() would miss
+         * it entirely: emit is simply never called again.
+         */
+        if (pb.n >= pb.max) {
+            while (p < end && (is_space(*p) || *p == ',')) p++;
+            if (p < end) pb.lost_p++;
+            break;
+        }
     }
 
     #undef UX
     #undef UY
 
     end_contour(&pb, false);
+    if (lost_c) *lost_c = pb.lost_c;
+    if (lost_p) *lost_p = pb.lost_p;
     return pb.nc;
 }
 
@@ -922,15 +951,18 @@ static void do_path(rband_t *b, const char *t, const char *te,
     const char *v; size_t vn;
     if (!attr(t, te, "d", &v, &vn)) return;
 
-    rcontour_t cs[MAX_CONTOURS];
-    int nc = parse_path(v, vn, g, s->pts, MAX_PTS, cs, MAX_CONTOURS);
+    int lost_c = 0, lost_p = 0;
+    int nc = parse_path(v, vn, g, s->pts, MAX_PTS, s->cs, MAX_CONTOURS,
+                        &lost_c, &lost_p);
+    if (lost_c > s->lost_c) s->lost_c = (uint16_t)lost_c;
+    if (lost_p > s->lost_p) s->lost_p = (uint16_t)lost_p;
     if (nc <= 0) return;
 
     if (g->fill != NO_PAINT) {
-        rv9_raster_fill_n(b, s->pts, cs, nc, g->evenodd, (uint16_t)g->fill);
+        rv9_raster_fill_n(b, s->pts, s->cs, nc, g->evenodd, (uint16_t)g->fill);
     }
     if (g->stroke != NO_PAINT) {
-        rv9_raster_stroke_n(b, s->pts, cs, nc, fmul(g->stroke_w, g->sx),
+        rv9_raster_stroke_n(b, s->pts, s->cs, nc, fmul(g->stroke_w, g->sx),
                             (uint16_t)g->stroke);
     }
 }
@@ -1151,6 +1183,10 @@ static void render(svgwin_t *s)
 
     uint64_t t0 = rv9_time_us();
 
+    /* Cleared here rather than after the warning, so the counts describe the
+       document that was last drawn and can still be read afterwards. */
+    s->lost_c = s->lost_p = 0;
+
     /* Ours now. The console will repaint itself in full whenever it next
        has something to say, which is what makes the picture stay up in
        the meantime rather than being eaten a row at a time. */
@@ -1187,6 +1223,22 @@ static void render(svgwin_t *s)
 
     /* One-shot: the next document is a whole picture unless told otherwise. */
     s->clip_y0 = s->clip_y1 = 0;
+
+    /*
+     * Said once for the document rather than once per band, and said at all
+     * because the alternative is what a 36-key keyboard drawn as one <path>
+     * used to get: sixteen keys outlined, twenty not, every label present,
+     * and a log line saying it drew fine. A localised silent truncation is
+     * worse than the SRC_MAX one it resembles -- it reads as a bug in
+     * whichever widget went missing, or as a styling choice, rather than as
+     * a problem with the document.
+     */
+    if (s->lost_c || s->lost_p) {
+        ESP_LOGW(TAG, "path truncated: %u subpath(s) past %d, %u point(s) "
+                      "past %d -- the rest of the document drew",
+                 (unsigned)s->lost_c, MAX_CONTOURS,
+                 (unsigned)s->lost_p, MAX_PTS);
+    }
 
     ESP_LOGI(TAG, "drew %u bytes in %u ms", (unsigned)s->len,
              (unsigned)((rv9_time_us() - t0) / 1000));
@@ -1231,12 +1283,15 @@ static rv9_io_err_t svgwin_open(rv9_dev_t *dev, uint32_t mode)
     s->band = rv9_alloc_dma((size_t)s->w * BAND_ROWS * sizeof(uint16_t));
     s->cov  = rv9_alloc((size_t)s->w * sizeof(uint16_t));
     s->pts  = rv9_alloc(MAX_PTS * 2 * sizeof(int32_t));
+    s->cs   = rv9_alloc(MAX_CONTOURS * sizeof(rcontour_t));
 
-    if (s->src == NULL || s->band == NULL || s->cov == NULL || s->pts == NULL) {
+    if (s->src == NULL || s->band == NULL || s->cov == NULL ||
+        s->pts == NULL || s->cs == NULL) {
         rv9_free(s->src);  s->src = NULL;
         rv9_free(s->band); s->band = NULL;
         rv9_free(s->cov);  s->cov = NULL;
         rv9_free(s->pts);  s->pts = NULL;
+        rv9_free(s->cs);   s->cs = NULL;
         return RV9_IO_ERR_NOMEM;
     }
 
@@ -1257,6 +1312,7 @@ static rv9_io_err_t svgwin_close(rv9_dev_t *dev)
     rv9_free(s->band); s->band = NULL;
     rv9_free(s->cov);  s->cov = NULL;
     rv9_free(s->pts);  s->pts = NULL;
+    rv9_free(s->cs);   s->cs = NULL;
     return RV9_IO_OK;
 }
 
@@ -1363,6 +1419,16 @@ static rv9_io_err_t svgwin_getstat(rv9_dev_t *dev, uint32_t code, void *arg)
         *(uint32_t *)arg = ((uint32_t)s->h << 16) | (uint32_t)s->w;
         return RV9_IO_OK;
     }
+
+    if (code == RV9_SVG_GS_LIMITS && arg) {
+        rv9_svg_limits_t *l = (rv9_svg_limits_t *)arg;
+        l->src_max      = SRC_MAX;
+        l->pts_max      = MAX_PTS;
+        l->contours_max = MAX_CONTOURS;
+        l->depth_max    = MAX_DEPTH;
+        return RV9_IO_OK;
+    }
+
     return RV9_IO_ERR_UNSUPPORTED;
 }
 

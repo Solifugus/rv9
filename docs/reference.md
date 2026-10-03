@@ -898,6 +898,39 @@ Three details that a layout calculation gets wrong if it assumes otherwise:
 - The advance is scaled by the current transform, so it is in user units
   *after* any `transform` on an enclosing `<g>`.
 
+#### The window's ceilings
+
+Four, and they are compile-time constants on the C5 that will not be constants
+on the P4 — so **ask rather than assume**. `getstat(RV9_SVG_GS_LIMITS)` fills
+an `rv9_svg_limits_t`:
+
+| field | C5 today | |
+|---|---|---|
+| `src_max` | 4,096 | Bytes in one document, terminator included. |
+| `pts_max` | 256 | Points in one `<path>`. |
+| `contours_max` | 64 | Subpaths in one `<path>`. |
+| `depth_max` | 8 | Nested `<g>`. |
+
+**Exceeding one truncates the path and logs it**, once per document:
+
+```
+W rv9-svgwin: path truncated: 8 subpath(s) past 64, 0 point(s) past 256
+              -- the rest of the document drew
+```
+
+That warning exists because the silence was worse than the loss. `contours_max`
+was 16, and a 36-key keyboard drawn as one `<path>` came out with sixteen keys
+outlined, twenty not, every label present, and a log line saying it drew fine.
+A truncated path is *localised* in a way an oversized document is not: it reads
+as a bug in whichever widget went missing, or as a styling choice, rather than
+as a problem with the document. A program writing pictures by hand finds these
+limits by drawing one too big and looking at it; a program **generating** them
+cannot, which is why they are askable.
+
+Note which one binds. At four points a subpath — a rectangle — `pts_max` is
+reached at 64 subpaths, the same place `contours_max` is. A path of lines gets
+128 two-point subpaths before points run out.
+
 #### Repainting part of a window
 
 **`RV9_SVG_SS_ROWS` applies to the next document written and then clears

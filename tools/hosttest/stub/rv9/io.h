@@ -13,12 +13,17 @@ typedef enum { RV9_IO_OK=0, RV9_IO_ERR_NOTFOUND, RV9_IO_ERR_BADPATH,
  * still match. If a code is renumbered there and not here, the host test
  * goes on passing while exercising a different code than the firmware uses.
  * Kept because pulling the real header in drags the whole module ABI into a
- * build that only wants a driver -- but if this list grows much further,
- * that trade stops being worth it.
+ * build that only wants a driver -- but the hazard is no longer only a
+ * comment: tools/checkstub.py reads both files and fails run.sh if any name
+ * below disagrees with rv9/module.h. The list may grow; it may not drift.
  */
 #define RV9_GS_SIZE 4
 #define RV9_SS_DRIVER_BASE 256
 #define RV9_SVG_SS_ROWS (RV9_SS_DRIVER_BASE + 8)
+#define RV9_SVG_GS_LIMITS (RV9_SS_DRIVER_BASE + 9)
+typedef struct __attribute__((packed)) {
+  uint32_t src_max, pts_max, contours_max, depth_max;
+} rv9_svg_limits_t;
 struct rv9_dev;
 typedef struct rv9_driver {
   const char *name;

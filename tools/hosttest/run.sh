@@ -47,6 +47,11 @@ $CC $FLAGS -o "$OUT/svgwin_test" "$HERE/svgwin_test.c" "$OUT/raster.c" "$OUT/fon
 # were defects when the file was written; this is what keeps them fixed.
 "$OUT/svgwin_test" | grep -v '^I rv9-svgwin'
 
+# The stub the driver is built against mirrors a few codes from module.h. A
+# renumbered one would not break this build -- it would quietly exercise the
+# wrong code -- so the copies are compared rather than trusted.
+python3 "$HERE/../checkstub.py"
+
 # The target profile is generated from the sources. A stale one tells a
 # compiler something that is no longer true, which is worse than none.
 python3 "$HERE/../mkprofile.py" --check

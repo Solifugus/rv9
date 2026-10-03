@@ -12,3 +12,6 @@ dependencies.lock
 # The soak harness lives outside the repo: it holds the network it tests
 # against, and a masking table is still the credentials written down.
 tools/soak.py
+
+# checkstub.py imports mkprofile.py
+__pycache__/

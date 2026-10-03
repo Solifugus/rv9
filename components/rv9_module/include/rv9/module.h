@@ -994,6 +994,32 @@ _Static_assert(sizeof(rv9_pub_info_t) == 56, "rv9_pub_info_t is frozen");
  */
 #define RV9_SVG_SS_ROWS       (RV9_SS_DRIVER_BASE + 8)
 
+/*
+ * The window's four ceilings, asked for rather than discovered. getstat,
+ * arg is an rv9_svg_limits_t.
+ *
+ * A program that writes a picture by hand finds these by drawing one that is
+ * too big and looking at it. A program that *generates* pictures cannot: it
+ * has to know before it writes, and whisker had to learn MAX_CONTOURS by
+ * losing twenty keys off a keyboard. They are compile-time constants here and
+ * will not be on the P4, so a generator that reads them is a generator that
+ * keeps working.
+ *
+ * Exceeding any of them is now logged (see RV9_SVG_SS_ROWS on why a quiet
+ * truncation is the worst of the options), but a log line is a diagnosis
+ * after the fact. This is the number you need beforehand.
+ */
+#define RV9_SVG_GS_LIMITS     (RV9_SS_DRIVER_BASE + 9)
+
+typedef struct __attribute__((packed)) {
+    uint32_t src_max;       /* bytes in one document, terminator included */
+    uint32_t pts_max;       /* points in one <path> */
+    uint32_t contours_max;  /* subpaths in one <path> */
+    uint32_t depth_max;     /* nested <g> */
+} rv9_svg_limits_t;
+
+_Static_assert(sizeof(rv9_svg_limits_t) == 16, "window limits are 16 bytes");
+
 #define RV9_LCD_SS_CLEAR      (RV9_SS_DRIVER_BASE + 0)
 #define RV9_LCD_SS_BRIGHTNESS (RV9_SS_DRIVER_BASE + 1)   /* 0..100 percent */
 

@@ -9,6 +9,7 @@
  *   1  a document over SRC_MAX must not wedge the path
  *   2  a raw '<' in text content must return
  *   3  a clipped repaint must carry backing for its whole *bands*
+ *   4  a <path> past MAX_CONTOURS says so, and under it draws everything
  *
  * 1 and 2 both failed when this was written. The window swallowed every
  * document after an oversized one, for the life of the open path and without
@@ -185,6 +186,68 @@ static void t_band_backing(rv9_dev_t *dev)
     ok(at(10, 142) == navy, "and keeps row 142, at the other end");
 }
 
+/*
+ * 4. A <path> with more subpaths than MAX_CONTOURS must not go quietly.
+ *
+ *    It did. A 36-key keyboard drawn as one path lost twenty keys, kept all
+ *    thirty-six labels, and logged that it drew fine -- which reads as a
+ *    styling choice rather than a defect. end_contour dropped the overflow
+ *    down the same branch as a contour too short to be one.
+ *
+ *    The control is the row below it: at MAX_CONTOURS exactly, nothing is
+ *    lost. Without that, "it reports a loss" is satisfied by reporting one
+ *    always.
+ */
+static void t_contours(rv9_dev_t *dev)
+{
+    static char doc[8192];
+    svgwin_t *s = (svgwin_t *)dev->drv_state;
+    int n, i;
+
+    /* Two-point subpaths, so the contour cap binds before the point cap --
+       a quad subpath would hit MAX_PTS at 64 and test the other limit. */
+    for (int over = 0; over <= 1; over++) {
+        int subs = over ? MAX_CONTOURS + 8 : MAX_CONTOURS;
+
+        n = snprintf(doc, sizeof doc, "<svg viewBox=\"0 0 320 172\"><path d=\"");
+        for (i = 0; i < subs; i++)
+            n += snprintf(doc + n, sizeof doc - n, "M%d 10h4", i * 4 % 300);
+        snprintf(doc + n, sizeof doc - n, "\" stroke=\"#fff\"/></svg>");
+
+        s->lost_c = s->lost_p = 0;
+        put(dev, doc);
+
+        if (over)
+            ok(s->lost_c == 8, "8 subpaths past the cap are reported as 8");
+        else
+            ok(s->lost_c == 0 && s->lost_p == 0,
+               "a path at the cap exactly reports nothing lost");
+    }
+
+    /*
+     * The limits a generator asks for must be the limits it then meets. The
+     * struct is mirrored in the host stub, and a reordered field there would
+     * otherwise pass every other check in this file.
+     */
+    {
+        rv9_svg_limits_t l;
+        memset(&l, 0, sizeof l);
+        ok(svgwin_getstat(dev, RV9_SVG_GS_LIMITS, &l) == RV9_IO_OK &&
+           l.src_max == SRC_MAX && l.pts_max == MAX_PTS &&
+           l.contours_max == MAX_CONTOURS && l.depth_max == MAX_DEPTH,
+           "the window reports its four ceilings, and they are the real ones");
+    }
+
+    /* And the point cap, which is the one a path of quads meets first. */
+    n = snprintf(doc, sizeof doc, "<svg viewBox=\"0 0 320 172\"><path d=\"M0 10");
+    for (i = 0; i < MAX_PTS + 40; i++)   /* a path must open with a moveto */
+        n += snprintf(doc + n, sizeof doc - n, "L%d %d", i % 300, 10 + i % 40);
+    snprintf(doc + n, sizeof doc - n, "\" stroke=\"#fff\"/></svg>");
+    s->lost_c = s->lost_p = 0;
+    put(dev, doc);
+    ok(s->lost_p > 0, "a path past MAX_PTS reports that too");
+}
+
 int main(void)
 {
     rv9_dev_t dev;
@@ -201,6 +264,7 @@ int main(void)
 
     t_raw_lt(&dev);
     t_band_backing(&dev);
+    t_contours(&dev);
 
     printf(fails ? "%d check(s) failed\n" : "all checks passed\n", fails);
     return fails != 0;

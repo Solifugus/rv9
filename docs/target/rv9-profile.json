@@ -746,6 +746,13 @@
       "direction": "set",
       "discipline": "svgwin",
       "driver_relative": 8
+    },
+    {
+      "name": "RV9_SVG_GS_LIMITS",
+      "value": 265,
+      "direction": "get",
+      "discipline": "svgwin",
+      "driver_relative": 9
     }
   ],
   "rt_safety": {
