@@ -910,8 +910,15 @@ work in pixels alone.
 
 | field | |
 |---|---|
-| `width_um`, `height_um` | Micrometres, of the drawable area, **in the current rotation**. |
+| `width_px`, `height_px` | Pixels, of the drawable area, in the current rotation. **Always real.** |
+| `width_um`, `height_um` | The same area in micrometres. **0 unless `kind` says otherwise.** |
 | `kind` | `RV9_PHYS_FIXED`, `RV9_PHYS_VARIABLE` or `RV9_PHYS_UNKNOWN`. |
+
+**Both halves in one record, deliberately.** `width_um / width_px` is a pixel
+pitch, and a caller that asked for the two halves in two calls could be handed
+a pair that straddles a rotation — or, on a `VARIABLE` device, a move. One
+call, one consistent pair. `RV9_GS_SIZE` still answers pixels alone for
+anything that only wants those.
 
 `/w0` and `/term` both answer it — same glass, same number. A terminal on a
 wire cannot, and returns `RV9_IO_ERR_UNSUPPORTED`.

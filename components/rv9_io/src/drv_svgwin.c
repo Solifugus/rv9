@@ -1424,11 +1424,17 @@ static rv9_io_err_t svgwin_getstat(rv9_dev_t *dev, uint32_t code, void *arg)
         rv9_physical_t *ph = (rv9_physical_t *)arg;
         uint32_t w_um = 0, h_um = 0;
         uint8_t  kind = RV9_PHYS_UNKNOWN;
+        int      w_px = 0, h_px = 0;
 
         /* Through locals: the struct is packed for the ABI's sake, and the
-           address of a packed member is not a pointer this build will take. */
+           address of a packed member is not a pointer this build will take.
+           Both halves from the same two calls, so the pair cannot straddle a
+           rotation. */
+        rv9_panel_size(&w_px, &h_px);
         rv9_panel_physical(&w_um, &h_um, &kind);
         memset(ph, 0, sizeof(*ph));
+        ph->width_px  = (uint32_t)w_px;
+        ph->height_px = (uint32_t)h_px;
         ph->width_um  = w_um;
         ph->height_um = h_um;
         ph->kind      = kind;

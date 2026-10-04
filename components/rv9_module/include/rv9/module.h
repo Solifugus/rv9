@@ -662,14 +662,26 @@ typedef struct {
 #define RV9_PHYS_FIXED     1   /* glass: measure once, cache forever */
 #define RV9_PHYS_VARIABLE  2   /* a projection: true now, ask again */
 
+/*
+ * Pixels and micrometres together, deliberately, and not because it saves a
+ * call. width_um / width_px is a pitch, and a caller that asked for the two
+ * halves separately could be handed a pair that straddles a rotation -- or,
+ * on a VARIABLE device, a move. One call, one consistent pair. (The same
+ * argument RV9_SVG_GS_LIMITS settled by reporting all four ceilings at once.)
+ *
+ * The pixels are always real. The micrometres are real only when `kind` says
+ * so, and a caller that uses them without looking gets nonsense from zero.
+ */
 typedef struct __attribute__((packed)) {
-    uint32_t width_um;      /* of the drawable area, in the current rotation */
+    uint32_t width_px;      /* of the drawable area, in the current rotation */
+    uint32_t height_px;
+    uint32_t width_um;      /* 0 unless kind says otherwise */
     uint32_t height_um;
     uint8_t  kind;          /* RV9_PHYS_* */
     uint8_t  reserved[3];
 } rv9_physical_t;
 
-_Static_assert(sizeof(rv9_physical_t) == 12, "physical size is 12 bytes");
+_Static_assert(sizeof(rv9_physical_t) == 20, "physical size is 20 bytes");
 
 #define RV9_SS_DRIVER_BASE 256
 

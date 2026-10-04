@@ -26,7 +26,7 @@ typedef enum { RV9_IO_OK=0, RV9_IO_ERR_NOTFOUND, RV9_IO_ERR_BADPATH,
 #define RV9_PHYS_FIXED 1
 #define RV9_PHYS_VARIABLE 2
 typedef struct __attribute__((packed)) {
-  uint32_t width_um, height_um; uint8_t kind, reserved[3];
+  uint32_t width_px, height_px, width_um, height_um; uint8_t kind, reserved[3];
 } rv9_physical_t;
 typedef struct __attribute__((packed)) {
   uint32_t src_max, pts_max, contours_max, depth_max;

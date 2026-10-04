@@ -263,6 +263,10 @@ static void t_contours(rv9_dev_t *dev)
            ph.kind == RV9_PHYS_FIXED && ph.width_um > 0 && ph.height_um > 0 &&
            (w > h) == (ph.width_um > ph.height_um),
            "the window reports its glass, turned the same way as its pixels");
+
+        /* The pair has to be a pair, or width_um/width_px is not a pitch. */
+        ok(ph.width_px == (uint32_t)w && ph.height_px == (uint32_t)h,
+           "and the pixels beside it, from the same call");
     }
 
     /* And the point cap, which is the one a path of quads meets first. */
