@@ -18,7 +18,7 @@
 # what happens to be on the machine is worse than no gate.
 
 upstream  = ~/development/whisker/src/whisker.h
-commit    = d6b24c4
-dated     = 2026-10-02
-subject   = input: a field you can type into, with a mouse, today
-refreshed = 2026-10-02
+commit    = e7d1a4a
+dated     = 2026-10-04
+subject   = justify: where the leftover space goes
+refreshed = 2026-10-04

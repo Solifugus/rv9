@@ -45,6 +45,57 @@
 #define WHISKER_H
 
 /* ------------------------------------------------------------------ */
+/* Profiles -- what to leave out, for a host that cannot afford it     */
+/* ------------------------------------------------------------------ */
+/*
+ * whisker serves hosts that differ by four orders of magnitude of memory
+ * (design.md §2.8), so the small ones must be able to leave things out. Two
+ * facts shape how:
+ *
+ * 1. **Almost everything scales down by itself.** Every function here is
+ *    `static inline`, so a caller that never names `wsk_hit`, `wsk_compose`
+ *    or `wsk_rows` does not link them -- measured, not assumed
+ *    (`tools/evidence/profiles/`).
+ *
+ * 2. **Except a branch in the shared per-widget loop**, which every caller
+ *    links whatever it draws. A dispatch table would let the linker drop
+ *    those too, and a dispatch table is precisely what an RV-9 module may
+ *    not have (§4.1) -- it is addresses in rodata and it broke two modules
+ *    before whisker existed. So the one mechanism left is the preprocessor,
+ *    and the cost of not having it is measured at 668 bytes, 20 % of a small
+ *    panel's code.
+ *
+ * Hence: **the default is everything, and a host opts down.** A big host
+ * configures nothing, which is §2.8's rule applied to the build -- do not
+ * make every caller pay for the C5's limits.
+ *
+ *     -DWSK_MINIMAL     label, button, stacks, bands -- and whichever of
+ *                       hit/rows/compose the caller names, since those
+ *                       drop by linkage rather than by macro. Note that
+ *                       `hit` assumes a pointing device and the C5 has
+ *                       none (§2.6) -- its panel is write-only, so there
+ *                       is no focus traversal and there will not be (D9).
+ *     -DWSK_NO_FIELD    drop the text field       (364 bytes)
+ *     -DWSK_NO_MARKS    drop the corner marks     (288 bytes)
+ *
+ * A reduced build is not a different renderer. For the widgets it still has
+ * it emits **byte-identical** documents, which `src/run.sh` checks by
+ * building the same panel both ways and diffing. What it does instead of
+ * drawing a widget it lacks is **refuse the tree** with `WSK_E_KIND`, named
+ * at the widget -- never draw something else, because a field silently drawn
+ * as a label is the silent-wrong-answer shape this project keeps finding in
+ * other people's code (§2.3).
+ */
+#ifdef WSK_MINIMAL
+#  ifndef WSK_NO_FIELD
+#    define WSK_NO_FIELD 1
+#  endif
+#  ifndef WSK_NO_MARKS
+#    define WSK_NO_MARKS 1
+#  endif
+#endif
+
+/* ------------------------------------------------------------------ */
 /* The tree                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -56,8 +107,28 @@
 #define WSK_CARET_W   2          /* and the caret after it */
 #define WSK_BTN_ROWS  64         /* 8 bands, and about a finger at 170 dpi */
 
+/* Every profile declares every kind, and the values never move: a reduced
+   build refuses WSK_FIELD, it does not renumber around it. A caller's panel,
+   a golden and an id mean the same thing whatever this was compiled with. */
 enum { WSK_LABEL = 1, WSK_BUTTON, WSK_FIELD };
 enum { WSK_COL = 1, WSK_ROW };
+
+/*
+ * Where the leftover space along the axis goes, when no child claimed it.
+ *
+ * `weight` hands the surplus to the children; this hands it to the GAPS, and
+ * the two do not compete -- a stack with any weighted child has no surplus
+ * left for a justify to place. START is zero because it is what whisker did
+ * before this existed, so an unset tree lays out byte for byte as it always
+ * did.
+ */
+enum {
+	WSK_START = 0,               /* all of it after the last child */
+	WSK_END,                     /* all of it before the first */
+	WSK_CENTER,                  /* half each end */
+	WSK_BETWEEN,                 /* shared between the children, none at the ends */
+	WSK_AROUND                   /* shared around them, half-shares at the ends */
+};
 
 /*
  * A mark on a widget, for the states a flat substrate has no other way to
@@ -154,6 +225,7 @@ typedef struct {
 	                                accent or it is a button with words in. */
 
 	unsigned char ids;           /* emit id= attributes: 1 yes, 0 no */
+	unsigned char justify;       /* WSK_START..WSK_AROUND, along the axis */
 } wsk_tree_t;
 
 typedef struct { short x, y, w, h; } wsk_rect_t;
@@ -168,7 +240,8 @@ enum {
 	WSK_E_BUDGET    = -2,        /* it will not fit in the bytes allowed */
 	WSK_E_NOTFOUND  = -3,        /* no widget by that id */
 	WSK_E_EMPTY     = -4,        /* an empty row range: nothing to repaint */
-	WSK_E_DEVICE    = -5         /* a stack sized for a different screen */
+	WSK_E_DEVICE    = -5,        /* a stack sized for a different screen */
+	WSK_E_KIND      = -6         /* a widget this build was compiled without */
 };
 
 /* ------------------------------------------------------------------ */
@@ -288,7 +361,8 @@ static inline int wsk_text_ok(const char *t)
 }
 
 /*
- * WSK_OK, or WSK_E_TEXT with `which` naming the widget.
+ * WSK_OK, or WSK_E_TEXT -- or WSK_E_KIND from a reduced build (see
+ * Profiles, above) -- with `which` naming the widget.
  *
  * The index comes back through a parameter rather than as the return value,
  * because the first widget in a tree has index 0 and so does WSK_OK -- a
@@ -297,11 +371,28 @@ static inline int wsk_text_ok(const char *t)
  */
 static inline int wsk_check(const wsk_tree_t *t, int *which)
 {
-	for (int i = 0; i < t->n; i++)
+	for (int i = 0; i < t->n; i++) {
 		if (!wsk_text_ok(t->item[i].text)) {
 			if (which != 0) *which = i;
 			return WSK_E_TEXT;
 		}
+		/* And, in a reduced build, what this one cannot draw. Refusing is
+		   the point: drawing a field as a label would be a picture that is
+		   wrong without saying so, which is the failure shape §2.3 keeps
+		   finding in substrates and is not one to add here. */
+#ifdef WSK_NO_FIELD
+		if (t->item[i].kind == WSK_FIELD) {
+			if (which != 0) *which = i;
+			return WSK_E_KIND;
+		}
+#endif
+#ifdef WSK_NO_MARKS
+		if (t->item[i].mark == WSK_MARK_CORNERS) {
+			if (which != 0) *which = i;
+			return WSK_E_KIND;
+		}
+#endif
+	}
 	return WSK_OK;
 }
 
@@ -374,6 +465,7 @@ static inline void wsk_init(wsk_tree_t *t, int axis, int dev_w, int dev_h)
 	t->accent = 0x2a6b8fu;
 	t->trough = 0x081620u;
 	t->ids = 0;
+	t->justify = WSK_START;
 }
 
 /* The part of the device this stack lays out in. */
@@ -418,6 +510,26 @@ static inline int wsk__natural(const wsk_tree_t *t, int i)
  * widget costs the same in absolute terms on a large screen as on a small
  * one. A bigger screen holds more widgets rather than bigger ones.
  */
+/*
+ * How far child `idx` is pushed along the axis by the justify.
+ *
+ * Computed from idx rather than accumulated, so the rounding cannot drift:
+ * `free * i / (n-1)` is exactly `free` at the last child whatever the
+ * division threw away on the way, which is the same care the weighted path
+ * takes by giving the last weighted child the remainder.
+ */
+static inline int wsk__lead(const wsk_tree_t *t, int idx, int free)
+{
+	if (free <= 0) return 0;
+	switch (t->justify) {
+	case WSK_END:     return free;
+	case WSK_CENTER:  return free / 2;
+	case WSK_BETWEEN: return (t->n > 1) ? free * idx / (t->n - 1) : 0;
+	case WSK_AROUND:  return (t->n > 0) ? free * (2 * idx + 1) / (2 * t->n) : 0;
+	default:          return 0;            /* WSK_START */
+	}
+}
+
 static inline wsk_rect_t wsk_rect(const wsk_tree_t *t, int idx)
 {
 	wsk_rect_t r;
@@ -432,7 +544,9 @@ static inline wsk_rect_t wsk_rect(const wsk_tree_t *t, int idx)
 	extra = span - used;
 	if (extra < 0) extra = 0;
 
-	at = (t->axis == WSK_COL ? t->ay : t->ax) + t->pad;
+	/* A weighted stack has no surplus left: the children took it. */
+	at = (t->axis == WSK_COL ? t->ay : t->ax) + t->pad
+	   + wsk__lead(t, idx, (weights > 0) ? 0 : extra);
 	for (int i = 0; i < idx; i++) {
 		int e = wsk__natural(t, i);
 		if (weights > 0 && t->item[i].weight > 0) {
@@ -598,9 +712,13 @@ static inline void wsk__rect(wsk_sink_t *s, const wsk_tree_t *t,
 {
 	wsk__box(s, (w != 0 && t->ids) ? w->id : 0, r,
 	         (w->fill != WSK_INHERIT) ? w->fill
-	         : (w->kind == WSK_FIELD) ? t->trough : t->accent);
+#ifndef WSK_NO_FIELD
+	         : (w->kind == WSK_FIELD) ? t->trough
+#endif
+	         : t->accent);
 }
 
+#ifndef WSK_NO_MARKS
 /*
  * Ticks driven inward from the four corners.
  *
@@ -640,6 +758,7 @@ static inline void wsk__marks(wsk_sink_t *s, const wsk_tree_t *t,
 	wsk__col(s, (w->ink != WSK_INHERIT) ? w->ink : t->ink);
 	wsk__s(s, "\" stroke-width=\"2\"/>");
 }
+#endif /* WSK_NO_MARKS */
 
 /*
  * A label, centred in its widget, truncated to what fits.
@@ -676,6 +795,7 @@ static inline void wsk__text(wsk_sink_t *s, const wsk_tree_t *t,
 	wsk__s(s, "</text>");
 }
 
+#ifndef WSK_NO_FIELD
 /*
  * How many characters of a field are visible, and which ones.
  *
@@ -738,6 +858,7 @@ static inline void wsk__field(wsk_sink_t *s, const wsk_tree_t *t,
 		wsk__box(s, 0, c, ink);
 	}
 }
+#endif /* WSK_NO_FIELD */
 
 /* ------------------------------------------------------------------ */
 /* The document: one device, one background, any number of stacks      */
@@ -858,7 +979,7 @@ static inline int wsk_part(const wsk_doc_t *d, const wsk_tree_t *t,
 	int nested;
 
 	if (t->w != d->w || t->h != d->h) return WSK_E_DEVICE;
-	if (wsk_check(t, 0) != WSK_OK) return WSK_E_TEXT;
+	{ int e = wsk_check(t, 0); if (e != WSK_OK) return e; }
 
 	nested = (t->font != d->font || t->ink != d->ink);
 	if (nested) {
@@ -873,10 +994,19 @@ static inline int wsk_part(const wsk_doc_t *d, const wsk_tree_t *t,
 		const wsk_widget_t *w = &t->item[i];
 		wsk_rect_t r = wsk_rect(t, i);
 		if (r.y >= d->y1 || r.y + r.h <= d->y0) continue;  /* not in these rows */
+#ifdef WSK_NO_FIELD
+		if (w->kind == WSK_BUTTON) wsk__rect(s, t, w, r);
+#else
 		if (w->kind == WSK_BUTTON || w->kind == WSK_FIELD) wsk__rect(s, t, w, r);
+#endif
+#ifndef WSK_NO_MARKS
 		if (w->mark == WSK_MARK_CORNERS) wsk__marks(s, t, w, r);
+#endif
+#ifndef WSK_NO_FIELD
 		if (w->kind == WSK_FIELD) wsk__field(s, t, w, r);
-		else wsk__text(s, t, w, r);
+		else
+#endif
+		wsk__text(s, t, w, r);
 	}
 
 	if (nested) wsk__s(s, "</g>");
@@ -915,7 +1045,7 @@ static inline int wsk__emit(const wsk_tree_t *t, int y0, int y1,
 {
 	wsk_sink_t dry;
 
-	if (wsk_check(t, 0) != WSK_OK) return WSK_E_TEXT;
+	{ int e = wsk_check(t, 0); if (e != WSK_OK) return e; }
 
 	dry.put = 0;
 	dry.ctx = 0;

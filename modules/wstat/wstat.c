@@ -35,6 +35,17 @@
  *
  * Built from whisker's src/module_stat.c; see modules/whisker.from.
  */
+/*
+ * A readout marks nothing and has no field, so it is built from whisker's
+ * minimal profile. Not for the bytes -- 39 KB is the budget and this saves
+ * under a kilobyte. It is so that the stack figure below stays true: with
+ * marks compiled in but unused, somebody adding WSK_MARK_CORNERS to a row
+ * would reach do_path and a 624-byte raster frame against a stack bisected
+ * when no path was reachable. Compiled out, that edit is refused by
+ * wsk_check with WSK_E_KIND before a byte is written.
+ */
+#define WSK_MINIMAL 1
+
 #include "modlib.h"
 #include "whisker.h"
 
