@@ -48,6 +48,21 @@ static const char *TAG = "rv9-panel";
 #define PANEL_W       172
 #define PANEL_H       320
 #define PANEL_GAP     34    /* 172-wide panel centred in the controller's 240 */
+
+/*
+ * The glass, in micrometres, in the panel's native portrait orientation.
+ *
+ * Derived rather than measured: the board is a Waveshare ESP32-C5-LCD-1.47,
+ * so the diagonal is 1.47 in = 37.34 mm, and 172:320 over that diagonal gives
+ * 17.68 x 32.89 mm. A caliper would settle it better than arithmetic does,
+ * and these are the numbers to correct if one disagrees.
+ *
+ * Nothing asks the hardware because nothing can: there is no EDID over SPI,
+ * and the ST7789 does not know its own active area -- see PANEL_GAP, which is
+ * the glass being a window into a wider controller.
+ */
+#define PANEL_W_UM    17680
+#define PANEL_H_UM    32890
 #define LCD_CLK_HZ    (40 * 1000 * 1000)
 
 #define BL_CHANNEL    LEDC_CHANNEL_5
@@ -225,6 +240,18 @@ void rv9_panel_size(int *w, int *h)
 {
     if (w) *w = s_w;
     if (h) *h = s_h;
+}
+
+void rv9_panel_physical(uint32_t *w_um, uint32_t *h_um, uint8_t *kind)
+{
+    /* Swapped with the pixels, not independently of them: s_w is already the
+       rotated width, so the millimetres have to follow the same way round or
+       a caller computing a pixel pitch gets the aspect inverted. */
+    bool landscape = (s_w > s_h);
+
+    if (w_um)  *w_um  = landscape ? PANEL_H_UM : PANEL_W_UM;
+    if (h_um)  *h_um  = landscape ? PANEL_W_UM : PANEL_H_UM;
+    if (kind)  *kind  = RV9_PHYS_FIXED;
 }
 
 bool rv9_panel_take(const void *owner)

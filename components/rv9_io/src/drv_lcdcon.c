@@ -642,6 +642,24 @@ static rv9_io_err_t lcdcon_getstat(rv9_dev_t *dev, uint32_t code, void *arg)
         *(uint32_t *)arg = rv9_panel_is_owner(c) ? 1 : 0;
         return RV9_IO_OK;
 
+    case RV9_GS_PHYSICAL: {
+        /* Same glass as /w0, so the same answer. A console laying out
+           something to be read at a distance wants millimetres as much as a
+           window does, and a terminal on a wire cannot answer this at all. */
+        rv9_physical_t *ph = (rv9_physical_t *)arg;
+        uint32_t w_um = 0, h_um = 0;
+        uint8_t  kind = RV9_PHYS_UNKNOWN;
+
+        /* Through locals: the struct is packed for the ABI's sake, and the
+           address of a packed member is not a pointer this build will take. */
+        rv9_panel_physical(&w_um, &h_um, &kind);
+        memset(ph, 0, sizeof(*ph));
+        ph->width_um  = w_um;
+        ph->height_um = h_um;
+        ph->kind      = kind;
+        return RV9_IO_OK;
+    }
+
     case RV9_CON_GS_SIZE:
         /* This console knows exactly how big it is, which is the one thing
            a serial line can never say. */

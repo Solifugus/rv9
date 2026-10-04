@@ -45,6 +45,17 @@ static int fails;
 rv9_io_err_t rv9_panel_open(bool l, int *w, int *h)
 { (void)l; if (w) *w = PW; if (h) *h = PH; return RV9_IO_OK; }
 void rv9_panel_size(int *w, int *h) { if (w) *w = PW; if (h) *h = PH; }
+/* Swaps with the rotation, as the real panel.c does -- a stub that did
+   not would make the harness disagree with the firmware about the one
+   thing this call is for. */
+void rv9_panel_physical(uint32_t *w, uint32_t *h, uint8_t *k)
+{
+    int pw = 0, ph = 0;
+    rv9_panel_size(&pw, &ph);
+    if (w) *w = (pw > ph) ? 32890u : 17680u;
+    if (h) *h = (pw > ph) ? 17680u : 32890u;
+    if (k) *k = RV9_PHYS_FIXED;
+}
 void rv9_panel_backlight(uint32_t p) { (void)p; }
 uint32_t rv9_panel_backlight_get(void) { return 100; }
 bool rv9_panel_take(const void *o) { (void)o; return false; }
@@ -236,6 +247,22 @@ static void t_contours(rv9_dev_t *dev)
            l.src_max == SRC_MAX && l.pts_max == MAX_PTS &&
            l.contours_max == MAX_CONTOURS && l.depth_max == MAX_DEPTH,
            "the window reports its four ceilings, and they are the real ones");
+    }
+
+    /*
+     * And the glass. The numbers have to follow the rotation the pixels took,
+     * or a caller computing a pixel pitch gets the aspect inverted -- which
+     * is a wrong answer that looks like a plausible one.
+     */
+    {
+        rv9_physical_t ph;
+        int w = 0, h = 0;
+        rv9_panel_size(&w, &h);
+        memset(&ph, 0, sizeof ph);
+        ok(svgwin_getstat(dev, RV9_GS_PHYSICAL, &ph) == RV9_IO_OK &&
+           ph.kind == RV9_PHYS_FIXED && ph.width_um > 0 && ph.height_um > 0 &&
+           (w > h) == (ph.width_um > ph.height_um),
+           "the window reports its glass, turned the same way as its pixels");
     }
 
     /* And the point cap, which is the one a path of quads meets first. */

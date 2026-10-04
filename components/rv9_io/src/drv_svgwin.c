@@ -1420,6 +1420,21 @@ static rv9_io_err_t svgwin_getstat(rv9_dev_t *dev, uint32_t code, void *arg)
         return RV9_IO_OK;
     }
 
+    if (code == RV9_GS_PHYSICAL && arg) {
+        rv9_physical_t *ph = (rv9_physical_t *)arg;
+        uint32_t w_um = 0, h_um = 0;
+        uint8_t  kind = RV9_PHYS_UNKNOWN;
+
+        /* Through locals: the struct is packed for the ABI's sake, and the
+           address of a packed member is not a pointer this build will take. */
+        rv9_panel_physical(&w_um, &h_um, &kind);
+        memset(ph, 0, sizeof(*ph));
+        ph->width_um  = w_um;
+        ph->height_um = h_um;
+        ph->kind      = kind;
+        return RV9_IO_OK;
+    }
+
     if (code == RV9_SVG_GS_LIMITS && arg) {
         rv9_svg_limits_t *l = (rv9_svg_limits_t *)arg;
         l->src_max      = SRC_MAX;

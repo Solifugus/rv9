@@ -8,6 +8,17 @@ static uint16_t screen[PW*PH];
 
 rv9_io_err_t rv9_panel_open(bool l,int *w,int *h){(void)l;if(w)*w=PW;if(h)*h=PH;return RV9_IO_OK;}
 void rv9_panel_size(int *w,int *h){if(w)*w=PW;if(h)*h=PH;}
+/* Swaps with the rotation, as the real panel.c does -- a stub that did
+   not would make the harness disagree with the firmware about the one
+   thing this call is for. */
+void rv9_panel_physical(uint32_t *w, uint32_t *h, uint8_t *k)
+{
+    int pw = 0, ph = 0;
+    rv9_panel_size(&pw, &ph);
+    if (w) *w = (pw > ph) ? 32890u : 17680u;
+    if (h) *h = (pw > ph) ? 17680u : 32890u;
+    if (k) *k = RV9_PHYS_FIXED;
+}
 void rv9_panel_backlight(uint32_t p){(void)p;}
 uint32_t rv9_panel_backlight_get(void){return 100;}
 bool rv9_panel_take(const void *o){(void)o;return false;}

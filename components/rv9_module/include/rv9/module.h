@@ -636,6 +636,41 @@ typedef struct {
  * because the link did. RV9_IOE_UNSUPPORTED on a device without sessions.
  */
 #define RV9_SS_HANGUP      6
+
+/*
+ * How big is this device in the world? getstat, arg is an rv9_physical_t.
+ *
+ * Pixels are not a size. A 64-row button is 6.6 mm on the C5's 1.47-inch
+ * glass and 9.6 mm on the P4's seven inches, and a finger wants about 9 --
+ * so a program laying out something to be touched, or read at arm's length,
+ * cannot work in pixels alone. Nothing in the hardware will tell it: there is
+ * no EDID over SPI and none over MIPI-DSI, and the ST7789 does not even know
+ * its own active area (the C5's 172-wide glass is a window into a 240-wide
+ * controller). The number is board knowledge, so the board declares it and
+ * RV-9 hands it on.
+ *
+ * `kind` is not decoration. A projector's image is a real size that is true
+ * when asked and false an hour later when somebody moves the table, and a
+ * caller that cached it would be quietly wrong rather than loudly wrong.
+ * UNKNOWN is for a device that understands the question and cannot answer it
+ * yet; a device with no opinion at all answers RV9_IO_ERR_UNSUPPORTED, and a
+ * caller should treat both as "work in pixels".
+ */
+#define RV9_GS_PHYSICAL    7
+
+#define RV9_PHYS_UNKNOWN   0   /* knows the question, has no answer today */
+#define RV9_PHYS_FIXED     1   /* glass: measure once, cache forever */
+#define RV9_PHYS_VARIABLE  2   /* a projection: true now, ask again */
+
+typedef struct __attribute__((packed)) {
+    uint32_t width_um;      /* of the drawable area, in the current rotation */
+    uint32_t height_um;
+    uint8_t  kind;          /* RV9_PHYS_* */
+    uint8_t  reserved[3];
+} rv9_physical_t;
+
+_Static_assert(sizeof(rv9_physical_t) == 12, "physical size is 12 bytes");
+
 #define RV9_SS_DRIVER_BASE 256
 
 /*

@@ -559,6 +559,12 @@
       "discipline": "generic"
     },
     {
+      "name": "RV9_GS_PHYSICAL",
+      "value": 7,
+      "direction": "get",
+      "discipline": "generic"
+    },
+    {
       "name": "RV9_IFM_SS_REG",
       "value": 22,
       "direction": "set",

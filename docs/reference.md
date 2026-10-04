@@ -737,6 +737,7 @@ asking anyone.
 | `RV9_GS_SIZE` | 4 | The size of the thing — a file's length, on RBF. |
 | `RV9_SS_RAW` | 5 | 0 = lines, 1 = keystrokes. |
 | `RV9_SS_HANGUP` | 6 | End the session this path belongs to. |
+| `RV9_GS_PHYSICAL` | 7 | How big this device is **in the world**. `rv9_physical_t`. |
 
 **`RV9_SS_RAW` belongs to the path, not the device.** SCF normally reads a
 *line*: it buffers until return, echoes, handles rubout and discards
@@ -897,6 +898,48 @@ Three details that a layout calculation gets wrong if it assumes otherwise:
   nothing wraps.
 - The advance is scaled by the current transform, so it is in user units
   *after* any `transform` on an enclosing `<g>`.
+
+#### How big it is in the world
+
+**Pixels are not a size.** A 64-row button is 6.6 mm on the C5's 1.47-inch
+glass and 9.6 mm on the P4's seven inches, and a finger wants about 9 — so a
+program laying out something to be *touched*, or read at arm's length, cannot
+work in pixels alone.
+
+`getstat(RV9_GS_PHYSICAL)` fills an `rv9_physical_t`:
+
+| field | |
+|---|---|
+| `width_um`, `height_um` | Micrometres, of the drawable area, **in the current rotation**. |
+| `kind` | `RV9_PHYS_FIXED`, `RV9_PHYS_VARIABLE` or `RV9_PHYS_UNKNOWN`. |
+
+`/w0` and `/term` both answer it — same glass, same number. A terminal on a
+wire cannot, and returns `RV9_IO_ERR_UNSUPPORTED`.
+
+**Nothing asks the hardware, because nothing can.** There is no EDID over SPI
+and none over MIPI-DSI, and the ST7789 does not even know its own active area
+— the C5's 172-wide glass is a window into a 240-wide controller, which is
+what `PANEL_GAP` is. So the number is board knowledge, declared in `panel.c`
+beside `PANEL_W` and `PANEL_H`, and handed on. On a desktop it would come from
+EDID and usually be right; here somebody writes it down or nobody knows it.
+
+**`kind` is not decoration.** A projector's image is a real size that is true
+when asked and false an hour later when somebody moves the table —
+`RV9_PHYS_VARIABLE` says *ask again*, and a caller that cached it would be
+quietly wrong rather than loudly wrong. `RV9_PHYS_UNKNOWN` is for a device
+that understands the question and cannot answer it yet. A device with no
+opinion at all answers `RV9_IO_ERR_UNSUPPORTED`; treat both as *work in
+pixels*.
+
+**The rotation matters and is easy to get wrong.** The millimetres are turned
+the same way the pixels are, so `width_um / width_px` is a pitch. A device that
+rotated one and not the other would hand back an inverted aspect, which is a
+wrong answer that looks like a plausible one — the host harness did exactly
+that until a check caught it.
+
+The C5's figures are *derived, not measured*: a 1.47-inch diagonal over a
+172:320 aspect gives 17.68 × 32.89 mm. A caliper would settle it better than
+arithmetic, and `PANEL_W_UM` is the place to correct if one disagrees.
 
 #### The window's ceilings
 

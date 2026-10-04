@@ -34,6 +34,19 @@ rv9_io_err_t rv9_panel_bus_claim(void);
 void rv9_panel_size(int *w, int *h);
 
 /*
+ * The glass, in micrometres, rotated the same way the pixels are.
+ *
+ * Here rather than in a descriptor option because there is one panel and the
+ * rotation swap already happens here -- `opt2 rotation: must agree with
+ * desc_term` is a hazard this board already carries once, and a second
+ * "must agree" number would be a second chance to disagree. A different board
+ * is a different panel.c, which is true of PANEL_W and PANEL_H already.
+ *
+ * `kind` is RV9_PHYS_*. This panel is FIXED; a projector would not be.
+ */
+void rv9_panel_physical(uint32_t *w_um, uint32_t *h_um, uint8_t *kind);
+
+/*
  * Take the glass, and find out whether somebody else had it.
  *
  * There is one panel and no framebuffer, so the only possible model is

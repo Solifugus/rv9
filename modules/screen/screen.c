@@ -131,6 +131,47 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     m_say(env, p, " rows x ");
     m_num(env, p, (int32_t)cols);
     m_say(env, p, " cols");
+
+    /*
+     * And how big that is in the world, where the device knows. A terminal on
+     * a wire does not and says RV9_IO_ERR_UNSUPPORTED; the panel does, because
+     * somebody wrote the glass down in panel.c. Printed in tenths of a
+     * millimetre because a module has no floating point and 17.7 is the
+     * number a person wants to read.
+     */
+    {
+        rv9_physical_t ph;
+        if (env->getstat(p, RV9_GS_PHYSICAL, &ph) >= 0 &&
+            ph.kind != RV9_PHYS_UNKNOWN) {
+            /*
+             * On the picture, and also on stderr when the picture is
+             * somewhere else -- `screen /term` otherwise puts the answer on
+             * the glass, where whoever typed it cannot read it. Same reason
+             * `flick` reports to stderr: it is not the window.
+             */
+            for (int twice = 0; twice < 2; twice++) {
+                int o = twice ? RV9_STDERR : p;
+                if (twice && !opened) break;
+                if (!twice) m_say(env, o, ", ");
+                else        m_say(env, o, "screen: ");
+                /* Rounded, not truncated: 32890 um is 32.9 mm, and showing
+                   32.8 would be a small lie in a project that minds. */
+                uint32_t wt = (ph.width_um  + 50u) / 100u;
+                uint32_t ht = (ph.height_um + 50u) / 100u;
+                m_num(env, o, (int32_t)(wt / 10u));
+                m_say(env, o, ".");
+                m_num(env, o, (int32_t)(wt % 10u));
+                m_say(env, o, " x ");
+                m_num(env, o, (int32_t)(ht / 10u));
+                m_say(env, o, ".");
+                m_num(env, o, (int32_t)(ht % 10u));
+                m_say(env, o, " mm");
+                if (ph.kind == RV9_PHYS_VARIABLE) m_say(env, o, " (varies)");
+                if (twice) m_say(env, o, "\n");
+            }
+        }
+    }
+
     if (last + 1 < rows) m_say(env, p, "\n");
 
     if (opened) env->close(p);
