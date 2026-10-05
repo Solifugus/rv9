@@ -56,6 +56,10 @@ python3 "$HERE/../checkstub.py"
 # compiler something that is no longer true, which is worse than none.
 python3 "$HERE/../mkprofile.py" --check
 
+# A command is a module, so the module directory is the list of commands --
+# which means a hand-kept list goes stale the first time somebody adds one.
+python3 "$HERE/../checkcmds.py"
+
 # And the reference is checked against the profile, so a call added to
 # module.h reaches the documentation without anybody remembering to tell it.
 # Whether the prose is any good cannot be checked here; whether the name is

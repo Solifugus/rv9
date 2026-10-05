@@ -11,7 +11,8 @@ what it enforces.**
 > `tools/hosttest/run.sh` fails if it stops being. §14's numbers are compared
 > against the generated profile on every run. See §16.
 
-Three documents, three jobs. This one is for looking things up. The
+Four documents, four jobs. This one is the contract a *program* relies on.
+[commands.md](commands.md) is what you can type at the shell. The
 [tutorial](tutorial.md) is for learning by doing. The
 [design log](design.md) is for why, and records the wrong turns.
 
