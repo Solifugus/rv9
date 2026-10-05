@@ -36,12 +36,45 @@
 #include <time.h>
 
 #include "esp_log.h"
-#include "esp_netif_sntp.h"
-#include "esp_sntp.h"
 
 #include "rv9/kal.h"
 
 static const char *TAG = "rv9-clock";
+
+/*
+ * A BOARD WITH NO RADIO HAS NOTHING TO ASK
+ *
+ * Wall-clock time here is acquired over the network, and the ESP32-P4 has no
+ * network of its own -- its WiFi lives on a companion chip reached over SDIO
+ * (see components/rv9_io/CMakeLists.txt). So on the P4 there is no SNTP to
+ * start and the time is simply never known.
+ *
+ * Which is a state this file already has, and already handles: unset reads as
+ * zero and `synced` reads as false, because the time is unknown from reset
+ * until something answers. `date` prints that honestly rather than printing
+ * 1970. The P4 is the case where nothing ever answers, and nothing above has
+ * to learn a new one.
+ *
+ * When esp_wifi_remote arrives this comes back as it was.
+ */
+#if CONFIG_IDF_TARGET_ESP32P4
+
+void rv9_clock_start(void)
+{
+    ESP_LOGI(TAG, "no radio on this chip: wall-clock time stays unknown");
+}
+
+bool rv9_clock_read(uint32_t *out_epoch, uint32_t *out_age_s)
+{
+    if (out_epoch) *out_epoch = 0;
+    if (out_age_s) *out_age_s = 0;
+    return false;
+}
+
+#else
+
+#include "esp_netif_sntp.h"
+#include "esp_sntp.h"
 
 static bool     s_started;
 static bool     s_synced;
@@ -101,3 +134,5 @@ bool rv9_clock_read(uint32_t *out_epoch, uint32_t *out_age_s)
     }
     return true;
 }
+
+#endif /* CONFIG_IDF_TARGET_ESP32P4 */

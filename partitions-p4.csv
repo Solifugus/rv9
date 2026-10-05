@@ -1,0 +1,15 @@
+# RV-9 partition table, ESP32-P4 — 32 MB.
+#
+# The C5's table (partitions.csv) is the same shape on a 4 MB chip. This is not
+# that table scaled by eight: the app grows because the P4 build carries more
+# (PSRAM, MIPI-DSI, a second core's worth of FreeRTOS), the store grows because
+# flash is no longer the scarce thing, and the volume grows because 1 MB was a
+# C5 compromise rather than a judgement.
+#
+# Offsets are explicit so tools/flash_modules.sh knows where the store lives.
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0x9000,    0x6000,
+phy_init,   data, phy,      0xf000,    0x1000,
+factory,    app,  factory,  0x100000,  0x400000,
+modules,    data, 0x40,     0x500000,  0x200000,
+vol0,       data, 0x41,     0x700000,  0x1000000,

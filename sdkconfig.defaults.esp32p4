@@ -1,0 +1,20 @@
+# ESP32-P4 overrides. Applied after sdkconfig.defaults, which is C5-shaped.
+#
+# IDF reads sdkconfig.defaults.<target> on top of sdkconfig.defaults, so the
+# C5 build is untouched by anything here.
+
+# 32 MB, not the 4 MB the C5 line sets. The comment there is worth repeating
+# one size up: get this wrong and the image header claims less than the board
+# has, and the rest is unusable.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=n
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+
+# A table of its own; the C5's is sized for a twentieth of this chip.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-p4.csv"
+
+# The console goes out through a CH343 wired to UART0, not through the chip's
+# own USB Serial/JTAG -- that is a different connector on this board. The C5
+# has no bridge, so there the programming cable IS the console.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=n
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
