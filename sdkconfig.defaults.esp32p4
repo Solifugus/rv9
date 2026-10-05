@@ -18,3 +18,39 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-p4.csv"
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=n
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_UART_NUM=0
+
+
+# WHERE THE SPIKE GOT TO, 2026-10-05, so the next session does not re-run it.
+#
+# With RV-9's own kernel (the sdkconfig.defaults setting, unchanged here):
+#
+#   kal-test     45 / 45      conform 27 / 27      mod-test 17 / 17
+#   io-test      41 passed,  1 FAILED
+#   pub-test      4 passed, 14 FAILED
+#   fault-test   10 passed, 26 FAILED
+#   proc-test    panics: Illegal instruction, Core 0
+#
+# Two hypotheses tested and BOTH WRONG, which is worth more than the numbers:
+#
+#   1. Cache coherency. The panic's MTVAL is 0xA5C3A5C3 -- RV9K_STACK_PAINT,
+#      RV-9's own kernel's paint -- so the fetch landed in painted memory, and
+#      a split I/D cache would explain that. Implemented a ranged isync with
+#      esp_cache_msync writeback + invalidate: IDENTICAL results, to the
+#      millisecond. Reverted rather than kept, because an unproven change in a
+#      kernel seam is the thing this project argues against. Ruled out, and
+#      SOC_IRAM_LOW == SOC_DRAM_LOW on the P4 as on the C5, so the address is
+#      legitimately executable either way.
+#
+#   2. That RV-9's own kernel is the weak part. Backed the KAL with FreeRTOS
+#      instead to tell them apart, and it is the other way round:
+#
+#        FreeRTOS on P4:  kal-test 41 passed, 4 FAILED -- refuses to proceed
+#        RV-9 kernel:     kal-test 45 / 45, six suites deep
+#
+#      The native kernel is the BETTER backend on this chip. FreeRTOS here is
+#      SMP and the KAL's FreeRTOS backend assumes one core.
+#
+# So the fault is above the KAL and above the kernel, in whatever runs a
+# module. The next thing to look at is what the P4 has that the C5 does not:
+# a second core, and an FPU. `rv_core_fpu_save` and `rv_core_fpu_restore`
+# appear in this target's link line and in no C5 build.
