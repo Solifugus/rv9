@@ -78,8 +78,38 @@ CONFIG_ESP_CONSOLE_UART_NUM=0
 # 0xA5C3A5C3, which is RV9K_STACK_PAINT: the generation of that memory
 # before the module was copied into it.
 #
-# So the data side and the instruction side disagree about one address, and
-# four plausible explanations for that do not fix it. That is where it stands.
+# THE ANSWER, found by taking RV-9 out of the question entirely.
+#
+# A bare probe in app_main: two instructions (`li a0,42` / `ret`) written into
+# memory, read back through the data path, and called. No process, no
+# scheduler, no module format. Three placements, and ALL THREE FAIL --
+# including a plain `.bss` array:
+#
+#   probe .bss at 0x4ff38660: data reads 02a00513 00008067 -- calling
+#   Guru Meditation Error: Core 0 panic'ed (Store access fault)
+#   MEPC 0x4ff38660          <- the first instruction, and it is not a store
+#
+# So executing from data RAM does not work on this chip at all, and nothing
+# above it was ever going to. The sdkconfig says why:
+#
+#   CONFIG_SOC_CPU_IDRAM_SPLIT_USING_PMP=y    <- a chip capability, not a knob
+#
+# The P4 splits instruction and data RAM with PMP, and IDF's startup marks the
+# data side non-executable. CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT, which
+# sdkconfig.defaults sets to n, no longer exists -- it became
+# CONFIG_ESP_SYSTEM_MEMPROT, which is already off and is not the same switch.
+#
+# WHICH IS THE WORK RV-9 ALREADY SAID IT WOULD DO. From sdkconfig.defaults,
+# written before this board existed:
+#
+#   "This is not a permanent surrender of memory protection: in phase 7 RV-9
+#    owns the PMP configuration and marks module regions executable
+#    explicitly, which is stricter than this, not weaker."
+#
+# The C5 let that be deferred by having no split to turn off. The P4 does not.
+# So the next piece of work is not a port detail: it is phase 7's PMP
+# ownership, now due, and the module loader marking the region it just wrote
+# as executable rather than asking the system to leave all of RAM that way.
 
 # RV-9 own kernel is single-core by construction -- one s_current, one run
 # queue. The P4 is the first dual-core chip it has met, and the second core

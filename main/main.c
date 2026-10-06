@@ -884,6 +884,7 @@ static void rv9_init_task(void *arg)
     rv9_task_delete(NULL);
 }
 
+
 void app_main(void)
 {
     banner();
