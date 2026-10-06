@@ -11,9 +11,6 @@
  */
 #include "rv9/kal.h"
 
-#if CONFIG_IDF_TARGET_ESP32P4
-#include "esp32p4/rom/cache.h"
-#endif
 #include "kal_internal.h"
 
 #include "freertos/FreeRTOS.h"
@@ -420,33 +417,5 @@ void rv9_sched_unlock(void) { (void)xTaskResumeAll(); }
 
 /* ---------------- instruction sync ---------------- */
 
-void rv9_isync(void)
-{
-#if CONFIG_IDF_TARGET_ESP32P4
-    /*
-     * Three steps on the P4, and `fence.i` alone is none of them.
-     *
-     * This chip has an L1 data cache, an L2, and -- the part that matters --
-     * **one L1 instruction cache per core**. Freshly written code sits dirty
-     * in the D-cache while each core's I-cache still holds whatever was at
-     * that address before, and `fence.i` orders only the fetches of the hart
-     * that executes it.
-     *
-     * The symptom was exact and worth recording: a module loaded, the loader
-     * read 0x00008067 back from its entry (`ret`, correct), the process
-     * manager read the same word immediately before calling it -- and the
-     * fetch trapped with MTVAL 0xA5C3A5C3, which is RV9K_STACK_PAINT. The
-     * data side was right and the instruction side was a cache generation
-     * behind.
-     *
-     * esp_cache_msync() does not help here: it is for externally mapped
-     * memory, and declines an internal RAM address. These are the ROM's own
-     * whole-cache operations, which is why this needs no range.
-     */
-    Cache_WriteBack_All(CACHE_MAP_L1_DCACHE | CACHE_MAP_L2_CACHE);
-    Cache_Invalidate_All(CACHE_MAP_L1_ICACHE_MASK);
-#endif
-    /* The C5 has unified IRAM/DRAM and one core, so freshly written code is
-       visible to the fetch unit once the pipeline is flushed. */
-    __asm__ volatile ("fence.i" ::: "memory");
-}
+/* rv9_isync lives in kal_mem.c: it is a property of this board's memory,
+   not of whichever scheduler is running. */

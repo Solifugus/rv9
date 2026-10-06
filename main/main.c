@@ -59,7 +59,11 @@ static void banner(void)
     ESP_LOGI(TAG, "  flash    %lu MB", (unsigned long)(flash_bytes / (1024 * 1024)));
     ESP_LOGI(TAG, "  heap     %u bytes free, %u executable",
              (unsigned)rv9_heap_free(), (unsigned)rv9_heap_free_exec());
+#if CONFIG_RV9_KERNEL_NATIVE
+    ESP_LOGI(TAG, "  kernel   RV-9 native (KAL backend)");
+#else
     ESP_LOGI(TAG, "  kernel   FreeRTOS (KAL backend)");
+#endif
     ESP_LOGI(TAG, "");
 }
 

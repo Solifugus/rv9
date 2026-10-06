@@ -20,96 +20,101 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_UART_NUM=0
 
 
-# WHERE THE SPIKE GOT TO, 2026-10-05, so the next session does not re-run it.
+# WHAT THE BRING-UP SPIKE FOUND, 2026-10-05, so nobody spends the board time
+# twice. RV-9 runs on this chip: it boots, 13 devices attach, modules load and
+# execute, processes fork, and the shell comes up on /uart0.
 #
-# With RV-9's own kernel (the sdkconfig.defaults setting, unchanged here):
+# THE ONE REAL PORTING DEFECT was that freshly loaded module code would not
+# execute. It cost five wrong hypotheses, so all of them are written down.
 #
-#   kal-test     45 / 45      conform 27 / 27      mod-test 17 / 17
-#   io-test      41 passed,  1 FAILED
-#   pub-test      4 passed, 14 FAILED
-#   fault-test   10 passed, 26 FAILED
-#   proc-test    panics: Illegal instruction, Core 0
+# The cause: this chip reaches internal RAM *through the L1 caches*
+# (SOC_CACHE_INTERNAL_MEM_VIA_L1CACHE, true on the P4 and on no other chip
+# RV-9 has met), and the L1 data cache is write-back. A module copied into
+# RAM sits dirty in the data cache while the instruction cache still holds
+# whatever was at that address before, and `fence.i` orders fetches without
+# moving a single cache line. The C5 has no cache in front of internal RAM at
+# all, which is why RV-9 got this far with fence.i alone.
 #
-# Two hypotheses tested and BOTH WRONG, which is worth more than the numbers:
-#
-#   1. Cache coherency. The panic's MTVAL is 0xA5C3A5C3 -- RV9K_STACK_PAINT,
-#      RV-9's own kernel's paint -- so the fetch landed in painted memory, and
-#      a split I/D cache would explain that. Implemented a ranged isync with
-#      esp_cache_msync writeback + invalidate: IDENTICAL results, to the
-#      millisecond. Reverted rather than kept, because an unproven change in a
-#      kernel seam is the thing this project argues against. Ruled out, and
-#      SOC_IRAM_LOW == SOC_DRAM_LOW on the P4 as on the C5, so the address is
-#      legitimately executable either way.
-#
-#   2. That RV-9's own kernel is the weak part. Backed the KAL with FreeRTOS
-#      instead to tell them apart, and it is the other way round:
-#
-#        FreeRTOS on P4:  kal-test 41 passed, 4 FAILED -- refuses to proceed
-#        RV-9 kernel:     kal-test 45 / 45, six suites deep
-#
-#      The native kernel is the BETTER backend on this chip. FreeRTOS here is
-#      SMP and the KAL's FreeRTOS backend assumes one core.
-#
-#   3. Instruction-cache coherency, properly this time. The P4 has one L1
-#      I-cache PER CORE plus an L2, so Cache_WriteBack_All(L1_DCACHE|L2) then
-#      Cache_Invalidate_All(L1_ICACHE_MASK) -- the ROM's own whole-cache ops,
-#      which do work on internal RAM where esp_cache_msync declines it.
-#      Identical results again.
-#
-#   4. The second core. CONFIG_FREERTOS_UNICORE=y, since RV-9's kernel is
-#      single-core by construction. Identical results. Kept anyway: it is the
-#      honest configuration for this kernel, not a fix.
-#
-#   5. Instruction set. Modules build as rv32imac_zicsr_zifencei_zaamo_zalrsc
-#      and this target is rv32imafcb_..._xesploop_xespv -- a strict SUPERSET,
-#      so the store's modules are portable and this is not it either. Worth
-#      knowing in its own right: a module built for the C5 is legal here.
-#
-# WHAT IS KNOWN ABOUT THE FAULT, exactly, so nobody re-derives it:
+# The symptom reads like a memory-permission fault and is not one:
 #
 #   loaded 'st-quick' rev 1, 56 bytes, resident at 0x4ffbebbc
 #   about to enter 'st-quick': entry 0x4ffbebf0 holds 00008067
 #   MEPC 0x4ffbebf0   MCAUSE 2 (illegal instruction)   MTVAL 0xA5C3A5C3
 #
-# The entry address is right: 0x4ffbebbc + 52 is the module's entry offset.
-# The DATA read at that address returns 0x00008067, which is `ret` -- a
-# perfectly legal instruction -- and it still reads correctly immediately
-# before the call. The INSTRUCTION fetch at the same address gets
-# 0xA5C3A5C3, which is RV9K_STACK_PAINT: the generation of that memory
-# before the module was copied into it.
+# The data read returns 0x00008067 -- `ret`, correct -- right up to the call.
+# The instruction fetch gets 0xA5C3A5C3, which is RV9K_STACK_PAINT: the
+# generation of that memory before the module was copied into it. The data
+# side is right and the instruction side is one cache generation behind.
 #
-# THE ANSWER, found by taking RV-9 out of the question entirely.
+# The fix is in rv9_isync(), which now takes the range that was written and,
+# on this target, writes it back and invalidates it before the fence. It
+# lives in components/rv9_kal/src/kal_mem.c, built under either kernel,
+# because it is a property of this board's memory and not of the scheduler.
 #
-# A bare probe in app_main: two instructions (`li a0,42` / `ret`) written into
-# memory, read back through the data path, and called. No process, no
-# scheduler, no module format. Three placements, and ALL THREE FAIL --
-# including a plain `.bss` array:
+# FIVE HYPOTHESES THAT WERE WRONG, and why each was discarded:
 #
-#   probe .bss at 0x4ff38660: data reads 02a00513 00008067 -- calling
-#   Guru Meditation Error: Core 0 panic'ed (Store access fault)
-#   MEPC 0x4ff38660          <- the first instruction, and it is not a store
+#   1. "Cache coherency" -- right family, wrong implementation. A ranged
+#      esp_cache_msync writeback+invalidate changed nothing to the
+#      millisecond. Reverted rather than kept. In hindsight the idea was
+#      correct and the call was not: see dead end 3.
 #
-# So executing from data RAM does not work on this chip at all, and nothing
-# above it was ever going to. The sdkconfig says why:
+#   2. "RV-9's own kernel is the weak part." Backed the KAL with FreeRTOS to
+#      tell them apart, and it is the other way round:
 #
-#   CONFIG_SOC_CPU_IDRAM_SPLIT_USING_PMP=y    <- a chip capability, not a knob
+#        FreeRTOS on P4:  kal-test 41 passed, 4 FAILED -- refuses to proceed
+#        RV-9 kernel:     kal-test 45 / 45, every suite deep
 #
-# The P4 splits instruction and data RAM with PMP, and IDF's startup marks the
-# data side non-executable. CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT, which
-# sdkconfig.defaults sets to n, no longer exists -- it became
-# CONFIG_ESP_SYSTEM_MEMPROT, which is already off and is not the same switch.
+#      The native kernel is the BETTER backend on this chip. FreeRTOS here is
+#      SMP and the KAL's FreeRTOS backend assumes one core.
 #
-# WHICH IS THE WORK RV-9 ALREADY SAID IT WOULD DO. From sdkconfig.defaults,
-# written before this board existed:
+#   3. Whole-cache ROM operations -- Cache_WriteBack_All then
+#      Cache_Invalidate_All. Identical results, and this is the one that
+#      wasted the most time: the code was put in kal_freertos.c while the
+#      board was running the NATIVE backend, so it never executed. The fix
+#      now lives in kal_mem.c, which is compiled either way, specifically so
+#      that cannot happen again.
 #
-#   "This is not a permanent surrender of memory protection: in phase 7 RV-9
-#    owns the PMP configuration and marks module regions executable
-#    explicitly, which is stricter than this, not weaker."
+#   4. The second core. CONFIG_FREERTOS_UNICORE=y. Identical results. Kept
+#      anyway: it is the honest configuration for a kernel with one run
+#      queue, not a fix.
 #
-# The C5 let that be deferred by having no split to turn off. The P4 does not.
-# So the next piece of work is not a port detail: it is phase 7's PMP
-# ownership, now due, and the module loader marking the region it just wrote
-# as executable rather than asking the system to leave all of RAM that way.
+#   5. Instruction set. Modules build as rv32imac_zicsr_zifencei_zaamo_zalrsc
+#      and this target is rv32imafcb_..._xesploop_xespv -- a strict SUPERSET,
+#      so a module built for the C5 is legal here. Worth knowing in its own
+#      right.
+#
+#   6. PMP / PMA. An earlier commit here concluded that
+#      CONFIG_SOC_CPU_IDRAM_SPLIT_USING_PMP=y meant IDF marks data RAM
+#      non-executable. THAT CONCLUSION WAS WRONG and is retracted. Reading
+#      esp_hw_support/port/esp32p4/cpu_region_protect.c: with MEMPROT off
+#      (`# CONFIG_ESP_SYSTEM_MEMPROT is not set`) and rev >= v3 (this board
+#      is v3.2, CONFIG_ESP_REV_MIN_FULL=301), PMP entries 4-7 cover
+#      SOC_IRAM_LOW..SOC_IRAM_HIGH with CONDITIONAL_RWX -- read, write AND
+#      execute -- for both the cached and non-cached views, and PMA entry 13
+#      whitelists the same range as PMA_RWX. Neither forbids execution.
+#      A bare probe settled it: two instructions (`li a0,42` / `ret`) written
+#      into a .bss array, written back, invalidated, fenced, and called --
+#      returns 42. Internal RAM on the P4 is executable.
+#
+# WHAT IS STILL FAILING, which is a different kind of work -- none of it is
+# about code execution any more:
+#
+#   io-test     41 passed,  1 FAILED   -- /term: no LCD console on this board
+#   fault-test  73 passed,  3 FAILED   -- all three are network: no radio here
+#   mem-test    12 passed,  1 FAILED   -- exhaustion test, sized for the C5
+#   sched-test   8 passed,  7 FAILED   -- real-time admission, see below
+#
+# The sched failures are the interesting ones and are NOT a cache problem.
+# They include refusals that did not happen ("a loop that fits the CPU but
+# not the deadlines is refused"), which means admission control let in work
+# it should have turned away. Admission arithmetic calibrated against a
+# 240 MHz C5 does not transfer to a 400 MHz P4 by itself. That is the next
+# piece of real-time work, and it is a design question, not a port detail.
+#
+# Phase 7's PMP ownership is still worth doing -- RV-9 marking module regions
+# executable explicitly is stricter than leaving all of RAM that way -- but it
+# is no longer a blocker for this board, and it never was the reason modules
+# would not run.
 
 # RV-9 own kernel is single-core by construction -- one s_current, one run
 # queue. The P4 is the first dual-core chip it has met, and the second core

@@ -847,11 +847,18 @@ void rv9_sched_unlock(void);
 /* ------------------------------------------------------------------ */
 /* Instruction stream synchronisation                                  */
 /*                                                                     */
-/* Call after writing code into memory and before jumping to it. On    */
-/* RISC-V this is fence.i; other targets may need more.                */
+/* Call after writing code into memory and before jumping to it, with  */
+/* the range that was written.                                         */
+/*                                                                     */
+/* The range is not decoration. On the C5 this is one fence.i and the  */
+/* arguments go unused, because internal RAM there is not cached. On   */
+/* the P4 internal RAM is reached through the L1 caches, so the bytes  */
+/* have to be pushed out of the data cache and the stale instruction   */
+/* lines dropped -- and the only interface the chip offers for that    */
+/* takes an address and a length.                                      */
 /* ------------------------------------------------------------------ */
 
-void rv9_isync(void);
+void rv9_isync(const void *addr, size_t len);
 
 /*
  * TODO (phase 3): ISR attach/detach. Not needed until drivers exist, and

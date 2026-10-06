@@ -532,7 +532,7 @@ rv9_mod_err_t rv9_mod_register_image(const void *image, uint32_t len)
     void *copy = rv9_alloc_exec(h->module_len);
     if (copy == NULL) return RV9_MOD_ERR_NOMEM;
     memcpy(copy, image, h->module_len);
-    rv9_isync();
+    rv9_isync(copy, h->module_len);
 
     rv9_mod_entry_t *e = rv9_calloc(1, sizeof(*e));
     if (e == NULL) {
@@ -643,7 +643,7 @@ rv9_mod_err_t rv9_mod_link(const char *name, rv9_mod_entry_t **out_entry)
     e->link_count = 1;
 
     /* Only needed when instructions were written through the data path. */
-    if (!in_place) rv9_isync();
+    if (!in_place) rv9_isync(image, e->size);
 
     rv9_lock_release(s_lock);
 

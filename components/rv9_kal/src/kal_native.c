@@ -606,7 +606,5 @@ void rv9_sched_unlock(void) { rv9k_sched_unlock(); }
 
 /* ---------------- instruction sync ---------------- */
 
-void rv9_isync(void)
-{
-    __asm__ volatile ("fence.i" ::: "memory");
-}
+/* rv9_isync lives in kal_mem.c: it is a property of this board's memory,
+   not of whichever scheduler is running. */

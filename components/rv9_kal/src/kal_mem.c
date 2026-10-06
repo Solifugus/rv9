@@ -38,6 +38,7 @@
 #include "kal_internal.h"
 
 #include "esp_heap_caps.h"
+#include "esp_cache.h"
 #include "sdkconfig.h"
 
 #include "freertos/FreeRTOS.h"
@@ -343,3 +344,61 @@ size_t rv9_heap_available(void)
 }
 
 uint32_t rv9_heap_refusals(void) { return s_refusals; }
+
+
+/*
+ * Make bytes written through the data path fetchable as instructions.
+ *
+ * On the C5 this is one instruction. Internal RAM there is not cached at
+ * all, so a store is visible to the fetch unit as soon as the pipeline is
+ * flushed, and the range arguments go unused.
+ *
+ * The P4 is the first board here where that is false, and it is a property
+ * of the chip, not of the port: internal RAM (L2MEM) is reached *through*
+ * the L1 caches -- SOC_CACHE_INTERNAL_MEM_VIA_L1CACHE -- and the L1 data
+ * cache is write-back. A module copied into RAM therefore sits dirty in the
+ * data cache while the instruction cache still holds whatever was at that
+ * address before, and fence.i orders fetches without moving a single line.
+ *
+ * The symptom was exact, and is worth keeping because it reads like a
+ * memory-permission fault and is not one: the loader read 0x00008067 back
+ * from a module's entry (`ret`, correct), the process manager read the same
+ * word again immediately before calling it, and the fetch trapped with
+ * MTVAL 0xA5C3A5C3 -- RV9K_STACK_PAINT, the generation of that memory
+ * before the module was copied in. The data side was right and the
+ * instruction side was one cache generation behind.
+ *
+ * So the range is written back and invalidated in one call, which drops the
+ * stale instruction lines with it: esp_cache_msync's invalidate covers both
+ * caches of every core, not just the data cache of this one. Both ends snap
+ * outward to a cache line, because an unaligned invalidate is refused --
+ * and doing the writeback in the same call over the same widened range is
+ * what makes widening safe. A line shared with a neighbouring allocation is
+ * written back before it is dropped, so nothing of the neighbour's is lost.
+ */
+void rv9_isync(const void *addr, size_t len)
+{
+#if CONFIG_IDF_TARGET_ESP32P4
+    /* The L1 line size comes from Kconfig rather than from a runtime query,
+       because the only public query for it lives behind esp_private/ and
+       this number is a property of the chip the image was built for. */
+    enum { LINE = CONFIG_CACHE_L1_CACHE_LINE_SIZE };
+    _Static_assert((LINE & (LINE - 1)) == 0, "cache line size must be a power of two");
+
+    if (addr != NULL && len != 0) {
+        uintptr_t start = (uintptr_t)addr & ~(uintptr_t)(LINE - 1);
+        uintptr_t end   = ((uintptr_t)addr + len + LINE - 1) &
+                          ~(uintptr_t)(LINE - 1);
+
+        (void)esp_cache_msync((void *)start, end - start,
+                              ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+                              ESP_CACHE_MSYNC_FLAG_TYPE_DATA |
+                              ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+    }
+#else
+    (void)addr;
+    (void)len;
+#endif
+
+    __asm__ volatile ("fence.i" ::: "memory");
+}
