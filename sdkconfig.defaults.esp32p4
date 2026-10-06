@@ -139,19 +139,36 @@ CONFIG_ESP_CONSOLE_UART_NUM=0
 #
 # Raising the baud only moves the threshold and is NOT the fix: a line at
 # 460800 is still 2.2 ms, and 2000 us of work plus that does not fit in
-# 3000 either. The real answer is for log output to stop being synchronous
-# in its caller -- RV-9 already keeps the log in a RAM ring (main/logring.c)
-# and then hands the line straight to the cable as well. Draining that ring
-# from a low-priority task would take the console out of every caller's
-# path, at the cost of being able to drop lines under pressure and needing
-# a synchronous flush on panic. That is a design decision, not a port
-# detail, and it is open.
+# 3000 either.
 #
-# WHERE THE BOARD STANDS: every suite passes.
+# FIXED in main/logring.c, and not only here: a line logged from one of
+# RV-9's own real-time priorities goes into the ring and is NOT handed to
+# the port. The next ordinary log line sends it first, which keeps the
+# order and is almost immediate; rv9_logring_flush() from the service loop
+# is the backstop for a quiet machine. Only the port's copy is ever given
+# up, because the ring is written before that decision -- `log` always has
+# the line. Proof on the board: `rt lateloop` faults, the deadline line
+# reaches the console in order AND `log | match deadline` returns it.
 #
-#   kal-test 45/45   conform 27/27   mod-test 17/17   io-test 44/44
-#   pub-test 38/38   fault-test 69/69   proc-test 11/11
-#   sched-test 15/15   mem-test 13/13   sd-test skipped (no card)
+# The predicate is rv9_rt_in_realtime(), and it is RV-9's own two
+# real-time priorities matched EXACTLY. ">= routine" was the first version
+# and the C5 killed it inside one boot: that board runs WiFi at 23, above
+# routine work at 21, so every line the radio logged was held back and 189
+# of them never reached the console. The radio outranking routine loops is
+# an accepted condition with its own accounting (rv9_rt_limits reports
+# prio_radio for it) and is not what the predicate is asking.
+#
+# This was never really a P4 problem, which is why it was worth fixing
+# rather than documenting. The C5 is the real-time target and its console
+# is fast only because it is a bench USB cable; on a serial link at 9600
+# baud a line is 100 ms.
+#
+# WHERE THE BOARD STANDS: every suite passes, on both boards.
+#
+#   P4   kal 45/45  conform 27/27  mod 17/17  io 44/44  pub 38/38
+#        fault 69/69  proc 11/11  sched 15/15  mem 13/13  sd skipped
+#   C5   the same, and fault 76/76 and sd 7/7 -- it has the radio and the
+#        card, so seven more checks run there than here
 #
 # Three tests were describing the C5 rather than the machine they ran on and
 # were fixed with the sched work: io-test opened /term, which a board with

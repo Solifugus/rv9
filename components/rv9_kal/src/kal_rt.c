@@ -1446,6 +1446,33 @@ void rv9_rt_release(void)
     if (rt != NULL) release_slot(rt);
 }
 
+bool rv9_rt_in_realtime(void)
+{
+    /*
+     * The two priorities RV-9 promises a deadline at, matched exactly --
+     * not ">= RT_PRIO_ROUTINE", which was the first version and was wrong
+     * on the first board that had a radio.
+     *
+     * The C5 runs the WiFi driver task at 23, above routine work at 21, so
+     * ">=" called every line the radio logs real-time and held it back:
+     * 189 of them never reached the console on one boot. The radio sitting
+     * above routine loops is a known and accepted condition here -- it is
+     * why rv9_rt_limits reports prio_radio at all -- and it is not a thing
+     * this predicate is being asked about.
+     *
+     * The question is "did RV-9 promise this task a deadline", and only
+     * tasks at its own two real-time priorities were promised one, plus
+     * the watchdog that polices them, which sits at RT_PRIO_URGENT for
+     * that reason. A host task landing on either value would break the
+     * real-time guarantee itself long before it troubled the log, which is
+     * what report_host_priorities() prints every boot to make visible.
+     *
+     * One TCB read: this runs on every log line in the system.
+     */
+    UBaseType_t prio = uxTaskPriorityGet(NULL);
+    return prio == RT_PRIO_URGENT || prio == RT_PRIO_ROUTINE;
+}
+
 void rv9_rt_limits(rv9_rt_limits_t *out)
 {
     if (out == NULL) return;

@@ -471,6 +471,22 @@ typedef struct {
 
 void rv9_rt_limits(rv9_rt_limits_t *out);
 
+/*
+ * Is the caller one of the tasks RV-9 promised a deadline to?
+ *
+ * Asked of the priority and not of the real-time table, which matters: a
+ * task that has released its slot and is on its way out is still running
+ * at its real-time priority until it stops, and that is exactly when a
+ * process reports why it failed. The table would already say no.
+ *
+ * It is RV-9's own two real-time priorities, exactly -- not everything
+ * above them. The radio outranks routine work on boards that have one and
+ * that is accounted for elsewhere (see prio_radio above); it is not what
+ * this is asking. The console drain in main/logring.c is what it exists
+ * for, and kal_rt.c has the full reasoning.
+ */
+bool rv9_rt_in_realtime(void);
+
 /* Called by the task itself, once, before its loop. */
 rv9_err_t rv9_rt_declare(uint32_t period_us);
 

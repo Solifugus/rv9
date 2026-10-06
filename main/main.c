@@ -590,6 +590,12 @@ static void init_shell_loop(void)
            which is where a service restarting belongs. */
         esp_log_level_set("*", ESP_LOG_WARN);
 
+        /* The backstop for lines held back from real-time context. An
+           ordinary log line sends them itself, and on a quiet machine
+           there is no ordinary log line -- which is exactly when a control
+           loop reporting a fault must not go unheard. See logring.c. */
+        rv9_logring_flush();
+
         /* Once, when the services have settled: the figure an operator
            logging in will actually have to work with. */
         static int settled;
