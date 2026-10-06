@@ -178,8 +178,32 @@ static void a_process_that_will_not_listen(void)
  * too -- but that the port can be listened on again afterwards, and that
  * nothing the open had allocated stayed allocated.
  */
+/* Is a device of this name attached? Asked of the I/O manager rather than
+   by opening it: a network device exists before it has a link, and "can be
+   opened right now" is a different question from "is on this machine". */
+static bool attached(const char *name)
+{
+    for (const rv9_dev_t *d = rv9_io_dev_next(NULL); d; d = rv9_io_dev_next(d)) {
+        if (strcmp(d->name, name) == 0) return true;
+    }
+    return false;
+}
+
 static void a_process_blocked_in_an_open(void)
 {
+    /*
+     * Every check here is about a *waiting* open, and the only open on this
+     * machine that waits is a network listen. A board with no radio has no
+     * /n0, so `deaf accept` returns "no such device" at once and nothing is
+     * ever blocked -- the three checks below then fail by describing a
+     * machine that does not exist, rather than by finding a defect. Skipped
+     * the way the card test is skipped when there is no card.
+     */
+    if (!attached("/n0")) {
+        ESP_LOGI(TAG, "no /n0 on this machine; a waiting open cannot be tested");
+        return;
+    }
+
     size_t heap0 = rv9_heap_free();
     rv9_pid_t a = 0, b = 0;
     rv9_proc_info_t pi;

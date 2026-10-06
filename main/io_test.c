@@ -218,6 +218,17 @@ static void failsafes(void)
     check(!rv9_claim_owner(RES_A, NULL, NULL), "nothing left behind");
 }
 
+/* Is a device of this name attached? Asked of the I/O manager rather than
+   by opening it, because "attached" and "openable right now" are different
+   questions and only the first one is being asked. */
+static bool attached(const char *name)
+{
+    for (const rv9_dev_t *d = rv9_io_dev_next(NULL); d; d = rv9_io_dev_next(d)) {
+        if (strcmp(d->name, name) == 0) return true;
+    }
+    return false;
+}
+
 /*
  * The mode bit, through a real open on a real device.
  *
@@ -226,24 +237,34 @@ static void failsafes(void)
  * module's open() through the I/O manager into a claim, and a bit that
  * quietly fails to arrive would leave every check above passing.
  *
- * /term is free at this point in boot -- the banner has not been written
- * and no shell exists -- and it is given back immediately.
+ * Which device is incidental -- claims live in the I/O manager, above every
+ * file manager, so any attached device proves the same wiring. /term is
+ * preferred because it is the shape a claim exists to protect and it is
+ * free at this point in boot: the banner has not been written and no shell
+ * exists. A board with no panel has no /term at all, which is why there is
+ * a second choice rather than a failure; the ramdisk is on every board and
+ * a bare open of it is its directory, which costs nothing. Either way it is
+ * given back immediately.
  */
 static void exclusive_open(void)
 {
-    int p = rv9_io_open("/term", RV9_MODE_WRITE | RV9_MODE_EXCL);
+    const char *dev = attached("/term") ? "/term" : "/r0";
+
+    int p = rv9_io_open(dev, RV9_MODE_WRITE | RV9_MODE_EXCL);
     if (p < 0) {
-        check(false, "open /term exclusively");
+        check(false, "open a device exclusively");
+        ESP_LOGE(TAG, "  (tried %s)", dev);
         return;
     }
     check(true, "a device may be opened exclusively");
+    ESP_LOGI(TAG, "  (through %s)", dev);
 
     struct rv9_claim *other = NULL;
-    check(rv9_claim_take("/term", PID_Y, false, &other) == RV9_IO_ERR_BUSY,
+    check(rv9_claim_take(dev, PID_Y, false, &other) == RV9_IO_ERR_BUSY,
           "and the mode bit reached the table: nobody else may share it");
 
     rv9_io_close(p);
-    check(rv9_claim_take("/term", PID_Y, false, &other) == RV9_IO_OK,
+    check(rv9_claim_take(dev, PID_Y, false, &other) == RV9_IO_OK,
           "closing it hands the device back");
     rv9_claim_drop(other);
 }

@@ -57,12 +57,27 @@ static bool pin_write(uint32_t v)
 
 /* ---- a thread that spends memory in one class and holds it ---- */
 
-#define HOG_BLOCKS 256
+/*
+ * The blocks are chained through their own first word rather than held in
+ * an array, and that is the whole point.
+ *
+ * An array has a length, and a hog that stops at its length has not been
+ * refused -- it has merely finished. On the C5, 256 x 512 bytes happened to
+ * be more than the heap had left, so the difference never showed. On the P4
+ * it showed immediately: the hog filled its array with 353 KB still free,
+ * "ordinary work spends memory until it is refused" passed for the wrong
+ * reason, and the next check -- that an ordinary program cannot start --
+ * failed truthfully, because memory was not gone at all.
+ *
+ * A chain has no length. It stops when rv9_alloc says no, which is what
+ * every check downstream of here assumes has happened, on a heap of any
+ * size.
+ */
 #define HOG_BLOCK  512
 
 typedef struct {
     int    cls;
-    void  *block[HOG_BLOCKS];
+    void  *head;            /* chain; each block's first word is the next */
     int    n;
     bool   full;
     bool   release;
@@ -74,16 +89,22 @@ static void hog(void *arg)
     hog_t *h = (hog_t *)arg;
     rv9_mem_class_set(h->cls);
 
-    while (h->n < HOG_BLOCKS) {
+    for (;;) {
         void *b = rv9_alloc(HOG_BLOCK);
         if (b == NULL) break;
-        h->block[h->n++] = b;
+        *(void **)b = h->head;
+        h->head = b;
+        h->n++;
     }
     h->full = true;
 
     while (!h->release) rv9_task_delay_ms(10);
 
-    for (int i = 0; i < h->n; i++) rv9_free(h->block[i]);
+    while (h->head != NULL) {
+        void *next = *(void **)h->head;
+        rv9_free(h->head);
+        h->head = next;
+    }
     h->n = 0;
     h->freed = true;
 
