@@ -111,29 +111,54 @@ CONFIG_ESP_CONSOLE_UART_NUM=0
 # modules/rshd/rshd.c. Enabling CONFIG_ESP_TASK_WDT_INIT temporarily is what
 # named it -- the dump said "CPU 0: rv9-kernel" with IDLE starved.
 #
-# WHAT IS STILL FAILING, which is a different kind of work -- none of it is
-# about code execution any more:
+# A THIRD DEFECT, and the subtlest: THE CONSOLE IS IN THE REAL-TIME PATH.
 #
-#   io-test     41 passed,  1 FAILED   -- /term: no LCD console on this board
-#   fault-test  73 passed,  3 FAILED   -- all three are network: no radio here
-#   mem-test    12 passed,  1 FAILED   -- exhaustion test, sized for the C5
-#   sched-test   8 passed,  7 FAILED   -- real-time latency, see below
+# A log line is about a hundred characters, a character at 115200 baud is
+# 87 us, so putting one line on the cable takes roughly 8.7 ms. Every one of
+# sched-test's seven failures was that number:
 #
-# The sched failures are the interesting ones and are NOT a cache problem.
-# The board states the cause itself, and it is latency rather than the
-# admission arithmetic an earlier note here guessed at:
+#   pid 3 ('fastloop') worst stall: its release interrupt ran 8 us late,
+#   then it waited 8562 us for the CPU
 #
-#   pid 3 ('fastloop') worst stall: its release interrupt ran 7 us late,
-#   then it waited 8737 us for the CPU
+# fastloop does 2 ms of work every 5 ms and must answer within 3. Silence
+# the console for the length of the run and the same build answers in
+# 2012 us; at one priority instead of by deadline, 2664 us -- which is the
+# comparison the test exists to make and could not make at all while the
+# cable was in the window. The suite now runs each real-time window with the
+# console quiet and holds its results until afterwards.
 #
-# The release is on time to within 7 us. The task then waits nearly nine
-# milliseconds to be run -- on a chip two thirds faster than the C5, where
-# the same loop makes its 3000 us deadline. Something holds the CPU for
-# whole milliseconds at a stretch here. Two refusals that did not happen
-# ("a loop that fits the CPU but not the deadlines is refused") follow from
-# the same place: admission measures response bounds against a machine that
-# is not behaving like the one it was calibrated on. That is the next piece
-# of real-time work and it is a design question, not a port detail.
+# Pinned by elimination, in this order: fastloop alone is perfect (400 on
+# time, 49 us jitter); fastloop beside heavyloop started by hand is perfect
+# (54 us); the only thing that ever changed it was the log level. An ISR
+# capture of which task held the CPU named fastloop itself, so the stall is
+# inside its own activation, not the scheduler failing to run it.
+#
+# This never showed on the C5 because that board's console is USB
+# Serial/JTAG, where a line costs microseconds. The P4's goes out through a
+# CH343 at 115200.
+#
+# Raising the baud only moves the threshold and is NOT the fix: a line at
+# 460800 is still 2.2 ms, and 2000 us of work plus that does not fit in
+# 3000 either. The real answer is for log output to stop being synchronous
+# in its caller -- RV-9 already keeps the log in a RAM ring (main/logring.c)
+# and then hands the line straight to the cable as well. Draining that ring
+# from a low-priority task would take the console out of every caller's
+# path, at the cost of being able to drop lines under pressure and needing
+# a synchronous flush on panic. That is a design decision, not a port
+# detail, and it is open.
+#
+# WHERE THE BOARD STANDS: every suite passes.
+#
+#   kal-test 45/45   conform 27/27   mod-test 17/17   io-test 44/44
+#   pub-test 38/38   fault-test 69/69   proc-test 11/11
+#   sched-test 15/15   mem-test 13/13   sd-test skipped (no card)
+#
+# Three tests were describing the C5 rather than the machine they ran on and
+# were fixed with the sched work: io-test opened /term, which a board with
+# no panel does not have; fault-test's "killed while an open is still
+# waiting" needs an open that waits, and only a network listen waits, so it
+# is skipped with no radio; mem-test's hog stopped at a fixed 256 blocks,
+# which on this larger heap meant it was never refused at all.
 #
 # Phase 7's PMP ownership is still worth doing -- RV-9 marking module regions
 # executable explicitly is stricter than leaving all of RAM that way -- but it

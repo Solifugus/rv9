@@ -40,10 +40,81 @@ static const char *TAG = "sched-test";
 static int s_passed;
 static int s_failed;
 
+/*
+ * THE CONSOLE CANNOT BE IN THE WINDOW. This cost a day on the P4 and is
+ * the reason for the held output below.
+ *
+ * A log line is about a hundred characters, and a character at 115200 baud
+ * is 87 us, so putting one line on the cable takes roughly 8.7 ms. That is
+ * nearly three periods of the loop this file measures and three times its
+ * deadline. Every one of these checks failed on the P4 with the stall
+ * reported as 8.5 to 8.7 ms, which is a measurement of the cable and not
+ * of anything RV-9 does: silence the console for the length of a run and
+ * the same build answers in 2012 us against its 3000 us deadline.
+ *
+ * It never showed on the C5 because that board's console is USB
+ * Serial/JTAG, where a line costs microseconds. The hazard is real on any
+ * board with a slow console -- a log line can cost a control loop its
+ * deadline -- and belongs in the system, not here; see
+ * sdkconfig.defaults.esp32p4. What belongs here is not measuring it by
+ * accident.
+ *
+ * Raising the baud only moves the threshold: a line at 460800 still takes
+ * 2.2 ms, and 2000 us of work plus that does not fit in 3000 either.
+ *
+ * So each real-time window runs with the console quiet, and the checks
+ * made inside it are held and printed afterwards. Held, not dropped: a
+ * result nobody sees is worse than a slow one.
+ */
+#define HELD_MAX 12
+
+static bool            s_quiet;
+static esp_log_level_t s_was;
+static struct { bool ok; const char *what; } s_held[HELD_MAX];
+static int             s_held_n;
+
 static void check(bool ok, const char *what)
 {
-    if (ok) { s_passed++; ESP_LOGI(TAG, "  pass  %s", what); }
-    else    { s_failed++; ESP_LOGE(TAG, "  FAIL  %s", what); }
+    if (ok) s_passed++; else s_failed++;
+
+    if (s_quiet) {
+        if (s_held_n < HELD_MAX) {
+            s_held[s_held_n].ok   = ok;
+            s_held[s_held_n].what = what;
+            s_held_n++;
+        } else {
+            /* Never silently: a window that outgrew the buffer says so. */
+            s_failed++;
+        }
+        return;
+    }
+
+    if (ok) ESP_LOGI(TAG, "  pass  %s", what);
+    else    ESP_LOGE(TAG, "  FAIL  %s", what);
+}
+
+/* Quiet the console for the length of a real-time measurement. */
+static void quiet(void)
+{
+    if (s_quiet) return;
+    s_was    = esp_log_level_get(TAG);
+    s_held_n = 0;
+    s_quiet  = true;
+    esp_log_level_set("*", ESP_LOG_NONE);
+}
+
+/* Put the console back and print what the window found. */
+static void loud(void)
+{
+    if (!s_quiet) return;
+    esp_log_level_set("*", s_was);
+    s_quiet = false;
+
+    for (int i = 0; i < s_held_n; i++) {
+        if (s_held[i].ok) ESP_LOGI(TAG, "  pass  %s", s_held[i].what);
+        else              ESP_LOGE(TAG, "  FAIL  %s", s_held[i].what);
+    }
+    s_held_n = 0;
 }
 
 static bool fork_rt(const char *name, rv9_pid_t *pid)
@@ -73,6 +144,7 @@ static uint32_t s_worst[2];
 
 static void pair(bool derive)
 {
+    quiet();
     rv9_proc_rt_derive(derive);
 
     rv9_pid_t heavy = 0, fast = 0;
@@ -81,7 +153,7 @@ static void pair(bool derive)
     ok = fork_rt("fastloop", &fast) && ok;
     check(ok, derive ? "the pair is admitted"
                      : "the pair is admitted with every loop at one priority");
-    if (!ok) { rv9_proc_rt_derive(true); return; }
+    if (!ok) { loud(); rv9_proc_rt_derive(true); return; }
 
     rv9_task_delay_ms(50);
     rv9_proc_info_t hi, fi;
@@ -102,6 +174,8 @@ static void pair(bool derive)
     int fs = 1, hs = 1;
     rv9_proc_wait(fast, &fs, 5000);
     rv9_proc_wait(heavy, &hs, 5000);
+
+    loud();
 
     if (fs == -RV9_PROC_ERR_DEADLINE) worst = UINT32_MAX;
     s_worst[derive ? 0 : 1] = worst;
@@ -188,9 +262,12 @@ static bool make_rt_module(const char *name, uint32_t period, uint32_t deadline,
  */
 static void admission(void)
 {
+    quiet();
+
     rv9_pid_t fast = 0;
     if (!fork_rt("fastloop", &fast)) {
         check(false, "start fastloop");
+        loud();
         return;
     }
     rv9_task_delay_ms(30);
@@ -215,6 +292,8 @@ static void admission(void)
     if (pid) rv9_proc_wait(pid, &status, 1000);
     rv9_proc_wait(fast, &status, 5000);
     check(status == 0, "and the fast loop was not disturbed");
+
+    loud();
 }
 
 /*
@@ -226,6 +305,8 @@ static void admission(void)
  */
 static void placements(void)
 {
+    quiet();
+
     rv9_pid_t pid = 0;
     int status = 0;
     rv9_proc_info_t info;
@@ -239,6 +320,7 @@ static void placements(void)
     rv9_pid_t fast = 0;
     if (!fork_rt("fastloop", &fast)) {
         check(false, "start fastloop");
+        loud();
         return;
     }
     rv9_task_delay_ms(30);
@@ -257,6 +339,8 @@ static void placements(void)
 
     rv9_proc_wait(fast, &status, 5000);
     check(status == 0, "and the fast loop was not disturbed");
+
+    loud();
 }
 
 bool rv9_sched_selftest(void)
