@@ -182,6 +182,23 @@ CONFIG_ESP_CONSOLE_UART_NUM=0
 # is no longer a blocker for this board, and it never was the reason modules
 # would not run.
 
+# The 32 MB of PSRAM stacked in the package. Defaults for mode and speed
+# are right for this part (16-line, 200 MHz) so only the switch is here.
+#
+# CAPS_ALLOC, not MALLOC, and that is the whole decision: plain malloc never
+# reaches external memory, so nothing in RV-9 or in ESP-IDF can be handed
+# slow memory by accident. It is asked for through rv9_alloc_large() or not
+# at all. The alternative puts PSRAM in the general heap above a size
+# threshold, which would mean rv9_alloc() quietly returning memory whose
+# latency depends on a cache -- on the board whose job is to keep deadlines.
+#
+# What it is for: the MIPI-DSI panel scans its framebuffer out of memory
+# rather than holding its own, and 1024x600x16bpp is 1.2 MB. There is no
+# version of the display that fits in internal RAM.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_USE_MALLOC=n
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y
+
 # RV-9 own kernel is single-core by construction -- one s_current, one run
 # queue. The P4 is the first dual-core chip it has met, and the second core
 # was running IDF while RV-9 ran on the first. Take the chip down to one core

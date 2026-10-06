@@ -59,6 +59,16 @@ static void banner(void)
     ESP_LOGI(TAG, "  flash    %lu MB", (unsigned long)(flash_bytes / (1024 * 1024)));
     ESP_LOGI(TAG, "  heap     %u bytes free, %u executable",
              (unsigned)rv9_heap_free(), (unsigned)rv9_heap_free_exec());
+
+    /* External memory is reported separately because it is not the same
+       stuff: see rv9_alloc_large. A board with none says so. */
+    size_t large = rv9_heap_large_free();
+    if (large > 0) {
+        ESP_LOGI(TAG, "  psram    %u bytes free (%u MB)",
+                 (unsigned)large, (unsigned)(large / (1024 * 1024)));
+    } else {
+        ESP_LOGI(TAG, "  psram    none on this board");
+    }
 #if CONFIG_RV9_KERNEL_NATIVE
     ESP_LOGI(TAG, "  kernel   RV-9 native (KAL backend)");
 #else

@@ -736,6 +736,21 @@ void *rv9_alloc_exec(size_t size);
    cache disabled, so they cannot live anywhere else. */
 void *rv9_alloc_internal(size_t size);
 
+/*
+ * Big and slow is allowed: external memory if the board has any, internal
+ * if it does not, so the caller is the same on both. Framebuffers, and
+ * large buffers written once and read by hardware.
+ *
+ * Not for code -- rv9_alloc_exec insists on internal -- and not for
+ * anything a control loop touches: external latency depends on a cache,
+ * and a loop that misses a deadline occasionally is worse than one that is
+ * simply slower. See kal_mem.c.
+ */
+void *rv9_alloc_large(size_t size);
+
+/* External memory still free, and zero on a board with none. */
+size_t rv9_heap_large_free(void);
+
 void  rv9_free(void *ptr);
 
 size_t rv9_heap_free(void);        /* bytes currently free */

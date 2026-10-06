@@ -41,6 +41,29 @@
 #include "esp_cache.h"
 #include "sdkconfig.h"
 
+/*
+ * WHAT THIS FILE COUNTS, and it is not all the memory on the board.
+ *
+ * Every number here -- the floor, what is available, the low-water mark --
+ * is about internal memory, because internal memory is the thing that runs
+ * out and the thing ESP-IDF's own components allocate from and cannot be
+ * refused. That is the whole argument for the reserve at the top of this
+ * file.
+ *
+ * It used to ask MALLOC_CAP_DEFAULT, which was the same thing for as long
+ * as there was no external memory. Turning on the P4's 32 MB of PSRAM made
+ * it differ by a factor of sixty: rv9_heap_free() reported 34 MB, the floor
+ * became unreachable, and mem-test correctly stopped believing that a
+ * reserve had been spent. The allocations were never wrong -- PSRAM is
+ * CAPS_ALLOC, so plain malloc cannot reach it and the hog was still refused
+ * at 946 blocks -- only the arithmetic about them was.
+ *
+ * External memory is counted separately by rv9_heap_large_free(), because
+ * it is not interchangeable and adding the two together answers no
+ * question anybody has.
+ */
+#define RV9_HEAP_COUNTED  (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -159,7 +182,7 @@ size_t rv9_heap_rt_reserve(void) { return RV9_RT_RESERVE_BYTES; }
 
 size_t rv9_heap_available_for(int cls)
 {
-    size_t free_now = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+    size_t free_now = heap_caps_get_free_size(RV9_HEAP_COUNTED);
     size_t f = floor_for(cls);
     return (free_now > f) ? free_now - f : 0;
 }
@@ -182,7 +205,7 @@ static bool would_breach(size_t size)
     if (s_floor == 0) return false;
 
     size_t f = floor_for(rv9_mem_class_get());
-    size_t free_now = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+    size_t free_now = heap_caps_get_free_size(RV9_HEAP_COUNTED);
     if (free_now < f) return true;
 
     return size > free_now - f;
@@ -235,6 +258,49 @@ void *rv9_alloc_exec(size_t size)
     return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
 
+/*
+ * Memory for something big that does not need to be fast.
+ *
+ * The P4 has 32 MB of PSRAM in its package and the C5 has none, and the
+ * difference must not leak into the callers -- so this asks for external
+ * memory, takes internal if there is none, and the caller writes the same
+ * code either way.
+ *
+ * It exists because PSRAM is not interchangeable with internal RAM and
+ * pretending otherwise would be the quiet kind of wrong. It cannot hold
+ * code: rv9_alloc_exec insists on internal for that reason. It should not
+ * hold anything a control loop touches, because its latency depends on a
+ * cache and a loop that misses a deadline once a minute is worse than one
+ * that is simply slower. And IDF is configured so that plain malloc never
+ * reaches it (SPIRAM_USE_CAPS_ALLOC, not SPIRAM_USE_MALLOC), so nothing
+ * gets external memory by accident -- it is asked for, here, or not at
+ * all.
+ *
+ * What it is for: framebuffers, which on this board are 1.2 MB apiece and
+ * could not come from internal RAM at all; and large buffers that are
+ * written once and read by hardware.
+ *
+ * The floor is checked only on the fallback. The reserve exists to stop
+ * RV-9 spending the internal memory that ESP-IDF's own components need
+ * and cannot be refused (see the top of this file); nothing else on the
+ * board allocates from PSRAM, so there is nothing there to protect.
+ */
+void *rv9_alloc_large(size_t size)
+{
+    void *p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (p != NULL) return p;
+
+    if (would_breach(size)) return refuse();
+    return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+/* How much external memory there is to ask for, and zero on a board with
+   none -- which is the honest answer to "can I have a framebuffer". */
+size_t rv9_heap_large_free(void)
+{
+    return heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+}
+
 void *rv9_alloc_internal(size_t size)
 {
     if (would_breach(size)) return refuse();
@@ -253,12 +319,12 @@ void *rv9_alloc_critical(size_t size) { return malloc(size); }
 
 size_t rv9_heap_largest(void)
 {
-    return heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+    return heap_caps_get_largest_free_block(RV9_HEAP_COUNTED);
 }
 
 size_t rv9_heap_free(void)
 {
-    return heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+    return heap_caps_get_free_size(RV9_HEAP_COUNTED);
 }
 
 /*
@@ -274,7 +340,7 @@ static size_t s_low_before_rebase;
 
 size_t rv9_heap_low_water(void)
 {
-    size_t now = heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT);
+    size_t now = heap_caps_get_minimum_free_size(RV9_HEAP_COUNTED);
     if (s_low_before_rebase != 0 && s_low_before_rebase < now) {
         return s_low_before_rebase;
     }
@@ -294,7 +360,7 @@ void rv9_heap_low_water_rebase(void)
     if (s_low_rebased) return;
 
     /* Taken before the re-base, or it is gone: the counter is shared. */
-    size_t before = heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT);
+    size_t before = heap_caps_get_minimum_free_size(RV9_HEAP_COUNTED);
 
     /* If the monitor refuses, both numbers keep answering since boot --
        equal figures say that plainly, and this file keeps no log of its
@@ -305,7 +371,7 @@ void rv9_heap_low_water_rebase(void)
 
 size_t rv9_heap_low_since_rebase(void)
 {
-    return heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT);
+    return heap_caps_get_minimum_free_size(RV9_HEAP_COUNTED);
 }
 
 size_t rv9_heap_free_exec(void)
@@ -339,7 +405,7 @@ void rv9_heap_floor_set(size_t bytes)
  */
 size_t rv9_heap_available(void)
 {
-    size_t free_now = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+    size_t free_now = heap_caps_get_free_size(RV9_HEAP_COUNTED);
     return (free_now > s_floor) ? free_now - s_floor : 0;
 }
 
