@@ -96,20 +96,44 @@ CONFIG_ESP_CONSOLE_UART_NUM=0
 #      into a .bss array, written back, invalidated, fenced, and called --
 #      returns 42. Internal RAM on the P4 is executable.
 #
+# A SECOND DEFECT, found after the first and not a chip problem at all: the
+# machine reached its shell, printed one prompt, and then went silent --
+# every thread starved, the FreeRTOS idle task included. rshd retried
+#
+#     int c = env->open("/n0/...", RV9_MODE_RW);
+#     if (c < 0) continue;
+#
+# and on a board with NO network device that open does not wait for
+# anything; it answers "no such device" at once. Every RV-9 thread shares
+# one host task, so a loop with no pause in it starves the console shell,
+# the service supervisor and the host's idle task together. sshd had already
+# learned this and paused; rshd never had the same line. Fixed in
+# modules/rshd/rshd.c. Enabling CONFIG_ESP_TASK_WDT_INIT temporarily is what
+# named it -- the dump said "CPU 0: rv9-kernel" with IDLE starved.
+#
 # WHAT IS STILL FAILING, which is a different kind of work -- none of it is
 # about code execution any more:
 #
 #   io-test     41 passed,  1 FAILED   -- /term: no LCD console on this board
 #   fault-test  73 passed,  3 FAILED   -- all three are network: no radio here
 #   mem-test    12 passed,  1 FAILED   -- exhaustion test, sized for the C5
-#   sched-test   8 passed,  7 FAILED   -- real-time admission, see below
+#   sched-test   8 passed,  7 FAILED   -- real-time latency, see below
 #
 # The sched failures are the interesting ones and are NOT a cache problem.
-# They include refusals that did not happen ("a loop that fits the CPU but
-# not the deadlines is refused"), which means admission control let in work
-# it should have turned away. Admission arithmetic calibrated against a
-# 240 MHz C5 does not transfer to a 400 MHz P4 by itself. That is the next
-# piece of real-time work, and it is a design question, not a port detail.
+# The board states the cause itself, and it is latency rather than the
+# admission arithmetic an earlier note here guessed at:
+#
+#   pid 3 ('fastloop') worst stall: its release interrupt ran 7 us late,
+#   then it waited 8737 us for the CPU
+#
+# The release is on time to within 7 us. The task then waits nearly nine
+# milliseconds to be run -- on a chip two thirds faster than the C5, where
+# the same loop makes its 3000 us deadline. Something holds the CPU for
+# whole milliseconds at a stretch here. Two refusals that did not happen
+# ("a loop that fits the CPU but not the deadlines is refused") follow from
+# the same place: admission measures response bounds against a machine that
+# is not behaving like the one it was calibrated on. That is the next piece
+# of real-time work and it is a design question, not a port detail.
 #
 # Phase 7's PMP ownership is still worth doing -- RV-9 marking module regions
 # executable explicitly is stricter than leaving all of RAM that way -- but it

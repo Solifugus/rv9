@@ -46,11 +46,25 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     if (st == NULL || env->statics_size < sizeof(*st)) return -2;
 
     for (;;) {
-        /* Blocks until somebody connects, or times out and we listen
-           again. Opening a path that is not ready yet is not a special
-           case. */
+        /*
+         * Blocks until somebody connects, or times out and we listen
+         * again. Opening a path that is not ready yet is not a special
+         * case.
+         *
+         * A failure that returns *immediately* is, though, and `continue`
+         * alone was a spin. On a board with no network device at all the
+         * open does not wait for anything -- it answers "no such device"
+         * at once -- and this loop then ran flat out at ordinary priority,
+         * starving every other RV-9 thread, the console shell included,
+         * because they all share one host task. The machine looked hung
+         * and was in fact perfectly busy. sshd already paused here for
+         * exactly this reason; rshd never had the same line.
+         */
         int c = env->open(LISTEN_PATH, RV9_MODE_RW);
-        if (c < 0) continue;
+        if (c < 0) {
+            env->sleep_ms(1000);
+            continue;
+        }
 
         st->sessions++;
 
