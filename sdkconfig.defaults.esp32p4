@@ -50,7 +50,39 @@ CONFIG_ESP_CONSOLE_UART_NUM=0
 #      The native kernel is the BETTER backend on this chip. FreeRTOS here is
 #      SMP and the KAL's FreeRTOS backend assumes one core.
 #
-# So the fault is above the KAL and above the kernel, in whatever runs a
-# module. The next thing to look at is what the P4 has that the C5 does not:
-# a second core, and an FPU. `rv_core_fpu_save` and `rv_core_fpu_restore`
-# appear in this target's link line and in no C5 build.
+#   3. Instruction-cache coherency, properly this time. The P4 has one L1
+#      I-cache PER CORE plus an L2, so Cache_WriteBack_All(L1_DCACHE|L2) then
+#      Cache_Invalidate_All(L1_ICACHE_MASK) -- the ROM's own whole-cache ops,
+#      which do work on internal RAM where esp_cache_msync declines it.
+#      Identical results again.
+#
+#   4. The second core. CONFIG_FREERTOS_UNICORE=y, since RV-9's kernel is
+#      single-core by construction. Identical results. Kept anyway: it is the
+#      honest configuration for this kernel, not a fix.
+#
+#   5. Instruction set. Modules build as rv32imac_zicsr_zifencei_zaamo_zalrsc
+#      and this target is rv32imafcb_..._xesploop_xespv -- a strict SUPERSET,
+#      so the store's modules are portable and this is not it either. Worth
+#      knowing in its own right: a module built for the C5 is legal here.
+#
+# WHAT IS KNOWN ABOUT THE FAULT, exactly, so nobody re-derives it:
+#
+#   loaded 'st-quick' rev 1, 56 bytes, resident at 0x4ffbebbc
+#   about to enter 'st-quick': entry 0x4ffbebf0 holds 00008067
+#   MEPC 0x4ffbebf0   MCAUSE 2 (illegal instruction)   MTVAL 0xA5C3A5C3
+#
+# The entry address is right: 0x4ffbebbc + 52 is the module's entry offset.
+# The DATA read at that address returns 0x00008067, which is `ret` -- a
+# perfectly legal instruction -- and it still reads correctly immediately
+# before the call. The INSTRUCTION fetch at the same address gets
+# 0xA5C3A5C3, which is RV9K_STACK_PAINT: the generation of that memory
+# before the module was copied into it.
+#
+# So the data side and the instruction side disagree about one address, and
+# four plausible explanations for that do not fix it. That is where it stands.
+
+# RV-9 own kernel is single-core by construction -- one s_current, one run
+# queue. The P4 is the first dual-core chip it has met, and the second core
+# was running IDF while RV-9 ran on the first. Take the chip down to one core
+# until RV-9 has something to say about the second.
+CONFIG_FREERTOS_UNICORE=y
