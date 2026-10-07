@@ -1,5 +1,10 @@
 /*
- * sdspi -- the microSD slot, as a block device.
+ * The microSD slot as a block device, over SPI.
+ *
+ * Registers as `sdcard`, not `sdspi`: the descriptor names a driver and
+ * the module store is built once for both boards, so the name has to be
+ * the one thing both transports agree on. drv_sdmmc.c is the same driver
+ * over four data lines on the P4.
  *
  * RBF over this is the same file manager that runs on the RAM disk and on
  * the flash partition; only the driver underneath differs, which is the
@@ -176,15 +181,15 @@ static rv9_io_err_t sdspi_write(rv9_dev_t *dev, uint32_t lsn, const void *buf,
     return err;
 }
 
-static const rv9_driver_t sdspi = {
-    .name         = "sdspi",
+static const rv9_driver_t sdcard = {
+    .name         = "sdcard",
     .init         = sdspi_init,
     .geometry     = sdspi_geometry,
     .read_blocks  = sdspi_read,
     .write_blocks = sdspi_write,
 };
 
-rv9_io_err_t rv9_drv_sdspi_register(void)
+rv9_io_err_t rv9_drv_sdcard_register(void)
 {
-    return rv9_io_register_driver(&sdspi);
+    return rv9_io_register_driver(&sdcard);
 }

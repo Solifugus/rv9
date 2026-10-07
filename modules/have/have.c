@@ -27,11 +27,11 @@
  * caught `dump`. A pointer to a literal is fine; a table of them is not.
  *
  *   svgwin  somewhere to draw      net    a network
- *   lcdcon  a panel console        sdspi  a card
+ *   lcdcon  a panel console        sdcard a card
  *   i2c     a two-wire bus         pwm    an actuator
  *   adc     an analogue input      ssh    remote login
  */
-#define USUAL "svgwin lcdcon i2c net sdspi pwm adc ssh"
+#define USUAL "svgwin lcdcon i2c net sdcard pwm adc ssh"
 
 static void report(const rv9_mod_env_t *env, const char *what)
 {

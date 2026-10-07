@@ -291,7 +291,7 @@ small systems do:
    file manager     SCF (character)  RBF (block)  NFM (network)  PIPE
       │
       ▼
-   driver           lcdcon  uart  sdspi  wifi
+   driver           lcdcon  uart  sdcard  wifi
       │
       ▼
    descriptor       /term  /sd0  /n0    — names, binds, configures
@@ -322,7 +322,7 @@ console to UART0, whose pins go nowhere on this board.
 | `/term` | SCF | lcdcon | console on the ST7789 panel |
 | `/uart0` | SCF | uart | serial console |
 | `/r0` | RBF | ramdisk | 64 KB of memory; exists so RBF can be proven without a card |
-| `/sd0` | RBF | sdspi | the microSD card; see §42 |
+| `/sd0` | RBF | sdcard | the microSD card; see §42 |
 | `/n0` | NFM | wifi+lwIP | network as a path, not a socket API |
 
 `/term` on the LCD is the first milestone that will actually feel like an
@@ -357,7 +357,7 @@ out of the design, and it is why `dir` is thirty lines with no knowledge of
 sectors, bitmaps or segments.
 
 The RAM disk exists so this could be built and proven without depending on
-an SD card driver, or on there being a card in the slot. When `sdspi`
+an SD card driver, or on there being a card in the slot. When `sdcard`
 arrives, its descriptor names the same file manager over a different driver
 and nothing above changes. That is the claim the layering makes; the RAM
 disk is the cheap way to test it.
@@ -5031,7 +5031,7 @@ card to exist. One arrived.
 
 ### The driver
 
-`sdspi` is a block driver like the other two: `geometry`, `read_blocks`,
+`sdcard` is a block driver like the other two: `geometry`, `read_blocks`,
 `write_blocks`, and nothing else. ESP-IDF's SD-over-SPI host does the card
 protocol; this drives it, one sector at a time through a DMA-capable
 bounce buffer, because a caller's buffer may be anywhere.

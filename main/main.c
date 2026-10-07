@@ -255,9 +255,7 @@ static void io_bringup(void)
     REGISTER(rv9_drv_lcdcon_register());
     REGISTER(rv9_drv_ramdisk_register());
     REGISTER(rv9_drv_flashdisk_register());
-#if !CONFIG_IDF_TARGET_ESP32P4
-    REGISTER(rv9_drv_sdspi_register());   /* SPI card; the P4's is SDMMC */
-#endif
+    REGISTER(rv9_drv_sdcard_register());
 #if !CONFIG_IDF_TARGET_ESP32P4
     REGISTER(rv9_drv_net_register());      /* no radio on this chip */
 #endif

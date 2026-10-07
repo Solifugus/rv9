@@ -876,7 +876,7 @@
       "sessions": false
     },
     {
-      "name": "sdspi",
+      "name": "sdcard",
       "read_rt": null,
       "write_rt": null,
       "retains": false,

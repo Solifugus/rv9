@@ -161,7 +161,7 @@ to stop and enjoy it for a while before committing to the rest.**
   `flashdisk`: same file manager as `/r0`, different driver. Programs
   written there are loaded at boot by `autoload()` and are commands again
   without a cable.
-- **`sdspi` driver → `/sd0` — done**, see design §42. A 32 GB card, RBF over
+- **`sdcard` driver → `/sd0` — done**, see design §42. A 32 GB card, RBF over
   it, the same file manager as `/r0` and `/f0`.
 - Bus arbitration with the LCD turned out to be nobody's problem: the card
   and the display are two devices on one SPI bus with a chip select each,
@@ -553,7 +553,7 @@ Then, in order of what it unblocks rather than phase number:
 (phase 11's last two boxes, design §52). A demonstration can now be run
 rather than typed.*
 
-*Done, and previously listed here: the `sdspi` driver and `/sd0` (phase 5,
+*Done, and previously listed here: the `sdcard` driver and `/sd0` (phase 5,
 see design §42), the PIPE file manager (phase 11, design §47's
 neighbours), and `/i2c0` under IFM (phase 10, above).*
 

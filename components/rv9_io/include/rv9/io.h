@@ -11,7 +11,7 @@
  *      |
  *   file manager     the *discipline* -- SCF for character streams, RBF for
  *      |             blocks, NFM for the network. Knows nothing of hardware.
- *   driver           the *hardware* -- uart, lcdcon, sdspi. Knows nothing of
+ *   driver           the *hardware* -- uart, lcdcon, sdcard. Knows nothing of
  *      |             files, lines, or records.
  *   descriptor       the *binding* -- "/term is SCF over lcdcon, echo off"
  *

@@ -46,6 +46,11 @@ endif()
 #   panel.c      an ST7789 on SPI, which holds its own framebuffer and is
 #                written a window at a time. The microSD card shares its
 #                bus, so drv_sdspi.c goes with it.
+#
+# The card is the same shape: one driver name, `sdcard`, and the board
+# decides whether that is SPI (drv_sdspi.c) or four-line SDMMC
+# (drv_sdmmc.c). A descriptor names a driver and there is one module store
+# for both boards, so the name cannot carry the transport.
 #   panel_dsi.c  an EK79007 on MIPI-DSI, which holds nothing: the P4 scans
 #                the picture out of PSRAM continuously, so there is a real
 #                1.2 MB framebuffer and a blit is a copy into it.
@@ -60,7 +65,8 @@ list(APPEND RV9_IO_SRCS "src/drv_lcdcon.c" "src/font.c" "src/raster.c"
 list(APPEND RV9_IO_REQ esp_lcd esp_hw_support)
 
 if("${IDF_TARGET}" STREQUAL "esp32p4")
-    list(APPEND RV9_IO_SRCS "src/panel_dsi.c")
+    list(APPEND RV9_IO_SRCS "src/panel_dsi.c" "src/drv_sdmmc.c")
+    list(APPEND RV9_IO_REQ esp_driver_sdmmc sdmmc)
 else()
     list(APPEND RV9_IO_SRCS "src/panel.c" "src/drv_sdspi.c")
     list(APPEND RV9_IO_REQ esp_driver_sdspi sdmmc)

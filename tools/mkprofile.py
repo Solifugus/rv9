@@ -307,8 +307,16 @@ def env_calls(module_h):
 
 
 def io_layers():
-    """File managers and drivers, and whether their data paths are resident."""
-    managers, drivers = [], []
+    """File managers and drivers, and whether their data paths are resident.
+
+    A name may be implemented more than once -- `sdcard` is SPI on one
+    board and four-line SDMMC on another, and only one of the two files is
+    ever compiled -- so these are collected by name rather than appended.
+    Two implementations of one name that disagree about the profile would
+    be a real inconsistency rather than a duplicate, so that is reported
+    instead of silently keeping whichever sorted first.
+    """
+    managers, drivers = {}, {}
     files = glob.glob(os.path.join(ROOT, "components", "*", "src", "*.c"))
     for path in sorted(files):
         text = open(path, encoding="utf-8").read()
@@ -328,11 +336,12 @@ def io_layers():
                 return all(f in rt for f in present)
 
             if kind == "filemgr":
-                managers.append({"name": name,
-                                 "read_rt": resident("read"),
-                                 "write_rt": resident("write")})
+                rec = {"name": name,
+                       "read_rt": resident("read"),
+                       "write_rt": resident("write")}
+                into = managers
             else:
-                drivers.append({
+                rec = {
                     "name": name,
                     "read_rt": resident("unit_read") if "unit_read" in fields
                                else resident("read"),
@@ -340,10 +349,17 @@ def io_layers():
                                 else resident("write"),
                     "retains": fields.get("retains") == "true",
                     "sessions": "open" in fields,
-                })
-    managers.sort(key=lambda e: e["name"])
-    drivers.sort(key=lambda e: e["name"])
-    return managers, drivers
+                }
+                into = drivers
+
+            if name in into and into[name] != rec:
+                raise SystemExit(
+                    "mkprofile: two implementations of %r disagree about the "
+                    "profile: %r then %r (%s)" % (name, into[name], rec, path))
+            into[name] = rec
+
+    return ([managers[k] for k in sorted(managers)],
+            [drivers[k] for k in sorted(drivers)])
 
 
 # ---- everything ----

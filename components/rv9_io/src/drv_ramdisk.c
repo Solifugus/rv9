@@ -3,7 +3,7 @@
  *
  * Exists so that RBF can be built and proven without depending on whether
  * the SD card driver works, or on whether there is a card in the slot. When
- * sdspi arrives it implements the same three entry points and RBF will not
+ * the card driver arrives it implements the same three entry points and RBF will not
  * know the difference -- which is the claim the layering makes, and this is
  * the cheapest way to test it.
  *

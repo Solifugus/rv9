@@ -258,7 +258,7 @@ the firmware.
 | `/w0` | `scf` | `svgwin` | A window you draw on by writing SVG to it. Documents up to 4 KB. |
 | `/r0` | `rbf` | `ramdisk` | RAM disk. Fast, and gone at reboot. |
 | `/f0` | `rbf` | `flashdisk` | A flash partition. Where modules live to survive a reboot. |
-| `/sd0` | `rbf` | `sdspi` | microSD over SPI, sharing the bus with the display. |
+| `/sd0` | `rbf` | `sdcard` | microSD. Over SPI on the C5, sharing the display's bus; four-line SDMMC on the P4. |
 | `/gpio/N` | `pio` | `gpio` | Pins. Refuses the ones the board has spoken for: USB console, display, card. |
 | `/pwm0/N` | `pio` | `pwm` | Duty cycle. Stops driving when the path closes — it holds a hardware channel that must be given back. |
 | `/adc0/N` | `pio` | `adc` | Analogue in. |
