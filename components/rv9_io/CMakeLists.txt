@@ -37,24 +37,33 @@ else()
 endif()
 
 #
-# The glass, where it is the glass RV-9 knows about.
+# The glass.
 #
-# panel.c is an ST7789 driven over SPI on the C5's pin numbers. This P4 board
-# has a 1024x600 MIPI-DSI panel on none of them, and -- the part that is not
-# just pins -- a DSI panel has no framebuffer of its own, so "whoever painted
-# last is what you see" stops being true and RV-9 would own 1.2 MB of pixels
-# in PSRAM instead. That is a different panel.c, not a port of this one.
+# Everything above the panel is portable and is built for both boards: the
+# console, the font, the scanline rasteriser and the SVG window. Only the
+# panel underneath them is board-specific, and the two are not alike --
 #
-# So /term and /w0 do not exist here yet, and the same rule applies as to the
-# radio: no driver, no descriptor, no device. The console is /uart0, which on
-# this board is a real UART and works.
+#   panel.c      an ST7789 on SPI, which holds its own framebuffer and is
+#                written a window at a time. The microSD card shares its
+#                bus, so drv_sdspi.c goes with it.
+#   panel_dsi.c  an EK79007 on MIPI-DSI, which holds nothing: the P4 scans
+#                the picture out of PSRAM continuously, so there is a real
+#                1.2 MB framebuffer and a blit is a copy into it.
 #
-# sdspi goes with it: it shares the panel's SPI bus and its pins are the C5's.
+# They answer the same panel.h, which is what makes the layers above them
+# the same code. The one thing that was NOT portable turned out to be in
+# drv_lcdcon.c, which had the C5's 172x320 written into it while claiming
+# to ask the panel -- see the note there.
 #
-if(NOT "${IDF_TARGET}" STREQUAL "esp32p4")
-    list(APPEND RV9_IO_SRCS "src/drv_lcdcon.c" "src/font.c" "src/panel.c"
-                            "src/raster.c" "src/drv_svgwin.c" "src/drv_sdspi.c")
-    list(APPEND RV9_IO_REQ esp_lcd esp_driver_sdspi sdmmc)
+list(APPEND RV9_IO_SRCS "src/drv_lcdcon.c" "src/font.c" "src/raster.c"
+                        "src/drv_svgwin.c")
+list(APPEND RV9_IO_REQ esp_lcd esp_hw_support)
+
+if("${IDF_TARGET}" STREQUAL "esp32p4")
+    list(APPEND RV9_IO_SRCS "src/panel_dsi.c")
+else()
+    list(APPEND RV9_IO_SRCS "src/panel.c" "src/drv_sdspi.c")
+    list(APPEND RV9_IO_REQ esp_driver_sdspi sdmmc)
 endif()
 
 idf_component_register(SRCS ${RV9_IO_SRCS}

@@ -252,13 +252,11 @@ static void io_bringup(void)
     REGISTER(rv9_pipefm_register());
     REGISTER(rv9_ifm_register());
     REGISTER(rv9_drv_uart_register());
-#if !CONFIG_IDF_TARGET_ESP32P4
-    REGISTER(rv9_drv_lcdcon_register());   /* no panel on this board yet */
-#endif
+    REGISTER(rv9_drv_lcdcon_register());
     REGISTER(rv9_drv_ramdisk_register());
     REGISTER(rv9_drv_flashdisk_register());
 #if !CONFIG_IDF_TARGET_ESP32P4
-    REGISTER(rv9_drv_sdspi_register());   /* no panel on this board yet */
+    REGISTER(rv9_drv_sdspi_register());   /* SPI card; the P4's is SDMMC */
 #endif
 #if !CONFIG_IDF_TARGET_ESP32P4
     REGISTER(rv9_drv_net_register());      /* no radio on this chip */
@@ -267,9 +265,7 @@ static void io_bringup(void)
     REGISTER(rv9_drv_pwm_register());
     REGISTER(rv9_drv_adc_register());
     REGISTER(rv9_drv_tsens_register());
-#if !CONFIG_IDF_TARGET_ESP32P4
-    REGISTER(rv9_drv_svgwin_register());   /* no panel on this board yet */
-#endif
+    REGISTER(rv9_drv_svgwin_register());
     REGISTER(rv9_drv_pubmem_register());
     REGISTER(rv9_drv_pipemem_register());
     REGISTER(rv9_drv_i2c_register());

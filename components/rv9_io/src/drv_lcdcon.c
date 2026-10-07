@@ -45,10 +45,15 @@ static const char *TAG = "rv9-lcdcon";
 #define OPT_MARGIN_X 6
 #define OPT_MARGIN_Y 7
 
-/* Asked of the panel at init; kept because the cell arithmetic needs them
-   before anything has been drawn. */
-#define PANEL_W       172
-#define PANEL_H       320
+/*
+ * The panel's size is asked of the panel, not written down here.
+ *
+ * It used to be #define PANEL_W 172 / PANEL_H 320, with a comment claiming
+ * they came from the panel at init. They did not -- rv9_panel_open() was
+ * called with (NULL, NULL) and its answer thrown away -- and that went
+ * unnoticed for as long as there was one piece of glass. On the P4's
+ * 1024x600 it would have built a 320x172 console in the corner of it.
+ */
 
 /* Glyphs are already 10x20 and anti-aliased, so 1x is the normal case.
    Scaling above that magnifies an already-large cell. */
@@ -405,6 +410,18 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
 
     bool landscape = dev->opt[OPT_ROTATE] != 0;
 
+    /* The glass belongs to panel.c, because `/w0` wants it too. This brings
+       it up if nobody has yet, and otherwise just reports it -- and either
+       way its answer is where the geometry below comes from. A panel that
+       cannot rotate reports what it actually is, which is why this is read
+       back rather than derived from `landscape`. */
+    int panel_w = 0, panel_h = 0;
+    rv9_io_err_t perr = rv9_panel_open(landscape, &panel_w, &panel_h);
+    if (perr != RV9_IO_OK) {
+        rv9_free(c);
+        return perr;
+    }
+
     uint16_t fg = (uint16_t)dev->opt[OPT_FG];
     uint16_t bg = (uint16_t)dev->opt[OPT_BG];
     if (fg == 0 && bg == 0) {
@@ -427,8 +444,8 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
     c->scale = scale;
     c->cw    = GLYPH_W * scale;
     c->ch    = GLYPH_H * scale;
-    c->w     = landscape ? PANEL_H : PANEL_W;
-    c->h     = landscape ? PANEL_W : PANEL_H;
+    c->w     = panel_w;
+    c->h     = panel_h;
     c->cols  = (c->w - 2 * c->mx) / c->cw;
     c->rows  = (c->h - 2 * c->my) / c->ch;
 
@@ -456,17 +473,6 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
     memset(c->grid, ' ', (size_t)c->cols * c->rows);
     for (int i = 0; i < c->cols * c->rows; i++) c->attr[i] = c->pen;
 
-    /* The glass belongs to panel.c, because `/w0` wants it too. This
-       brings it up if nobody has yet, and otherwise just reports it. */
-    rv9_io_err_t perr = rv9_panel_open(landscape, NULL, NULL);
-    if (perr != RV9_IO_OK) {
-        rv9_free(c->grid);
-        rv9_free(c->attr);
-        rv9_free(c->dirty);
-        rv9_free(c->rowbuf);
-        rv9_free(c);
-        return perr;
-    }
     rv9_panel_backlight(100);
 
     /* Clear the whole panel, margins included, so we neither inherit what
@@ -490,7 +496,7 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
     ESP_LOGI(TAG, "console up: %dx%d cells, %dx%d px, %dx glyphs, %s, "
                   "fg %04x on bg %04x (margins %d/%d)",
              c->cols, c->rows, c->w, c->h, c->scale,
-             landscape ? "landscape" : "portrait", fg, bg, c->mx, c->my);
+             c->w > c->h ? "landscape" : "portrait", fg, bg, c->mx, c->my);
     return RV9_IO_OK;
 }
 
