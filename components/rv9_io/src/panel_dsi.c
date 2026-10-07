@@ -85,8 +85,23 @@ static const char *TAG = "rv9-panel";
 #define PANEL_W_UM   153405
 #define PANEL_H_UM    89886
 
+/*
+ * LEDC channel 5, not 1, and the number matters.
+ *
+ * /pwm0 hands out LEDC channels 0 to 3 from drv_pwm.c's own pool and binds
+ * them to LEDC_TIMER_0 at whatever frequency and duty resolution that
+ * device was configured with. A backlight sitting on one of those gets its
+ * channel re-pointed at the first `pwm` a program runs: a new GPIO, a new
+ * timer, 50 Hz instead of 5 kHz, and a duty of 1023 read against a 14-bit
+ * range -- six percent, which looks like a panel that died.
+ *
+ * panel.c picked 5 on the C5 for exactly this reason. This file picked 1
+ * and had the same latent bug until it was noticed. Channels 4 and up are
+ * nobody else's; keep it that way, and see MAX_CHANNELS in drv_pwm.c
+ * before changing either number.
+ */
 #define BL_TIMER      LEDC_TIMER_1
-#define BL_CHANNEL    LEDC_CHANNEL_1
+#define BL_CHANNEL    LEDC_CHANNEL_5
 #define BL_DUTY_BITS  10
 
 /* 0xB2, then the panel maker's eight. 0x11 is sleep-out and the 120 ms
@@ -111,6 +126,26 @@ static const init_cmd_t s_init[] = {
     { 0x85,           0xE3,        true,   0 },
     { 0x86,           0x88,        true,   0 },
     { 0x11,           0x00,        false, 120 },   /* sleep out */
+
+    /*
+     * MADCTL: mirror both axes.
+     *
+     * The panel is mounted upside down relative to the board on this
+     * product -- the board support package says mirror_x and mirror_y with
+     * no axis swap, and the glass agrees: without this the text is
+     * inverted, and turning the board over to read it puts the camera at
+     * the bottom.
+     *
+     * Done here in the panel rather than by flipping pixels above it. The
+     * console and the window both draw top-down into a framebuffer the
+     * hardware scans; asking either of them to think upside down would be
+     * two places to get it wrong instead of none.
+     *
+     * 0x01 is the maker's default for this register (SHLR, the horizontal
+     * bit, already set); 0x02 is UPDN. Both together is the 180 degrees
+     * this board wants.
+     */
+    { 0x36,           0x03,        true,    0 },
 };
 
 static esp_lcd_panel_handle_t s_panel;
@@ -144,6 +179,7 @@ rv9_io_err_t rv9_panel_bus_claim(void)
 
 static rv9_io_err_t backlight_init(void)
 {
+
     ledc_timer_config_t timer = {
         .speed_mode      = LEDC_LOW_SPEED_MODE,
         .timer_num       = BL_TIMER,
@@ -153,9 +189,25 @@ static rv9_io_err_t backlight_init(void)
     };
     if (ledc_timer_config(&timer) != ESP_OK) return RV9_IO_ERR_IO;
 
-    /* Starts dark on purpose: the framebuffer holds whatever PSRAM held at
-       reset, and showing that for the moment before the first clear is a
-       flash of confetti on a 7 inch screen. */
+    /*
+     * THE BACKLIGHT ON THIS BOARD IS ACTIVE LOW, hence output_invert.
+     *
+     * This cost a working display and a round trip through the board's
+     * factory firmware to find. Without it, duty 1023 -- "full
+     * brightness" by every other reading -- drives the pin high and turns
+     * the backlight OFF, so the panel is not dim or wrong, it is black.
+     * Driving the pin high as a plain GPIO to rule the brightness path out
+     * turned it off just as firmly, which made the backlight look innocent
+     * twice.
+     *
+     * The C5's panel is active high and panel.c does not invert, so this is
+     * a board fact and belongs here rather than anywhere shared.
+     *
+     * With the inversion, duty 0 is pin-high is dark, which is still what
+     * is wanted at startup: the framebuffer holds whatever PSRAM held at
+     * reset, and showing that before the first clear is a flash of
+     * confetti on a 7 inch screen.
+     */
     ledc_channel_config_t ch = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
         .channel    = BL_CHANNEL,
@@ -164,6 +216,7 @@ static rv9_io_err_t backlight_init(void)
         .gpio_num   = PIN_BL,
         .duty       = 0,
         .hpoint     = 0,
+        .flags      = { .output_invert = 1 },
     };
     if (ledc_channel_config(&ch) != ESP_OK) return RV9_IO_ERR_IO;
 
@@ -322,6 +375,18 @@ rv9_io_err_t rv9_panel_open(bool landscape, int *w, int *h)
              s_w, s_h, DSI_LANES, DSI_LANE_MBPS, PANEL_W * PANEL_H * 2 / 1024);
     return RV9_IO_OK;
 }
+
+/*
+ * No. The scan-out reads this framebuffer straight out of memory, so
+ * memory order is what reaches the glass.
+ *
+ * Getting this wrong is not subtle once you know what you are looking at,
+ * and is thoroughly confusing before: navy (0x0195) arrives as olive
+ * (0x9501), and the sixteen-step anti-aliasing ramp between a foreground
+ * and a background becomes sixteen unrelated colours, which reads as
+ * glyphs with shadows on them rather than as a colour fault.
+ */
+bool rv9_panel_swaps_bytes(void) { return false; }
 
 void rv9_panel_size(int *w, int *h)
 {

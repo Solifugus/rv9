@@ -86,16 +86,23 @@ static const char *TAG = "rv9-lcdcon";
 #define DEFAULT_BG    0x0195      /* #0033aa, a medium navy */
 
 /*
- * This panel takes RGB565 with the bytes the other way round from the
- * order esp_lcd hands them over, so colours are swapped once at init
- * rather than per pixel. Determined empirically: 0x0195 (navy) came out
- * as 0x9501 (olive) on the glass, which is the same value byte-reversed.
+ * Some panels take RGB565 with the bytes the other way round from native
+ * order, and some do not -- see rv9_panel_swaps_bytes() in panel.h. The
+ * answer is asked of the panel once at init and applied where colours are
+ * chosen, not per pixel.
  *
- * White hid this for a while, 0xFFFF being symmetric.
+ * It used to be unconditional, because for as long as there was one panel
+ * it was simply true. On a panel that does not want it, every colour comes
+ * out byte-reversed: navy becomes olive, and the shade ramp that
+ * anti-aliases a glyph against its background becomes sixteen unrelated
+ * colours, which looks like shadows on the letters rather than like a
+ * colour fault.
  */
+static bool s_swap;        /* the panel's answer, read at init */
+
 static inline uint16_t panel_color(uint16_t rgb565)
 {
-    return (uint16_t)((rgb565 >> 8) | (rgb565 << 8));
+    return s_swap ? (uint16_t)((rgb565 >> 8) | (rgb565 << 8)) : rgb565;
 }
 
 /*
@@ -421,6 +428,7 @@ static rv9_io_err_t lcdcon_init(rv9_dev_t *dev)
         rv9_free(c);
         return perr;
     }
+    s_swap = rv9_panel_swaps_bytes();
 
     uint16_t fg = (uint16_t)dev->opt[OPT_FG];
     uint16_t bg = (uint16_t)dev->opt[OPT_BG];

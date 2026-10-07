@@ -199,6 +199,14 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_USE_MALLOC=n
 CONFIG_SPIRAM_USE_CAPS_ALLOC=y
 
+# 250 MHz, which is what the board's own factory firmware runs this part at.
+# The display scans its framebuffer out of here continuously -- 1024x600 at
+# 16bpp and 60 Hz is about 74 MB/s of reads that must never be late -- so
+# matching the speed the vendor ships is worth more than the margin saved by
+# running slower.
+CONFIG_SPIRAM_SPEED_200M=n
+CONFIG_SPIRAM_SPEED_250M=y
+
 # RV-9 own kernel is single-core by construction -- one s_current, one run
 # queue. The P4 is the first dual-core chip it has met, and the second core
 # was running IDF while RV-9 ran on the first. Take the chip down to one core

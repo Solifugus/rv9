@@ -1216,7 +1216,9 @@ static void render(svgwin_t *s)
 
         rv9_raster_clear(&b, s->bg);
         render_band(s, &b);
-        rv9_raster_to_panel(&b);
+        /* Only where the panel wants it: the band is built in native
+           order so the blends stay arithmetic. See panel.h. */
+        if (rv9_panel_swaps_bytes()) rv9_raster_to_panel(&b);
 
         rv9_panel_blit(0, y, s->w, y + b.rows, s->band);
     }

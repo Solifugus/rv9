@@ -34,6 +34,21 @@ rv9_io_err_t rv9_panel_bus_claim(void);
 void rv9_panel_size(int *w, int *h);
 
 /*
+ * Does this panel want the two bytes of an RGB565 pixel the other way
+ * round from native order?
+ *
+ * The ST7789 does: it is fed pixels over SPI and takes them big-endian, so
+ * everything above works in native order -- blends are arithmetic rather
+ * than puzzles -- and the swap happens once, where colours are chosen or
+ * on a finished band. A DSI panel does not: its scan-out reads the
+ * framebuffer out of memory, so memory order *is* the order, and swapping
+ * turns navy into olive and an anti-aliased edge into a shadow.
+ *
+ * Asked once and remembered, never per pixel.
+ */
+bool rv9_panel_swaps_bytes(void);
+
+/*
  * The glass, in micrometres, rotated the same way the pixels are.
  *
  * Here rather than in a descriptor option because there is one panel and the

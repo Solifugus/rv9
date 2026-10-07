@@ -58,17 +58,32 @@ static const char *TAG = "rv9-sdcard";
 #define SECTOR_SIZE 512
 
 typedef struct {
-    sdmmc_card_t        *card;
-    sd_pwr_ctrl_handle_t pwr;
-    uint8_t             *bounce;   /* one sector, DMA-capable */
-    rv9_lock_t           lock;
+    sdmmc_card_t *card;
+    uint8_t      *bounce;   /* one sector, DMA-capable */
+    rv9_lock_t    lock;
 } sdcard_t;
+
+/*
+ * THE REGULATOR IS ACQUIRED ONCE AND NEVER GIVEN BACK, and that is not
+ * laziness.
+ *
+ * An on-chip LDO channel is a rail, and a rail on a board this size feeds
+ * more than the thing that asked for it. The first version of this file
+ * released the channel on the no-card path -- acquire, fail to find a
+ * card, tidy up -- and tidying up a shared supply is how you turn off
+ * somebody else's hardware. Powering it down is not the inverse of
+ * powering it up when you are not the only consumer.
+ *
+ * So it is static, taken at most once, and left on: the state the board
+ * ships in. An empty slot costs the current the slot draws, which is
+ * nothing, and nothing else on the board goes dark.
+ */
+static sd_pwr_ctrl_handle_t s_pwr;
 
 static void sdcard_free(sdcard_t *s)
 {
     if (s == NULL) return;
     if (s->lock) rv9_lock_destroy(s->lock);
-    if (s->pwr) sd_pwr_ctrl_del_on_chip_ldo(s->pwr);
     rv9_free(s->bounce);
     rv9_free(s->card);
     rv9_free(s);
@@ -91,14 +106,17 @@ static rv9_io_err_t sdcard_init(rv9_dev_t *dev)
     host.slot         = SDMMC_HOST_SLOT_0;
     host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
 
-    /* Power first, or everything below finds an empty slot. */
-    sd_pwr_ctrl_ldo_config_t ldo = { .ldo_chan_id = SD_LDO_CHAN };
-    if (sd_pwr_ctrl_new_on_chip_ldo(&ldo, &s->pwr) != ESP_OK) {
-        ESP_LOGE(TAG, "no LDO channel %d for the card slot", SD_LDO_CHAN);
-        sdcard_free(s);
-        return RV9_IO_ERR_IO;
+    /* Power first, or everything below finds an empty slot. Once only --
+       see the note above on why this is never handed back. */
+    if (s_pwr == NULL) {
+        sd_pwr_ctrl_ldo_config_t ldo = { .ldo_chan_id = SD_LDO_CHAN };
+        if (sd_pwr_ctrl_new_on_chip_ldo(&ldo, &s_pwr) != ESP_OK) {
+            ESP_LOGE(TAG, "no LDO channel %d for the card slot", SD_LDO_CHAN);
+            sdcard_free(s);
+            return RV9_IO_ERR_IO;
+        }
     }
-    host.pwr_ctrl_handle = s->pwr;
+    host.pwr_ctrl_handle = s_pwr;
 
     sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
     slot.clk   = PIN_CLK;

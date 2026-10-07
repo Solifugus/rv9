@@ -27,6 +27,10 @@ static const char *TAG = "rv9-pwm";
 
 #define DEFAULT_FREQ_HZ 50        /* servos, unless told otherwise */
 #define DEFAULT_BITS    LEDC_TIMER_14_BIT
+/* Channels 0..3 are this device's. 4 and up are left alone on purpose:
+   the panel backlight lives on 5 (see panel.c and panel_dsi.c), and a
+   channel claimed from under it is re-pointed at this device's timer and
+   pin, which looks exactly like a dead screen. */
 #define MAX_CHANNELS    4
 
 typedef struct {

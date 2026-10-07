@@ -22,6 +22,8 @@ void rv9_panel_physical(uint32_t *w, uint32_t *h, uint8_t *k)
 void rv9_panel_backlight(uint32_t p){(void)p;}
 uint32_t rv9_panel_backlight_get(void){return 100;}
 bool rv9_panel_take(const void *o){(void)o;return false;}
+/* The stub models the C5 panel, which does. */
+bool rv9_panel_swaps_bytes(void){return true;}
 
 void rv9_panel_blit(int x0,int y0,int x1,int y1,const uint16_t *px)
 {

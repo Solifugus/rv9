@@ -236,6 +236,11 @@ rv9_io_err_t rv9_panel_open(bool landscape, int *w, int *h)
     return RV9_IO_OK;
 }
 
+/* The ST7789 takes RGB565 big-endian over SPI. Determined empirically:
+   0x0195 (navy) came out as 0x9501 (olive), which is the same value with
+   its bytes reversed. White hid it for a while, 0xFFFF being symmetric. */
+bool rv9_panel_swaps_bytes(void) { return true; }
+
 void rv9_panel_size(int *w, int *h)
 {
     if (w) *w = s_w;
