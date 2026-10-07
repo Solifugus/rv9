@@ -38,8 +38,30 @@ static const char *TAG = "rv9-i2c";
 #define OPT_SCL   1
 #define OPT_KHZ   2
 
+/*
+ * Which pins the bus is on is a fact about the board, so it is compiled in
+ * per board rather than written in the descriptor -- the module store is
+ * built once and flashed to either, so a descriptor cannot hold two
+ * answers. What the descriptor still decides is the part that is a choice
+ * rather than a fact: the bus speed.
+ *
+ * The C5 has 8 and 9 free. 4-7 belong to the SPI bus the panel and the
+ * card share, 10 is the backlight, 13 and 14 are the USB console, and 23,
+ * 24 and 26 are the display's control lines.
+ *
+ * The P4 board wires its bus to 7 and 8, with the GT911 touch controller
+ * and the audio codec both on it. Taking the C5's numbers here was not
+ * harmless: 9 is the codec's I2S data line on this board, so RV-9 was
+ * configuring an output somebody else owns and calling it SCL.
+ */
+#if CONFIG_IDF_TARGET_ESP32P4
+#define DEFAULT_SDA  7
+#define DEFAULT_SCL  8
+#else
 #define DEFAULT_SDA  8
 #define DEFAULT_SCL  9
+#endif
+
 #define DEFAULT_KHZ  100
 
 /* Long enough that a slow device is not mistaken for a missing one, short
