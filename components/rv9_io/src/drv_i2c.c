@@ -13,9 +13,12 @@
  * is not.
  *
  * Descriptor options:
- *   opt[0]  SDA pin          (default 8)
- *   opt[1]  SCL pin          (default 9)
  *   opt[2]  bus speed in kHz (default 100)
+ *
+ * The pins are not options. They are a fact about the board, they are
+ * compiled in per board below, and the bus is not this device's alone --
+ * the touch controller is on the same two wires, so whichever attaches
+ * first brings it up. See i2c_bus.h.
  *
  * Both lines need pull-ups. The internal ones are enabled because a bare
  * sensor on a breadboard often has none, and a bus with no pull-up reads
@@ -29,13 +32,13 @@
 
 #include <string.h>
 
+#include "i2c_bus.h"
+
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 
 static const char *TAG = "rv9-i2c";
 
-#define OPT_SDA   0
-#define OPT_SCL   1
 #define OPT_KHZ   2
 
 /*
@@ -78,20 +81,32 @@ typedef struct {
     uint32_t                addr;
 } i2c_unit_t;
 
-static rv9_io_err_t i2c_init(rv9_dev_t *dev)
-{
-    uint32_t sda = dev->opt[OPT_SDA] ? dev->opt[OPT_SDA] : DEFAULT_SDA;
-    uint32_t scl = dev->opt[OPT_SCL] ? dev->opt[OPT_SCL] : DEFAULT_SCL;
-    uint32_t khz = dev->opt[OPT_KHZ] ? dev->opt[OPT_KHZ] : DEFAULT_KHZ;
+/* ---- the bus, which is not this device's alone: see i2c_bus.h ---- */
 
-    if (sda == scl) {
-        ESP_LOGE(TAG, "%s: SDA and SCL are both pin %lu", dev->name,
-                 (unsigned long)sda);
-        return RV9_IO_ERR_INVAL;
+static i2c_master_bus_handle_t s_bus;
+static uint32_t                s_bus_khz;
+
+void rv9_i2c_bus_defaults(uint32_t *sda, uint32_t *scl, uint32_t *khz)
+{
+    if (sda) *sda = DEFAULT_SDA;
+    if (scl) *scl = DEFAULT_SCL;
+    if (khz) *khz = DEFAULT_KHZ;
+}
+
+rv9_io_err_t rv9_i2c_bus_claim(uint32_t khz, i2c_master_bus_handle_t *out)
+{
+    if (s_bus != NULL) {
+        if (khz != 0 && khz != s_bus_khz) {
+            ESP_LOGW(TAG, "bus is already up at %lu kHz; %lu kHz ignored",
+                     (unsigned long)s_bus_khz, (unsigned long)khz);
+        }
+        if (out) *out = s_bus;
+        return RV9_IO_OK;
     }
 
-    i2c_bus_t *b = rv9_calloc(1, sizeof(*b));
-    if (b == NULL) return RV9_IO_ERR_NOMEM;
+    uint32_t sda, scl, dflt;
+    rv9_i2c_bus_defaults(&sda, &scl, &dflt);
+    if (khz == 0) khz = dflt;
 
     i2c_master_bus_config_t cfg = {
         .i2c_port          = -1,        /* let the driver choose a port */
@@ -102,18 +117,47 @@ static rv9_io_err_t i2c_init(rv9_dev_t *dev)
         .flags = { .enable_internal_pullup = true },
     };
 
-    if (i2c_new_master_bus(&cfg, &b->bus) != ESP_OK) {
-        ESP_LOGE(TAG, "%s: no bus on SDA %lu SCL %lu", dev->name,
+    if (i2c_new_master_bus(&cfg, &s_bus) != ESP_OK) {
+        ESP_LOGE(TAG, "no bus on SDA %lu SCL %lu",
                  (unsigned long)sda, (unsigned long)scl);
-        rv9_free(b);
+        s_bus = NULL;
         return RV9_IO_ERR_IO;
     }
 
-    b->khz         = khz;
+    s_bus_khz = khz;
+    ESP_LOGI(TAG, "bus up: SDA %lu, SCL %lu, %lu kHz",
+             (unsigned long)sda, (unsigned long)scl, (unsigned long)khz);
+
+    if (out) *out = s_bus;
+    return RV9_IO_OK;
+}
+
+static rv9_io_err_t i2c_init(rv9_dev_t *dev)
+{
+    /*
+     * The pins are no longer this device's to choose, because they are not
+     * its bus alone -- the touch controller is on the same two wires and
+     * may get there first. The descriptor's pin options are gone with
+     * them: a pin is a board fact, and the board's answer is compiled in
+     * (see above). The speed is still a choice and still honoured, by
+     * whoever claims the bus first.
+     */
+    uint32_t khz = dev->opt[OPT_KHZ] ? dev->opt[OPT_KHZ] : DEFAULT_KHZ;
+
+    i2c_bus_t *b = rv9_calloc(1, sizeof(*b));
+    if (b == NULL) return RV9_IO_ERR_NOMEM;
+
+    rv9_io_err_t err = rv9_i2c_bus_claim(khz, &b->bus);
+    if (err != RV9_IO_OK) {
+        rv9_free(b);
+        return err;
+    }
+
+    b->khz         = s_bus_khz;
     dev->drv_state = b;
 
-    ESP_LOGI(TAG, "%s: SDA %lu, SCL %lu, %lu kHz", dev->name,
-             (unsigned long)sda, (unsigned long)scl, (unsigned long)khz);
+    ESP_LOGI(TAG, "%s: on the shared bus at %lu kHz", dev->name,
+             (unsigned long)b->khz);
     return RV9_IO_OK;
 }
 

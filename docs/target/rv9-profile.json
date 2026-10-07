@@ -897,6 +897,13 @@
       "sessions": true
     },
     {
+      "name": "touch",
+      "read_rt": false,
+      "write_rt": null,
+      "retains": false,
+      "sessions": false
+    },
+    {
       "name": "tsens",
       "read_rt": false,
       "write_rt": null,

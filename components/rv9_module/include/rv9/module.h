@@ -683,6 +683,53 @@ typedef struct __attribute__((packed)) {
 
 _Static_assert(sizeof(rv9_physical_t) == 20, "physical size is 20 bytes");
 
+/*
+ * Touch, as a stream of events.
+ *
+ * Reading /touch gives whole rv9_touch_event_t records, oldest first, and
+ * blocks until there is one -- so a widget loop is a read in a loop and
+ * nothing else.
+ *
+ * WHY EVENTS AND NOT A CELL SOMEBODY POLLS
+ *
+ * State is derivable from events; events are not derivable from state. A
+ * tap is a DOWN followed by an UP, and a reader polling "where is the
+ * finger now" can miss the pair entirely between two looks -- so the tap
+ * never happened, intermittently, depending on timing. Anything that wants
+ * the current position keeps it from the stream for the cost of one struct.
+ *
+ * WHAT IS GUARANTEED WHEN THE QUEUE FILLS, which is the part worth knowing
+ *
+ * A reader that stops reading must not stall the driver, so the queue is
+ * bounded and old events are given up. But not evenly: MOVE is the only
+ * kind that may be dropped or merged, because a position that is out of
+ * date is corrected by the next one. DOWN and UP are never dropped. Losing
+ * an UP leaves a widget held down by a finger that is no longer there, and
+ * no later event ever says otherwise.
+ *
+ * `id` follows one finger for as long as it is down, so two fingers can be
+ * told apart across a drag. x and y are panel pixels in the same frame of
+ * reference the panel draws in, mirrored to match how the glass is fitted,
+ * so a finger lands on what it looks like it is landing on.
+ *
+ * `at_ms` is from the same clock as the uptime in sysinfo, which is what
+ * makes a double-tap or a long-press a subtraction rather than a guess.
+ */
+#define RV9_TOUCH_DOWN   1
+#define RV9_TOUCH_MOVE   2
+#define RV9_TOUCH_UP     3
+
+typedef struct __attribute__((packed)) {
+    uint8_t  kind;          /* RV9_TOUCH_* */
+    uint8_t  id;            /* this finger, while it stays down */
+    uint16_t x;             /* panel pixels, as drawn */
+    uint16_t y;
+    uint16_t pressure;      /* the controller's size figure; 0 if it has none */
+    uint32_t at_ms;         /* uptime when the controller reported it */
+} rv9_touch_event_t;
+
+_Static_assert(sizeof(rv9_touch_event_t) == 12, "touch event is 12 bytes");
+
 #define RV9_SS_DRIVER_BASE 256
 
 /*

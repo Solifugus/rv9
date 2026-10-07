@@ -264,6 +264,7 @@ static void io_bringup(void)
     REGISTER(rv9_drv_adc_register());
     REGISTER(rv9_drv_tsens_register());
     REGISTER(rv9_drv_svgwin_register());
+    REGISTER(rv9_drv_touch_register());
     REGISTER(rv9_drv_pubmem_register());
     REGISTER(rv9_drv_pipemem_register());
     REGISTER(rv9_drv_i2c_register());

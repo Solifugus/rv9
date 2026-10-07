@@ -153,6 +153,12 @@ Both share one panel, and **whoever painted last is what you see**.
 | `wflick > /w0` | The same three draws, generated from a widget tree instead of written as string literals. |
 | `wcompose > /w0` | Two independent widget stacks in one document over one background, with one of them repainted alone. |
 
+| `taps` | Every touch on the glass, one line each: kind, finger, position, time. `taps 20` for twenty seconds. |
+
+**`taps` is how you find out whether touch is wired up right.** A driver that
+reports nothing and one that reports mirrored coordinates look identical from
+the outside. Press the top-left corner: the numbers should be small.
+
 **Writing a picture to the panel wants a bigger stack than you expect.** The
 renderer runs on the *writer's* stack, so a program that draws pays for the
 rasteriser out of its own — see `modules/pic/build.conf` and

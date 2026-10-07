@@ -114,6 +114,24 @@ typedef struct rv9_driver {
      */
     bool retains;
 
+    /*
+     * Reads of this device are records, not lines.
+     *
+     * SCF's job is terminals: it collects a line, echoes it, handles
+     * backspace, and hands over what somebody typed when they press
+     * return. That is exactly wrong for a device whose reads are fixed-size
+     * binary events -- a touch controller's -- where a byte that happens to
+     * be 0x08 is part of a coordinate and not a backspace.
+     *
+     * A reader can already ask for raw bytes per path (RV9_SS_RAW), but a
+     * device that is never anything else should not need asking, and a
+     * descriptor option cannot say so: the option array is shared between
+     * the file manager and the driver, so there is no index free for one to
+     * claim. It belongs to the driver, which is the thing that knows what
+     * its bytes mean.
+     */
+    bool raw_stream;
+
     rv9_io_err_t (*init)(struct rv9_dev *dev);
     rv9_io_err_t (*term)(struct rv9_dev *dev);
 

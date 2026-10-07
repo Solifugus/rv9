@@ -61,7 +61,7 @@ endif()
 # to ask the panel -- see the note there.
 #
 list(APPEND RV9_IO_SRCS "src/drv_lcdcon.c" "src/font.c" "src/raster.c"
-                        "src/drv_svgwin.c")
+                        "src/drv_svgwin.c" "src/drv_touch.c")
 list(APPEND RV9_IO_REQ esp_lcd esp_hw_support)
 
 if("${IDF_TARGET}" STREQUAL "esp32p4")

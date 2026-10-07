@@ -49,6 +49,19 @@ void rv9_panel_size(int *w, int *h);
 bool rv9_panel_swaps_bytes(void);
 
 /*
+ * How the glass is mounted relative to the board, as mirrors to apply.
+ *
+ * The panel applies these to itself at init -- on the P4 through MADCTL,
+ * because the panel there is fitted upside down. A touch controller on the
+ * same glass reports in the glass's orientation and has to apply the same
+ * ones, or a finger lands where nothing is drawn.
+ *
+ * Written down here once, for the reason rv9_panel_physical gives: a
+ * second place that must agree is a second chance to disagree.
+ */
+void rv9_panel_mounting(bool *mirror_x, bool *mirror_y, bool *swap_xy);
+
+/*
  * The glass, in micrometres, rotated the same way the pixels are.
  *
  * Here rather than in a descriptor option because there is one panel and the

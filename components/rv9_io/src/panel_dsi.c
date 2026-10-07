@@ -388,6 +388,15 @@ rv9_io_err_t rv9_panel_open(bool landscape, int *w, int *h)
  */
 bool rv9_panel_swaps_bytes(void) { return false; }
 
+/* Fitted upside down: the init sequence sends MADCTL 0x03 to turn the
+   picture round, and the GT911 on the same glass needs the same turn. */
+void rv9_panel_mounting(bool *mirror_x, bool *mirror_y, bool *swap_xy)
+{
+    if (mirror_x) *mirror_x = true;
+    if (mirror_y) *mirror_y = true;
+    if (swap_xy)  *swap_xy  = false;
+}
+
 void rv9_panel_size(int *w, int *h)
 {
     if (w) *w = s_w;

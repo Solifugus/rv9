@@ -251,7 +251,7 @@ the firmware.
 
 | path | manager | driver | notes |
 |---|---|---|---|
-| `/term` | `scf` | `lcdcon` | The ST7789 panel as a console. Brightness and cursor via setstat. |
+| `/term` | `scf` | `lcdcon` | The panel as a console. Brightness and cursor via setstat. 30×8 cells on the C5, 101×29 on the P4. |
 | `/uart0` | `scf` | `uart` | USB serial: the boot log and the console shell. |
 | `/ssh0` | `scf` | `ssh` | SSH sessions as a character device. |
 | `/sshcfg` | `scf` | `ssh` | The server's own settings — `passwd`, `authkey`. |
@@ -263,7 +263,8 @@ the firmware.
 | `/pwm0/N` | `pio` | `pwm` | Duty cycle. Stops driving when the path closes — it holds a hardware channel that must be given back. |
 | `/adc0/N` | `pio` | `adc` | Analogue in. |
 | `/tsens` | `pio` | `tsens` | The die's own temperature. |
-| `/i2c0/ADDR` | `ifm` | `i2c` | The two-wire bus. Options: SDA (8), SCL (9), kHz (100). |
+| `/touch` | `scf` | `touch` | The touch panel, as a stream of 12-byte events. Reads block; records are never split. Only where there is one. |
+| `/i2c0/ADDR` | `ifm` | `i2c` | The two-wire bus. The pins are the board's; the only option is kHz (100). Shared with the touch controller. |
 | `/n0/…` | `nfm` | `net` | TCP, out and in. |
 | `/pub0/NAME` | `pfm` | `pubmem` | Published cells. |
 | `/pipe/NAME` | `pipe` | `pipemem` | Pipes. |

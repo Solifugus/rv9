@@ -241,6 +241,14 @@ rv9_io_err_t rv9_panel_open(bool landscape, int *w, int *h)
    its bytes reversed. White hid it for a while, 0xFFFF being symmetric. */
 bool rv9_panel_swaps_bytes(void) { return true; }
 
+/* Fitted the right way up, and nothing on this board touches it anyway. */
+void rv9_panel_mounting(bool *mirror_x, bool *mirror_y, bool *swap_xy)
+{
+    if (mirror_x) *mirror_x = false;
+    if (mirror_y) *mirror_y = false;
+    if (swap_xy)  *swap_xy  = false;
+}
+
 void rv9_panel_size(int *w, int *h)
 {
     if (w) *w = s_w;

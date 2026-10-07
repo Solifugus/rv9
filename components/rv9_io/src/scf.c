@@ -40,8 +40,16 @@ static rv9_io_err_t scf_open(rv9_path_t *path, const char *rest)
     /* Only readers need a line buffer; a write-only path stays free of it. */
     if (!(path->mode & RV9_MODE_READ)) return RV9_IO_OK;
 
-    path->fm_state = rv9_calloc(1, sizeof(scf_path_state_t));
-    return path->fm_state ? RV9_IO_OK : RV9_IO_ERR_NOMEM;
+    scf_path_state_t *st = rv9_calloc(1, sizeof(scf_path_state_t));
+    if (st == NULL) return RV9_IO_ERR_NOMEM;
+
+    /* A device whose reads are records starts raw rather than waiting to
+       be told; see raw_stream in rv9/io.h. A reader may still turn it off
+       with RV9_SS_RAW, which is its business. */
+    st->raw = path->dev->drv->raw_stream;
+
+    path->fm_state = st;
+    return RV9_IO_OK;
 }
 
 static rv9_io_err_t scf_close(rv9_path_t *path)
