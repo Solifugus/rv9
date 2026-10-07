@@ -58,7 +58,22 @@ static const char *TAG = "rv9-touch";
 
 #define REG_PRODUCT_ID     0x8140    /* four ASCII bytes: "911" and a NUL */
 #define REG_STATUS         0x814E
-#define REG_POINT0         0x8150
+
+/*
+ * 0x814F, which is REG_STATUS + 1 and not 0x8150.
+ *
+ * Getting this one byte wrong is the whole of a day's confusion: every
+ * field shifts, so x's high byte is read as its low byte, the track id is
+ * read as part of a coordinate, and the id therefore changes as the finger
+ * moves -- which makes every poll look like a new finger going down. The
+ * coordinates came out past the edge of the panel and the clamp below
+ * turned them into a tidy 1023,599, so the fault presented as "every touch
+ * is in the bottom-right corner" rather than as nonsense.
+ *
+ * Relative to this address each point is eight bytes: track id, x low, x
+ * high, y low, y high, strength low, strength high, reserved.
+ */
+#define REG_POINT0         0x814F
 
 #define STATUS_READY       0x80
 #define STATUS_COUNT_MASK  0x0F
@@ -85,6 +100,7 @@ typedef struct {
     rv9_task_t ticker;
 
     finger_t last[GT911_MAX_POINTS];
+    bool     said_outside;      /* complained once; see place() */
 
     /* The queue. Head is where the next event goes, tail the oldest
        unread. One slot stays empty so full and empty differ. */
@@ -200,10 +216,28 @@ static void place(touch_t *t, finger_t *f, uint16_t rx, uint16_t ry)
     if (t->mirror_x && t->w > 0) x = (uint16_t)(t->w - 1 - x);
     if (t->mirror_y && t->h > 0) y = (uint16_t)(t->h - 1 - y);
 
-    /* The controller occasionally reports a point just outside the active
-       area; clamping is kinder than letting a widget index off its edge. */
+    /*
+     * The controller occasionally reports a point just outside the active
+     * area, and clamping is kinder than letting a widget index off its
+     * edge. But it is said out loud the first time, because a clamp is
+     * also how a decoding error disguises itself: with the point register
+     * off by one, every reading ran past the edge and arrived here as a
+     * neat 1023,599, which looks like a corner rather than like rubbish.
+     * A fault that produces plausible values is the expensive kind.
+     */
+    bool outside = (t->w > 0 && x >= (uint16_t)t->w) ||
+                   (t->h > 0 && y >= (uint16_t)t->h);
+
     if (t->w > 0 && x >= (uint16_t)t->w) x = (uint16_t)(t->w - 1);
     if (t->h > 0 && y >= (uint16_t)t->h) y = (uint16_t)(t->h - 1);
+
+    if (outside && !t->said_outside) {
+        t->said_outside = true;
+        ESP_LOGW(TAG, "a point arrived outside %dx%d (raw %u,%u) and was "
+                      "clamped; if every touch looks like a corner, suspect "
+                      "the decoding rather than the glass",
+                 t->w, t->h, (unsigned)rx, (unsigned)ry);
+    }
 
     f->x = x;
     f->y = y;
