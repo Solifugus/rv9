@@ -6467,10 +6467,34 @@ document re-parse does not care how wide the band is. So the board's 19 ms
 strip becomes about **32 ms at 1024 wide, and a tap about 66 ms** on a
 C5-class core, against roughly 640 ms for the full screen. On the P4, less.
 
-Sixty-odd milliseconds is still a tap that feels immediate. So the interaction model that
-fits this hardware is: **tap to act, a brief flash to confirm, and nothing
-that repaints the whole screen while a finger is moving.** Continuous drag is
-the thing to avoid, not interactivity itself.
+**Measured on the P4, 2026-10-07, and everything above this line is an
+extrapolation that turned out pessimistic.** `flick > /w0` on the real
+1024x600 panel:
+
+| | predicted | measured |
+|---|---|---|
+| full screen | ~640 ms C5-class, ~385 ms scaled to 400 MHz | **175 ms** |
+| a tap (press + release) | ~66 ms C5-class | **5 ms** (3 + 2) |
+
+The full screen is 3.7x better than the C5-class figure and 2.2x better than
+that figure scaled for the P4's clock. The tap is an order of magnitude
+better. The extrapolation chain -- host band timings, scaled for width, then
+for board, then for clock -- compounded its pessimism at every step, which is
+what extrapolations do.
+
+THE CONCLUSION BELOW HAS TO CHANGE WITH THEM. Sixty-odd milliseconds is a tap
+that feels immediate, and five is one that feels like hardware. More
+importantly, a 3 ms band repaint is about three hundred a second, so moving a
+widget under a finger -- repainting where it was and where it now is -- is not
+obviously unaffordable any more. That is implied by these numbers rather than
+demonstrated by them: nobody has yet dragged anything on this panel and timed
+it.
+
+So the interaction model that fits this hardware is: **tap to act, a brief
+flash to confirm, and measure before assuming a drag is too expensive.** What
+remains true is that repainting the whole screen inside a gesture is not
+affordable -- 175 ms is still six frames a second -- and that the band
+strategy is what makes the difference, by a factor of thirty-five.
 
 One consequence to design around rather than fight: bands are full width, so a
 tall narrow widget costs what a tall wide one does. Laying widgets out in

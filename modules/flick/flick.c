@@ -4,9 +4,11 @@
  *     flick > /w0        a button drawn, flashed, and drawn again
  *
  * The question this answers is whether tap-and-flash feedback is affordable
- * on this hardware. A whole-screen redraw is not: at 1024x600 it is about
- * 640 ms on a C5-class core (design §56). A strip is, and this measures the
- * difference on the real board rather than extrapolating from a host.
+ * on this hardware, and it answered it: on the P4's 1024x600 panel a whole
+ * screen is 175 ms and a band repaint is 3 ms, so a tap costs 5 ms and a
+ * full redraw costs thirty-five of them. Design §56 had predicted 640 ms and
+ * 66 ms by extrapolating from the C5; this is what running it on the real
+ * board was for.
  *
  * Three draws, timed by the caller reading the log:
  *

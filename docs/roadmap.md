@@ -772,6 +772,11 @@ interaction costs the CPU. Widening to 1024 costs only 1.7x (not 3.2x — the
 per-band re-parse does not care about width), so at 1024x600 that is about
 **33 ms perceived and 66 ms of work**, against ~640 ms for the full screen.
 
+*Superseded 2026-10-07 by measurement on the real panel: 175 ms for the full
+screen and 3 ms for a band repaint, so a tap is 5 ms. The projection above was
+pessimistic by 3.7x on the full screen and an order of magnitude on the tap --
+see design §56, which now carries both and says which is which.*
+
 *Corrected 2026-09-29 from 59 / 15 / 15 and a 30 ms tap.* Those were measured
 on a repaint that left two black strips beside the button: a band is cleared
 to the **device** background, not to what the scene drew, so a clipped

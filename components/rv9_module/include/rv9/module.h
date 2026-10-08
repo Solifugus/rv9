@@ -1052,11 +1052,16 @@ _Static_assert(sizeof(rv9_pub_info_t) == 56, "rv9_pub_info_t is frozen");
  * clip left set by accident would be a window that never fully repaints
  * again.
  *
- * Why this exists: a full 1024x600 redraw costs about 640 ms on a C5-class
- * core, and a 48-row strip about 80 ms (design §56, measured). Tap-and-flash
+ * Why this exists: on the P4's 1024x600 panel a full redraw is 175 ms and a
+ * band repaint is 3 ms -- measured with `flick`, design §56. Tap-and-flash
  * feedback needs the second number, and the renderer already works in 8-row
  * bands, so clipping is a matter of which bands it visits. The panel keeps
  * its own framebuffer, so the rows left alone simply stay as they were.
+ *
+ * (§56 also carries a 640 ms / 66 ms pair, extrapolated from the C5 before
+ * any 1024-wide panel existed. This comment used to quote those and call
+ * them measured, which they were not; the real figures are better by 3.7x
+ * and an order of magnitude.)
  *
  * Bands are full width, so a tall narrow widget costs what a tall wide one
  * does -- which is a hint to lay widgets out in horizontal bands.

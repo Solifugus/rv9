@@ -1003,10 +1003,11 @@ a band boundary and the last band runs to its full height, so asking for rows
 of device colour at each end. Round out to multiples of 8, or choose
 band-aligned rows as `flick` does. What is *not* wanted is a full-screen
 background rect: those are bytes re-parsed once per band for pixels outside
-the clip entirely. A full
-1024×600 redraw costs about 640 ms on a C5-class core and a 48-row strip
-about 80 ms, which is the difference between tap feedback being affordable
-and not. Bands are full width, so a tall narrow widget costs what a tall wide
+the clip entirely. On the P4's
+1024×600 panel, **measured**: a full redraw is 175 ms and a tap's two band
+repaints are 3 ms and 2 ms — a factor of thirty-five, which is the difference
+between tap feedback being affordable and not. (Design §56 predicted 640 ms
+and 66 ms by extrapolation from the C5; both were pessimistic.) Bands are full width, so a tall narrow widget costs what a tall wide
 one does — a hint to lay widgets out in horizontal bands.
 
 **`RV9_NET_SS_NOWAIT` exists for closing tidily.** TCP sends a reset instead
