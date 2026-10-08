@@ -90,13 +90,18 @@ rv9_err_t rv9_task_create(rv9_task_fn fn, const char *name, size_t stack_bytes,
        A stack is the largest single thing a new process wants. */
     if (stack_bytes > rv9_heap_available()) return RV9_ERR_NOMEM;
 
+    /* On RV9_CORE with the other backend's threads, and for the same
+       reason even though FreeRTOS itself is SMP-safe: everything above the
+       KAL was written for one core, and this backend exists to be
+       interchangeable with the one where that is load-bearing. */
     TaskHandle_t handle = NULL;
-    BaseType_t ok = xTaskCreate((TaskFunction_t)fn,
-                                name ? name : "rv9",
-                                (uint32_t)stack_bytes,   /* ESP-IDF: bytes */
-                                arg,
-                                prio_to_native(priority),
-                                &handle);
+    BaseType_t ok = xTaskCreatePinnedToCore((TaskFunction_t)fn,
+                                            name ? name : "rv9",
+                                            (uint32_t)stack_bytes, /* IDF: bytes */
+                                            arg,
+                                            prio_to_native(priority),
+                                            &handle,
+                                            RV9_CORE);
     if (ok != pdPASS) return RV9_ERR_NOMEM;
 
     if (out_task) *out_task = (rv9_task_t)handle;

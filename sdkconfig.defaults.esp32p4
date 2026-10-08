@@ -271,8 +271,41 @@ CONFIG_SPIRAM_SPEED_250M=y
 # supplies the radio.
 CONFIG_ESP_HOST_WIFI_ENABLED=n
 
-# RV-9 own kernel is single-core by construction -- one s_current, one run
-# queue. The P4 is the first dual-core chip it has met, and the second core
-# was running IDF while RV-9 ran on the first. Take the chip down to one core
-# until RV-9 has something to say about the second.
+# THE SECOND CORE: turned on, measured, turned back off.
+#
+# RV-9 is single-core by construction -- one run queue, one s_current, and
+# mutual exclusion in rv9_kernel that is "interrupts off on this core". The
+# plan was therefore not to move RV-9 but to give core 1 to ESP-IDF's work,
+# so that what competed with the kernel for core 0 moved away. lwIP pinned
+# to CPU1, every RV-9 task pinned to core 0, and the second core to absorb
+# the radio and the rest.
+#
+# It was built, run and measured, and it buys nothing here:
+#
+#   a 2 ms control loop, 3 ms deadline, while 2 MB came over the radio
+#     two cores   400 activations on time, worst jitter 40 us
+#     one core    400 activations on time, worst jitter 43 us
+#   internal heap free
+#     two cores   501272
+#     one core    512540
+#
+# Three microseconds against a 3000 us deadline is noise, and the second
+# core costs 11 KB. The reason is clear once stated: the only work the
+# second core can take is ESP-IDF's, and ESP-IDF's work on this board is
+# not CPU-hungry -- the radio tops out near 1 Mbit/s, so lwIP and the
+# hosted threads are close to idle, and RV-9's real-time tasks sit above
+# all of them in priority and preempt them on one core anyway.
+#
+# What does compete for cycles is RV-9's OWN work: the rasteriser, RBF.
+# None of that can move to core 1 until rv9_kernel's mutual exclusion
+# becomes a real lock. So this measurement is not a dead end, it is the
+# case the bigger refactor now has to answer: name the CPU-bound work you
+# intend to move, and show that it is.
+#
+# What was kept, because it is right either way and free under UNICORE:
+# rv9_critical_enter is a real lock when built for SMP rather than one
+# global plus local interrupt masking; the real-time watchdog's ISR reads
+# the current task of the core it was taken on rather than element zero;
+# RV-9's tasks are pinned explicitly; and the kernel's tick hook names its
+# core instead of taking whichever one happened to call.
 CONFIG_FREERTOS_UNICORE=y

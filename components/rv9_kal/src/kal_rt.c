@@ -673,7 +673,9 @@ void rv9_rt_set_overrun_handler(rv9_rt_overrun_fn fn) { s_overrun = fn; }
  * calibration to NVS during a test. Every other call in watch_isr was
  * checked against the linked image and is resident; this is the one that
  * was not. The variable is what the port's own interrupt entry reads, and
- * it is in RAM. Single core, so element zero.
+ * it is in RAM. Indexed by the core this interrupt was taken on: with two
+ * cores, element zero is another core's business and reading it would name
+ * the wrong task.
  */
 extern TaskHandle_t volatile pxCurrentTCBs[];
 
@@ -687,7 +689,7 @@ static bool IRAM_ATTR watch_fire(void *arg)
     (void)arg;
 
     /* The task this interrupt interrupted. Single core, so there is one. */
-    TaskHandle_t cur = pxCurrentTCBs[0];
+    TaskHandle_t cur = pxCurrentTCBs[xPortGetCoreID()];
     uint64_t now = rv9_time_us();
     bool wake = false;
 
@@ -855,7 +857,7 @@ static void IRAM_ATTR irqoff_tick(void)
     s_irqoff_gap_us = (gap > UINT32_MAX) ? UINT32_MAX : (uint32_t)gap;
     s_irqoff_at_us  = now;
     s_irqoff_task[0] = '\0';
-    TaskHandle_t cur = pxCurrentTCBs[0];
+    TaskHandle_t cur = pxCurrentTCBs[xPortGetCoreID()];
     if (cur != NULL && s_tcb_name_off >= 0) {
         const char *name = (const char *)cur + s_tcb_name_off;
         for (int i = 0; i < configMAX_TASK_NAME_LEN; i++) {
@@ -1002,8 +1004,9 @@ static void watch_start(void)
 
     s_watch_wake = xSemaphoreCreateBinary();
     if (s_watch_wake == NULL ||
-        xTaskCreate(watch_task, "rv9-rtwatch", 6144, NULL,
-                    configMAX_PRIORITIES - 1, &s_watch_task) != pdPASS) {
+        xTaskCreatePinnedToCore(watch_task, "rv9-rtwatch", 6144, NULL,
+                                configMAX_PRIORITIES - 1, &s_watch_task,
+                                RV9_CORE) != pdPASS) {
         ESP_LOGE(TAG, "no watchdog: a real-time task that stops waiting "
                       "will not be stopped");
         return;
@@ -1598,9 +1601,10 @@ rv9_err_t rv9_task_create_rt(rv9_task_fn fn, const char *name,
      * real-time class is that nothing irrelevant to it outranks it, and
      * admission decides which of its tasks the radio is irrelevant to.
      */
-    if (xTaskCreate((TaskFunction_t)fn, name ? name : "rv9-rt",
-                    (uint32_t)stack_bytes, arg,
-                    urgent ? RT_PRIO_URGENT : RT_PRIO_ROUTINE, &h) != pdPASS) {
+    if (xTaskCreatePinnedToCore((TaskFunction_t)fn, name ? name : "rv9-rt",
+                                (uint32_t)stack_bytes, arg,
+                                urgent ? RT_PRIO_URGENT : RT_PRIO_ROUTINE, &h,
+                                RV9_CORE) != pdPASS) {
         return RV9_ERR_NOMEM;
     }
 

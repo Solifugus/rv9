@@ -128,6 +128,24 @@ static inline void irq_restore(uint32_t prev)
     if (prev & 8) __asm__ volatile ("csrsi mstatus, 8" ::: "memory");
 }
 
+/*
+ * A critical section has to be a lock once there are two cores.
+ *
+ * Masking interrupts stops this core and says nothing to the other one, and
+ * the saved state and depth below are single globals -- two cores entering
+ * unrelated critical sections would overwrite each other's bookkeeping. On
+ * one core the CSR is the whole of it and borrowing the host's macros would
+ * be borrowing something not needed; on two it is the only thing that
+ * works.
+ *
+ * This matters even though all of RV-9 stays on core 0: ESP-IDF's tasks run
+ * on core 1 and they log, and logging goes through rv9_critical_enter in
+ * main/logring.c.
+ */
+#if !CONFIG_FREERTOS_UNICORE
+static portMUX_TYPE s_critical_lock = portMUX_INITIALIZER_UNLOCKED;
+#endif
+
 static uint32_t s_critical_state;
 static uint32_t s_critical_depth;
 
@@ -193,7 +211,10 @@ rv9_err_t rv9_kal_start(rv9_task_fn fn, const char *name, size_t stack_bytes,
     rv9k_heap_init(region, KERNEL_HEAP_BYTES);
 
     s_tick_ref = rv9k_tick_ref();
-    if (esp_register_freertos_tick_hook(tick_hook) != ESP_OK) {
+    /* Explicitly RV9_CORE: the plain call registers for whichever core
+       happens to be running, and the kernel's tick must come from the core
+       the kernel is on. Registering on both would advance it twice. */
+    if (esp_register_freertos_tick_hook_for_cpu(tick_hook, RV9_CORE) != ESP_OK) {
         return RV9_ERR_NOMEM;
     }
     rv9_kal_timer_guard_start();
@@ -219,8 +240,9 @@ rv9_err_t rv9_kal_start(rv9_task_fn fn, const char *name, size_t stack_bytes,
      * network stack at 18, under the host's event task at 20, whose
      * callbacks are short and are not RV-9's to delay.
      */
-    if (xTaskCreate(kernel_host_task, "rv9-kernel", 8192, NULL,
-                    configMAX_PRIORITIES - 6, NULL) != pdPASS) {
+    if (xTaskCreatePinnedToCore(kernel_host_task, "rv9-kernel", 8192, NULL,
+                                configMAX_PRIORITIES - 6, NULL,
+                                RV9_CORE) != pdPASS) {
         return RV9_ERR_NOMEM;
     }
 
@@ -589,14 +611,24 @@ uint32_t rv9_queue_count(rv9_queue_t queue)
 
 void rv9_critical_enter(void)
 {
-    uint32_t prev = irq_save();
-    if (s_critical_depth++ == 0) s_critical_state = prev;
+#if CONFIG_FREERTOS_UNICORE
+    uint32_t st = irq_save();
+    if (s_critical_depth++ == 0) s_critical_state = st;
+#else
+    /* _SAFE because this is a KAL call and a driver may make it from an
+       interrupt handler as well as from a task. */
+    portENTER_CRITICAL_SAFE(&s_critical_lock);
+#endif
 }
 
 void rv9_critical_exit(void)
 {
+#if CONFIG_FREERTOS_UNICORE
     if (s_critical_depth == 0) return;
     if (--s_critical_depth == 0) irq_restore(s_critical_state);
+#else
+    portEXIT_CRITICAL_SAFE(&s_critical_lock);
+#endif
 }
 
 /* ---------------- scheduler lock ---------------- */
