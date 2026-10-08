@@ -163,6 +163,44 @@ CONFIG_ESP_CONSOLE_UART_NUM=0
 # is fast only because it is a bench USB cable; on a serial link at 9600
 # baud a line is 100 ms.
 #
+# WHAT THE NETWORK IS WORTH, measured 2026-10-07 rather than assumed.
+#
+# The reason for measuring was to decide whether to update the C6's slave
+# firmware: it reports its version as 0.0.0, so the host negotiates down
+# ("CP without SDIO SW_AGGR; compatible streaming mode enabled") and there
+# is throughput left on the table. The board also offers no way back -- no
+# serial port reaches the C6, so a failed update is an unrecoverable radio.
+# So: measure first, decide after.
+#
+#   2 MB over WiFi, fetch | count        18.3 s   112 KB/s   0.92 Mbit/s
+#   the same 2 MB read from /f0,
+#     no pipe and no network             35.2 s    58 KB/s
+#   fetch straight to /f0 (flash write)  > 200 s, gave up
+#   cat /f0/blob.bin | count             > 200 s, gave up
+#
+# All 2,097,152 bytes arrived intact, and THE NETWORK IS TWICE AS FAST AS
+# READING THE SAME FILE OFF LOCAL FLASH. Updating the co-processor would be
+# optimising the one part of the path that is not the bottleneck, at the
+# price of a chip that cannot be reflashed. Not done, on purpose. If the
+# network ever does become the limit, the 256-byte pipe and RBF are what to
+# look at first -- they are both slower than the radio today.
+#
+# THE DISPLAY COMPETES WITH THE RADIO FOR PSRAM, and it shows.
+#
+# The panel has no memory of its own: the P4 scans the framebuffer out of
+# PSRAM continuously, and 1024x600 at 16bpp and 60 Hz is about 74 MB/s of
+# reads that must never be late. Running the transfers above -- SDIO traffic
+# and flash I/O through the same memory -- made the screen flicker visibly,
+# and it went steady the moment the board was idle again.
+#
+# Not damage, and not a configuration mistake: it is the bandwidth being
+# shared. Worth knowing in three ways. It is a reason to be wary of raising
+# the refresh rate. It is an argument for the rule rv9_alloc_large already
+# states -- PSRAM is not for anything a control loop touches, and now there
+# is a visible demonstration of why. And if it ever needs fixing, the levers
+# are a lower dpi_clock_freq_mhz (52 MHz is 60 Hz; 40 would be about 46) or
+# giving the display's DMA priority over the bulk paths, in that order.
+#
 # WHERE THE BOARD STANDS: every suite passes, on both boards.
 #
 #   P4   kal 45/45  conform 27/27  mod 17/17  io 44/44  pub 38/38
