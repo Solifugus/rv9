@@ -207,6 +207,32 @@ CONFIG_SPIRAM_USE_CAPS_ALLOC=y
 CONFIG_SPIRAM_SPEED_200M=n
 CONFIG_SPIRAM_SPEED_250M=y
 
+# The radio, which is not on this chip.
+#
+# THERE ARE TWO MECHANISMS HERE AND THEY ARE MUTUALLY EXCLUSIVE. Getting
+# this wrong is quiet rather than loud, so it is written down.
+#
+#   1. CONFIG_ESP_HOST_WIFI_ENABLED -- IDF's own "wireless host" support,
+#      new in v6 and gated on SOC_WIRELESS_HOST_SUPPORTED, which the P4 is
+#      the only target to declare. Its controller target defaults to
+#      "esp32" and it is a different arrangement from this board's.
+#
+#   2. esp_wifi_remote over esp_hosted -- the established path for a P4
+#      with a companion C6 on SDIO, and the one this board needs. It works
+#      by REPLACING esp_wifi's sources with its own, which it only does
+#      when neither ESP_WIFI_ENABLED nor ESP_HOST_WIFI_ENABLED is set.
+#
+# So turning (1) on turns (2) off, and says so in exactly one place:
+# CONFIG_ESP_WIFI_REMOTE_IS_DISABLED=y, "Wi-Fi Remote is disabled (Host
+# Wi-Fi is ON)". With (1) on, esp_wifi_init, set_mode and start all
+# returned ESP_OK against a stub, no esp_hosted line appeared in the log at
+# all, and the radio's own MAC came back as six zero bytes. Every call
+# succeeded and nothing happened.
+#
+# Left at n deliberately. The dependency in main/idf_component.yml is what
+# supplies the radio.
+CONFIG_ESP_HOST_WIFI_ENABLED=n
+
 # RV-9 own kernel is single-core by construction -- one s_current, one run
 # queue. The P4 is the first dual-core chip it has met, and the second core
 # was running IDF while RV-9 ran on the first. Take the chip down to one core

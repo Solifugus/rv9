@@ -14,22 +14,27 @@ set(RV9_IO_REQ rv9_kal rv9_module rv9_proc driver esp_driver_i2c
                esp_driver_tsens)
 
 #
-# The radio, where there is one.
+# The radio.
 #
-# The ESP32-P4 has none at all -- its WiFi comes from a companion ESP32-C6 over
-# SDIO, through components that are not in this IDF install. esp_wifi's own
-# header does not compile for a chip with no radio: CONFIG_ESP_WIFI_* simply
-# does not exist, so drv_net.c cannot be built, which means /n0 cannot exist.
+# The C5 has one on the die. The P4 has none at all: its WiFi 6 comes from a
+# companion ESP32-C6 over SDIO, and the host side of that link is esp_hosted
+# with esp_wifi_remote on top -- see main/idf_component.yml, which is where
+# the only two managed dependencies in this project are and why.
 #
-# That is not a gap to apologise for, it is the device model working. A device
-# exists because a descriptor says so; no driver, no descriptor, no device.
-# `have net` answers no, and a program declaring devices="/n0" is refused at
-# fork rather than part-way through. Nothing above this line has to know.
+# What matters here is what is NOT in this file any more. nfm.c and
+# drv_net.c are built for both boards, unchanged, because esp_wifi_remote
+# answers esp_wifi's own API on a chip with no radio. The driver was written
+# against that API and never knew where the radio was, which is the whole
+# argument for an interface that does not leak.
 #
-if(NOT "${IDF_TARGET}" STREQUAL "esp32p4")
-    list(APPEND RV9_IO_SRCS "src/nfm.c" "src/drv_net.c")
-    list(APPEND RV9_IO_REQ lwip esp_netif esp_wifi esp_event)
-else()
+# A board whose companion does not answer still has no /n0: the driver
+# registers, the descriptor finds it, and the device fails to attach -- no
+# driver, no device, and `have net` says no.
+#
+list(APPEND RV9_IO_SRCS "src/nfm.c" "src/drv_net.c")
+list(APPEND RV9_IO_REQ lwip esp_netif esp_wifi esp_event)
+
+if("${IDF_TARGET}" STREQUAL "esp32p4")
     # The console is a real UART here, behind the board's CH343 bridge --
     # see the header of src/drv_uart.c, which is a USB Serial/JTAG driver
     # everywhere else despite its name.

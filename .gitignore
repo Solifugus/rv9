@@ -3,7 +3,12 @@ build/
 sdkconfig
 sdkconfig.old
 managed_components/
-dependencies.lock
+
+# dependencies.lock IS tracked, deliberately. It was listed here before there
+# were any dependencies. Now there are two, and they are the host side of a
+# radio link whose far end is firmware already flashed on a companion chip --
+# which is exactly the case where a resolve picking up a newer version on
+# somebody else's clone is a protocol mismatch rather than an upgrade.
 
 # editors
 .vscode/

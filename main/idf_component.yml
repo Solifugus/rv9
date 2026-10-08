@@ -1,0 +1,28 @@
+# RV-9's only managed dependencies, and the only ones it should ever want.
+#
+# The P4 has no radio of its own. Its WiFi 6 comes from a companion ESP32-C6
+# over SDIO, and the host side of that is esp_hosted plus esp_wifi_remote --
+# tens of thousands of lines of protocol, driver and slave handshake. That is
+# a dependency, not something to vendor: compare the EK79007 panel, where the
+# whole of the vendor's contribution was eight register writes and taking a
+# component for it would have bought a lock file and a build that needs the
+# network in exchange for nothing.
+#
+# GATED TO THE P4 on purpose. The C5 has a real radio and esp_wifi_remote
+# rewires the esp_wifi component when it is present, so letting it near a
+# board that does not need it would be changing the working board to suit
+# the new one.
+#
+# Together they make esp_wifi's own API answer on a chip with no radio, which
+# is why components/rv9_io/src/drv_net.c needs no P4 branch: it was already
+# written against esp_wifi, and that is the whole argument for a stable
+# interface.
+dependencies:
+  espressif/esp_hosted:
+    version: "^3.0.9"
+    rules:
+      - if: "target == esp32p4"
+  espressif/esp_wifi_remote:
+    version: "^1.6.5"
+    rules:
+      - if: "target == esp32p4"

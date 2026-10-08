@@ -244,9 +244,7 @@ static void io_bringup(void)
 
     REGISTER(rv9_scf_register());
     REGISTER(rv9_rbf_register());
-#if !CONFIG_IDF_TARGET_ESP32P4
-    REGISTER(rv9_nfm_register());          /* see components/rv9_io/CMakeLists */
-#endif
+    REGISTER(rv9_nfm_register());
     REGISTER(rv9_pio_register());
     REGISTER(rv9_pfm_register());
     REGISTER(rv9_pipefm_register());
@@ -256,9 +254,7 @@ static void io_bringup(void)
     REGISTER(rv9_drv_ramdisk_register());
     REGISTER(rv9_drv_flashdisk_register());
     REGISTER(rv9_drv_sdcard_register());
-#if !CONFIG_IDF_TARGET_ESP32P4
-    REGISTER(rv9_drv_net_register());      /* no radio on this chip */
-#endif
+    REGISTER(rv9_drv_net_register());
     REGISTER(rv9_drv_gpio_register());
     REGISTER(rv9_drv_pwm_register());
     REGISTER(rv9_drv_adc_register());

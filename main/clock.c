@@ -57,22 +57,6 @@ static const char *TAG = "rv9-clock";
  *
  * When esp_wifi_remote arrives this comes back as it was.
  */
-#if CONFIG_IDF_TARGET_ESP32P4
-
-void rv9_clock_start(void)
-{
-    ESP_LOGI(TAG, "no radio on this chip: wall-clock time stays unknown");
-}
-
-bool rv9_clock_read(uint32_t *out_epoch, uint32_t *out_age_s)
-{
-    if (out_epoch) *out_epoch = 0;
-    if (out_age_s) *out_age_s = 0;
-    return false;
-}
-
-#else
-
 #include "esp_netif_sntp.h"
 #include "esp_sntp.h"
 
@@ -135,4 +119,4 @@ bool rv9_clock_read(uint32_t *out_epoch, uint32_t *out_age_s)
     return true;
 }
 
-#endif /* CONFIG_IDF_TARGET_ESP32P4 */
+
