@@ -17,12 +17,24 @@
 # is why components/rv9_io/src/drv_net.c needs no P4 branch: it was already
 # written against esp_wifi, and that is the whole argument for a stable
 # interface.
+# PINNED EXACTLY, not with a caret, and dependencies.lock is NOT tracked --
+# see the note in .gitignore. The lock is per-target state in one file at the
+# project root, and a repository that builds two chips out of one directory
+# rewrites it every time the other board is checked. So the pin lives here,
+# where it cannot flip.
+#
+# Exact rather than ">=" because the far end of this link is firmware already
+# flashed on a companion chip. The C6 on this board reports its own version as
+# 0.0.0 and the host negotiates down to talk to it ("CP without SDIO SW_AGGR;
+# compatible streaming mode enabled"). A newer host is therefore a change to
+# that negotiation, which is a thing to do on purpose and test, not to pick up
+# by resolving on a Tuesday.
 dependencies:
   espressif/esp_hosted:
-    version: "^3.0.9"
+    version: "3.0.9"
     rules:
       - if: "target == esp32p4"
   espressif/esp_wifi_remote:
-    version: "^1.6.5"
+    version: "1.6.5"
     rules:
       - if: "target == esp32p4"

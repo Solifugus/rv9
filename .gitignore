@@ -4,11 +4,20 @@ sdkconfig
 sdkconfig.old
 managed_components/
 
-# dependencies.lock IS tracked, deliberately. It was listed here before there
-# were any dependencies. Now there are two, and they are the host side of a
-# radio link whose far end is firmware already flashed on a companion chip --
-# which is exactly the case where a resolve picking up a newer version on
-# somebody else's clone is a protocol mismatch rather than an upgrade.
+# dependencies.lock stays ignored, and the reason is specific to this project
+# rather than general.
+#
+# A lock file normally belongs in version control. Here it is per-TARGET
+# state in a single file at the project root, and this repository builds two
+# chips out of one directory -- so building the C5 to check it has not been
+# broken re-resolves for esp32c5, empties managed_components/ and rewrites
+# the lock. It was briefly tracked and what got committed was
+# "target: esp32c5" with no dependencies in it at all: a lock file pinning
+# nothing, naming the wrong chip.
+#
+# Versions are pinned where that cannot happen instead: exactly, in
+# main/idf_component.yml, which is tracked and does not change with whichever
+# board was built last.
 
 # editors
 .vscode/
