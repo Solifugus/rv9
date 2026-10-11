@@ -589,6 +589,30 @@ static rv9_io_err_t touch_getstat(rv9_dev_t *dev, uint32_t code, void *arg)
     touch_t *t = (touch_t *)dev->drv_state;
     if (t == NULL) return RV9_IO_ERR_IO;
 
+    /*
+     * How many events are waiting. getstat, RV9_GS_READY.
+     *
+     * Without this a program cannot wait for a finger and still honour its
+     * own deadline. SCF turns a would-block into a sleep-and-retry that
+     * never gives up (scf.c), which is right for a shell at a prompt and
+     * wrong for anything with a time limit: `taps 30` read /touch, nothing
+     * was ever touched, the read never returned, the deadline was never
+     * tested and the program ran until the board was reset -- holding the
+     * device open, so its queue was never emptied for the next reader and
+     * events were split between a live program and a stranded one.
+     *
+     * The generic code for this already existed and only the network and
+     * pipe managers answered it. SCF passes anything it does not recognise
+     * to the driver, so answering here is the whole of what was needed.
+     */
+    if (code == RV9_GS_READY) {
+        if (arg == NULL) return RV9_IO_ERR_INVAL;
+        rv9_lock_acquire(t->lock);
+        *(uint32_t *)arg = q_used(t);
+        rv9_lock_release(t->lock);
+        return RV9_IO_OK;
+    }
+
     /* The glass it reports against, so a program can scale without having
        to open /term or /w0 just to ask. */
     if (code == RV9_GS_PHYSICAL) {

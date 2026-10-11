@@ -73,6 +73,25 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     for (;;) {
         if (until && env->time_us() >= until) break;
 
+        /*
+         * Ask before reading, because a read that finds nothing does not
+         * come back.
+         *
+         * SCF turns a would-block into sleep-and-retry with no way out, so
+         * `taps 30` against glass nobody touches never returns from its
+         * first read: the loop above is never reached again, the time limit
+         * is never tested, and the program runs until the board is reset --
+         * holding /touch open the whole time, which splits later events
+         * between it and whoever comes next. The limit has to be checked by
+         * somebody who is awake, so readiness is asked for first and the
+         * waiting is done here, where the deadline is.
+         */
+        uint32_t waiting = 0;
+        if (env->getstat(tp, RV9_GS_READY, &waiting) == 0 && waiting == 0) {
+            env->sleep_ms(8);
+            continue;
+        }
+
         /* Four at a time: a drag with two fingers produces events faster
            than one read each would collect them. */
         rv9_touch_event_t ev[4];

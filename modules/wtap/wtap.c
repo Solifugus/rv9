@@ -181,6 +181,15 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 	for (;;) {
 		if (until && env->time_us() >= until) break;
 
+		/* Readiness first: a read of /touch that finds nothing does not
+		   return, so the deadline above would never be tested again. See
+		   the longer note in modules/taps/taps.c. */
+		uint32_t waiting = 0;
+		if (env->getstat(tp, RV9_GS_READY, &waiting) == 0 && waiting == 0) {
+			env->sleep_ms(8);
+			continue;
+		}
+
 		rv9_touch_event_t ev[4];
 		int n = env->read(tp, ev, sizeof(ev));
 		if (n < 0) break;

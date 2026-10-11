@@ -6593,10 +6593,35 @@ the board in between:
 | `idf.py flash` | **dead** -- 5,192 polls, ready 0 |
 
 So an ordinary reset is harmless and a flash is not, which is why a day of
-work could not recover it: the fix for each theory was another flash. The
-mechanism was not chased further, because the remedy does not depend on it
-and the cost of knowing is another hour of power cycles; what matters is that
-the controller comes out of a flash not scanning and stays that way.
+work could not recover it: the fix for each theory was another flash.
+
+**That table is true and the conclusion first drawn from it was not.** "A
+flash stops it, power restores it" survived one further measurement and then
+failed: a power cycle with the board left flat on the desk, untouched,
+produced the dead pattern again -- 7,249 polls, ready 3, no fingers. Setting
+all four cold boots of the evening beside each other says what the variable
+really is:
+
+| the board, while it powered up | touch afterwards |
+|---|---|
+| held, being plugged in | one real finger report |
+| flat on the desk, left alone | dead -- ready 3, fingers 0 |
+| held, with a finger on the glass | perfect -- 1,427 polls, 1,427 ready |
+| flat on the desk, left alone | dead -- ready 3, fingers 0 |
+
+The GT911 captures a baseline when it powers up, and what is near the glass at
+that moment decides whether a finger can be told from it afterwards. A board
+lying flat has a desk coupled into the sensor; a board in somebody's hands
+does not. Once a good baseline is taken the controller keeps it across
+processor resets and works normally for as long as the board stays powered --
+which is why everything worked for an hour after the one power cycle that
+happened to be done holding the board.
+
+The flash, on this reading, is not special for what it writes but for
+disturbing the controller's supply enough to make it re-baseline -- on a desk,
+with nothing in hand, which is the condition that produces a bad one. That
+part is inference and is labelled as such; the four rows above are
+measurements.
 
 Three software remedies were tried against a chip in this state and none of
 them moved it: writing the status register on every poll, reloading the
@@ -6604,10 +6629,12 @@ configuration through `Config_Fresh` (0x8100), and commanding a baseline
 recalibration (0x8040 = 0x03). The chip accepts all three -- `Config_Fresh`
 reads back cleared, so it is executing them -- and goes on reporting nothing.
 
-**So the rule for working on this board is: after flashing the P4, take its
-power away before expecting touch.** The driver says so itself, once, when it
-sees a controller answering the bus and reporting no finger, because it is not
-advice anybody guesses and not something the driver can do.
+**So the rule for working on this board is: after flashing the P4, power-cycle
+it with the board in your hands rather than flat on the desk.** Taking the
+power away is necessary and, on the evidence here, not sufficient by itself.
+The driver says what it sees, once, when it finds a controller answering the
+bus and reporting no finger, because it is not advice anybody guesses and not
+something the driver can do.
 
 One measurement that needed the glass working, taken immediately after a power
 cycle: a finger held on the panel from power-on produces a report on **every
@@ -6623,6 +6650,25 @@ Two consequences for the design rather than for this bug:
   good at the first finger. That is an unusual shape for a driver, reporting a
   fault it has no action for, and it is correct here because the action is the
   operator's and nothing else in the machine is placed to suggest it.
+
+* **A blocking read makes a program's own time limit a lie, and SCF had no
+  way out of one.** `scf.c` turns a would-block into sleep-and-retry with no
+  escape, which is exactly right for a shell at a prompt and wrong for
+  anything holding a deadline. `taps 30` against glass nobody touched never
+  returned from its first read: the loop's time check was never reached
+  again, the program ran until the board was reset, and it held `/touch`
+  open throughout -- so the queue was never emptied for the next reader and
+  later events were divided between a live program and a stranded one. The
+  console was unusable while it ran, which is how it was found.
+
+  The remedy needed no new ABI. `RV9_GS_READY` has existed since the
+  beginning as the generic "is there something to read" code, SCF already
+  passes anything it does not recognise down to the driver, and only the
+  network and pipe managers had ever answered it. The touch driver answers
+  it now with the number of queued events, and both touch programs ask
+  before they read, so the waiting happens where the deadline is. Any
+  future program that waits on a device and owes somebody an answer in
+  bounded time wants the same shape.
 
 * **An event queue belongs to the reader that is listening, not to the
   device's history.** The ticker fills the queue whether or not anybody
