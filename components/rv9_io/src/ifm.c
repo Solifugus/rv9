@@ -134,6 +134,31 @@ static rv9_io_err_t ifm_close(rv9_path_t *path)
     return RV9_IO_OK;
 }
 
+/*
+ * How many bytes the register number takes on the wire.
+ *
+ * Eight-bit register maps are the common case and one byte is what they
+ * want. But a GT911 touch controller -- and plenty of EEPROMs and a few
+ * inertial units -- number their registers to sixteen bits, and every one
+ * of them sends the high byte first. So the width follows from the number:
+ * above 0xFF it goes out as two bytes, below it as one.
+ *
+ * Deriving it rather than asking means a caller cannot set a register and
+ * forget to say how wide it is, which is a mistake that produces a
+ * successful transaction against the wrong register -- the expensive kind,
+ * because the bytes that come back look like data.
+ */
+static size_t reg_bytes(uint32_t reg, uint8_t *out)
+{
+    if (reg > 0xFFu) {
+        out[0] = (uint8_t)(reg >> 8);
+        out[1] = (uint8_t)(reg & 0xFFu);
+        return 2;
+    }
+    out[0] = (uint8_t)reg;
+    return 1;
+}
+
 static rv9_io_err_t ifm_read(rv9_path_t *path, void *buf, size_t len,
                              size_t *done)
 {
@@ -149,8 +174,9 @@ static rv9_io_err_t ifm_read(rv9_path_t *path, void *buf, size_t len,
     } else {
         /* The combined transaction: the register number goes out, and the
            bus is held through the turnaround. */
-        uint8_t reg = (uint8_t)st->reg;
-        e = path->dev->drv->xfer(path->dev, st->unit_state, &reg, 1, buf, len);
+        uint8_t reg[2];
+        size_t  rn = reg_bytes(st->reg, reg);
+        e = path->dev->drv->xfer(path->dev, st->unit_state, reg, rn, buf, len);
     }
 
     if (e == RV9_IO_OK && done) *done = len;
@@ -164,7 +190,7 @@ static rv9_io_err_t ifm_write(rv9_path_t *path, const void *buf, size_t len,
     if (st == NULL || buf == NULL) return RV9_IO_ERR_INVAL;
     if (done) *done = 0;
     if (len == 0) return RV9_IO_OK;
-    if (len > IFM_MAX_XFER - 1) return RV9_IO_ERR_INVAL;
+    if (len > IFM_MAX_XFER - 2) return RV9_IO_ERR_INVAL;
 
     rv9_io_err_t e;
     if (st->reg == RV9_IFM_REG_NONE) {
@@ -177,9 +203,9 @@ static rv9_io_err_t ifm_write(rv9_path_t *path, const void *buf, size_t len,
          * and one of them getting it wrong.
          */
         uint8_t out[IFM_MAX_XFER];
-        out[0] = (uint8_t)st->reg;
-        memcpy(out + 1, buf, len);
-        e = path->dev->drv->xfer(path->dev, st->unit_state, out, len + 1,
+        size_t  rn = reg_bytes(st->reg, out);
+        memcpy(out + rn, buf, len);
+        e = path->dev->drv->xfer(path->dev, st->unit_state, out, len + rn,
                                  NULL, 0);
     }
 

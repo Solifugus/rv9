@@ -18,6 +18,7 @@ managed_components/
 # Versions are pinned where that cannot happen instead: exactly, in
 # main/idf_component.yml, which is tracked and does not change with whichever
 # board was built last.
+dependencies.lock
 
 # editors
 .vscode/

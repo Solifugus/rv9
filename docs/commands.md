@@ -130,7 +130,7 @@ value.
 | `pwm <pin> <duty> [hz]` | Drive a PWM output. Duty is raw, 0 to the range the device reports. **Stops when the command exits**, because an actuator left running because a program finished is a bad way to find out. At the default 50 Hz and 14 bits a hobby servo wants roughly 820 (1 ms) to 1640 (2 ms). |
 | `adc <channel> [samples]` | Raw conversions, not millivolts — calibration belongs to the board and the sensor, not the converter. |
 | `temp [n]` | Die temperature. With a count it reports the range, which is the part that says whether something is heating up or merely warm. |
-| `i2c scan` / `i2c <addr> <reg> [count]` | The two-wire bus. Addresses in hex as a datasheet writes them or decimal as a script does. |
+| `i2c scan` / `i2c <addr> <reg> [count]` / `i2c <addr> <reg> = <byte>...` | The two-wire bus. Addresses in hex as a datasheet writes them or decimal as a script does. A register number above `0xff` is sent as two bytes, high first, which is what sixteen-bit register maps expect. The `=` form writes, because a bus you can only read is a bus you cannot bring a chip up on. |
 | `range <pin> [count] [listen]` | Distance from a three-pin sonic ranger, or any pulse width. `listen` measures pulses without triggering. |
 | `backlight [0..100]` | The panel. The largest continuous draw on this board, and turning it down costs nothing else — the console works at any brightness, including none. Not remembered across a reset. |
 
@@ -154,6 +154,7 @@ Both share one panel, and **whoever painted last is what you see**.
 | `wcompose > /w0` | Two independent widget stacks in one document over one background, with one of them repainted alone. |
 
 | `taps` | Every touch on the glass, one line each: kind, finger, position, time. `taps 20` for twenty seconds. |
+| `wtap > /w0` | A whisker button you can actually press. Reports taps, moves, and the worst finger-to-pixels time. |
 
 **`taps` is how you find out whether touch is wired up right.** A driver that
 reports nothing and one that reports mirrored coordinates look identical from

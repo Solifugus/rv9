@@ -6473,28 +6473,41 @@ extrapolation that turned out pessimistic.** `flick > /w0` on the real
 
 | | predicted | measured |
 |---|---|---|
-| full screen | ~640 ms C5-class, ~385 ms scaled to 400 MHz | **175 ms** |
-| a tap (press + release) | ~66 ms C5-class | **5 ms** (3 + 2) |
+| full screen | ~640 ms C5-class, ~385 ms scaled to 400 MHz | **144-175 ms** |
+| a tap (press + release) | ~66 ms C5-class | **53 ms** (29 + 24) |
 
-The full screen is 3.7x better than the C5-class figure and 2.2x better than
-that figure scaled for the P4's clock. The tap is an order of magnitude
-better. The extrapolation chain -- host band timings, scaled for width, then
-for board, then for clock -- compounded its pessimism at every step, which is
-what extrapolations do.
+**The 5 ms figure published here first was wrong, and the way it was wrong is
+worth keeping.** It came from `flick`, which passes fixed row numbers to
+`RV9_SVG_SS_ROWS`. That setstat takes *panel* rows; `flick`'s numbers are
+document units. On the C5 the window's viewBox happens to equal the panel, the
+two are the same number, and the program is correct by coincidence. On the P4
+they differ by a factor of three, so `flick` was clipping a band a third the
+intended height and in the wrong place -- and timing it. `wflick`, which asks
+`RV9_GS_SIZE` and converts, repaints rows 32..96 of 600 and takes 29 ms to
+press and 24 to release.
 
-THE CONCLUSION BELOW HAS TO CHANGE WITH THEM. Sixty-odd milliseconds is a tap
-that feels immediate, and five is one that feels like hardware. More
-importantly, a 3 ms band repaint is about three hundred a second, so moving a
-widget under a finger -- repainting where it was and where it now is -- is not
-obviously unaffordable any more. That is implied by these numbers rather than
-demonstrated by them: nobody has yet dragged anything on this panel and timed
-it.
+So the full screen is still 3.7x better than the C5-class extrapolation and
+2.2x better than that figure scaled for clock -- the extrapolation chain was
+genuinely pessimistic at every step, which is what extrapolation chains do.
+But the tap is about 20% better than predicted, not an order of magnitude.
 
-So the interaction model that fits this hardware is: **tap to act, a brief
-flash to confirm, and measure before assuming a drag is too expensive.** What
-remains true is that repainting the whole screen inside a gesture is not
-affordable -- 175 ms is still six frames a second -- and that the band
-strategy is what makes the difference, by a factor of thirty-five.
+THE CONCLUSION BELOW CHANGES WITH THEM, AND LESS THAN THE WRONG NUMBER
+SUGGESTED. Fifty milliseconds is a tap that feels immediate. A band repaint of
+29 ms is about 34 a second, so a widget dragged under a finger would redraw at
+roughly 17 fps once both the old and the new position are painted. That is
+visible as motion and not mistakable for hardware. The original caution about
+dragging therefore stands rather than dissolving: **tap to act, a brief flash
+to confirm, and treat a drag as something to be designed around rather than
+assumed free.**
+
+What remains true either way is that repainting the whole screen inside a
+gesture is not affordable -- 144 ms is seven frames a second -- and that the
+band strategy is what makes the difference, by a factor of five on a tap.
+
+The general lesson is the one about the measurement rather than the panel: a
+timing taken through a program that is accidentally correct on one board
+measures that accident. `flick` should be read as a C5 program until its clip
+is converted.
 
 One consequence to design around rather than fight: bands are full width, so a
 tall narrow widget costs what a tall wide one does. Laying widgets out in
@@ -6528,6 +6541,71 @@ questions, not one*, and one knob answers both. Keeping the level at INFO and
 filtering in the console sink would fix it, at the cost of formatting every
 INFO line even when nobody prints it -- which is real CPU on this machine, so
 it is a trade to decide rather than an obvious win.
+
+**It bit again on 2026-10-10, and the second time cost more than the first.**
+The touch driver was made to report what its poller could see, to find out why
+`/touch` produced no events. The report went out at INFO, the shell was
+running because `taps` had to be started somehow, and so the diagnostic was
+suppressed during precisely the minute somebody was pressing the glass. The
+numbers that did survive were from the quiet part of the boot -- when nobody
+was touching anything -- and an all-zero reading there means only that an
+untouched controller reports nothing, which is correct behaviour. That reading
+was briefly published as evidence of a fault.
+
+A wart that has now mislead twice in the same way is not a wart, it is a
+design defect with a note attached. Anything meant to be read while a program
+is running has to go out at WARN until the two questions are separated, and
+the comment at the complaint in `drv_touch.c` says so at the point where
+somebody would otherwise write `ESP_LOGI`.
+
+### The GT911 has no reset line, which makes one fault unrecoverable
+
+Touch worked on the P4 on 2026-10-06 and not on 2026-10-10, with no change to
+the driver in between that could explain it. What the instrumented poller
+eventually showed was unambiguous: 12,677 consecutive polls, zero bus errors,
+and every status byte the chip returned equal to `0x00` -- while the glass was
+being pressed firmly. The chip answers its address, gives its product ID as
+"911" and its firmware as `0x1060`, carries a correct configuration (1024x600,
+five points, touch threshold 100, leave threshold 70) and executes writes.
+It simply does not scan.
+
+The board's support package explains why nothing in software can fix that:
+
+    #define BSP_LCD_TOUCH_RST     (GPIO_NUM_NC)
+    #define BSP_LCD_TOUCH_INT     (GPIO_NUM_NC)
+
+Both control lines are unconnected. The only wires between the processor and
+the controller are SDA and SCL, so **RV-9 cannot reset the touch chip.** A
+reset of the processor -- by `idf.py flash`, by the watchdog, by DTR on the
+console cable -- restarts everything except the controller, which keeps its
+rail and its state. A controller in a non-scanning state therefore survives
+every reboot the software can cause, indefinitely, and the only remedy is
+removing the board's power.
+
+That also resolves the date discrepancy without anything having regressed: on
+2026-10-06 the factory firmware had just been restored to prove the panel
+innocent, and RV-9 inherited a controller that the vendor's code had already
+started. The board has been power-cycled since.
+
+Two consequences for the design rather than for this bug:
+
+* **A driver that cannot reach a device's reset must report rather than
+  recover.** `drv_touch.c` now says, while a program is waiting for an event
+  and none has ever been produced, what its poller sees -- and goes silent for
+  good at the first finger. That is an unusual shape for a driver, reporting a
+  fault it has no action for, and it is correct here because the action is the
+  operator's and nothing else in the machine is placed to suggest it.
+* **`i2c` had never been able to talk to this chip.** IFM truncated the
+  register number to eight bits, so a sixteen-bit register map was
+  unreachable from the shell: `i2c 0x5d 0x8140` addressed register `0x40`
+  and returned plausible bytes from the wrong place. A register above `0xFF`
+  now goes out as two bytes, high first, and the width is derived from the
+  number rather than configured, because a width that can be set separately
+  can be set wrong -- and then the transaction succeeds against some other
+  register and what comes back looks like data. Writing was added for the
+  same reason: a bus that can only be read is a bus you cannot bring a chip
+  up on, and every hypothesis about this controller's state lived in a
+  register that had to be written to test.
 
 ## 9. Migration to a native kernel
 

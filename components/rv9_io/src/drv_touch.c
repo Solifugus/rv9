@@ -17,6 +17,22 @@
  * is otherwise idle. Were the line wired, this file would change in one
  * place -- the ticker -- and nothing above it would notice.
  *
+ * NEITHER IS ITS RESET LINE, and that one has a consequence worth knowing
+ * before it is met. The board's own support package says so plainly --
+ * BSP_LCD_TOUCH_RST and BSP_LCD_TOUCH_INT are both GPIO_NUM_NC -- so the
+ * only wires between the processor and this chip are the two the bus runs
+ * on. There is nothing to pulse. A controller sitting in a state where it
+ * answers the bus but does not scan the glass therefore stays in it
+ * through a reflash, through a watchdog, through every reset the software
+ * can cause: the processor restarts and the chip does not. Only taking the
+ * board's power away clears it.
+ *
+ * So the only thing this driver can do about such a chip is say so, which
+ * is what the complaint in ticker() is for. It is an unusual shape for a
+ * driver -- report a fault it cannot act on -- and the right one here,
+ * because the action is the operator's and nothing else in the machine is
+ * in a position to suggest it.
+ *
  * THE BUS IS NOT THIS DRIVER'S. The controller shares the two wires that
  * /i2c0 serves, and which of them attaches first is decided by the order
  * descriptors happen to be in, so neither creates it: see i2c_bus.h, which
@@ -101,6 +117,14 @@ typedef struct {
 
     finger_t last[GT911_MAX_POINTS];
     bool     said_outside;      /* complained once; see place() */
+
+    /* What the ticker has actually seen, so a silent driver can say which
+       kind of silence it is: a poller that never ran, a bus that answers
+       nothing, or a chip that answers and reports no finger. See the note
+       above the complaint in ticker(). */
+    bool     asked;             /* somebody is waiting for an event */
+    uint32_t polls, ioerr, ready, points, events;
+    uint8_t  status_bits;       /* every status byte seen, OR'd together */
 
     /* The queue. Head is where the next event goes, tail the oldest
        unread. One slot stays empty so full and empty differ. */
@@ -205,6 +229,10 @@ static void emit(touch_t *t, uint8_t kind, uint8_t id, const finger_t *f)
         .pressure = f->pressure,
         .at_ms    = (uint32_t)rv9_time_ms(),
     };
+    if (t->events++ == 0) {
+        ESP_LOGI(TAG, "first touch at %u,%u -- the glass works",
+                 (unsigned)f->x, (unsigned)f->y);
+    }
     q_put(t, &e);
 }
 
@@ -245,11 +273,30 @@ static void place(touch_t *t, finger_t *f, uint16_t rx, uint16_t ry)
 
 static void poll_once(touch_t *t)
 {
+    t->polls++;
+
     uint8_t status = 0;
-    if (reg_read(t, REG_STATUS, &status, 1) != RV9_IO_OK) return;
-    if (!(status & STATUS_READY)) return;
+    if (reg_read(t, REG_STATUS, &status, 1) != RV9_IO_OK) { t->ioerr++; return; }
+    t->status_bits |= status;
+
+    /*
+     * Acknowledged even when there is nothing to acknowledge.
+     *
+     * The obvious reading of the datasheet is that this write tells the
+     * chip its report has been collected, so a poll that found no report
+     * has nothing to say and can return. ESP-IDF's own GT911 driver --
+     * which is what the board's vendor ships and what demonstrably works
+     * on this glass -- writes it on every poll regardless, and that is the
+     * only difference between that driver and this one.
+     */
+    if (!(status & STATUS_READY)) {
+        (void)reg_write8(t, REG_STATUS, 0);
+        return;
+    }
+    t->ready++;
 
     uint32_t n = status & STATUS_COUNT_MASK;
+    t->points += n;
     if (n > GT911_MAX_POINTS) n = GT911_MAX_POINTS;
 
     uint8_t raw[GT911_MAX_POINTS * POINT_BYTES];
@@ -304,9 +351,48 @@ static void poll_once(touch_t *t)
 static void ticker(void *arg)
 {
     touch_t *t = (touch_t *)arg;
+    uint64_t said = 0;
 
     for (;;) {
         poll_once(t);
+
+        /*
+         * A driver that reports nothing is the hardest kind to debug from
+         * outside, because four different faults look identical from
+         * there: the polling task never started, the bus answers nothing,
+         * the chip answers and never sees a finger, or nobody actually
+         * touched the glass. A day went into telling those apart by hand.
+         * These numbers tell them apart on sight -- `polls` alone proves
+         * this task is alive, `bus errors` separates the wiring from the
+         * chip, and `status bits` is every status byte the chip has ever
+         * returned, so an all-zero chip is distinguishable from a chip
+         * saying something that is being decoded wrongly.
+         *
+         * It is said only while both are true: a program is waiting for an
+         * event, and not one event has ever been produced. So it is silent
+         * on a working machine, silent when nothing is listening, and
+         * speaks exactly during the failure it describes -- and stops for
+         * good the moment the first finger arrives, which is also the most
+         * useful line in the log.
+         *
+         * A warning rather than information, which is the wrong severity
+         * for the content and the right one for being heard: the shell
+         * drops the log to WARN while it runs, so an INFO line is
+         * suppressed during precisely the minute somebody is pressing the
+         * glass wondering why nothing happens.
+         */
+        if (t->asked && t->events == 0) {
+            uint64_t now = rv9_time_ms();
+            if (now - said >= 5000) {
+                said = now;
+                ESP_LOGW(TAG, "nothing touched yet: polls %lu  bus errors "
+                              "%lu  ready %lu  points %lu  status bits 0x%02x",
+                         (unsigned long)t->polls, (unsigned long)t->ioerr,
+                         (unsigned long)t->ready, (unsigned long)t->points,
+                         (unsigned)t->status_bits);
+            }
+        }
+
         rv9_task_delay_ms(t->ms);
     }
 }
@@ -405,6 +491,8 @@ static rv9_io_err_t touch_read(rv9_dev_t *dev, void *buf, size_t len,
     touch_t *t = (touch_t *)dev->drv_state;
     if (t == NULL || buf == NULL) return RV9_IO_ERR_IO;
     if (len < sizeof(rv9_touch_event_t)) return RV9_IO_ERR_INVAL;
+
+    t->asked = true;        /* somebody is waiting: see ticker() */
 
     uint32_t want = (uint32_t)(len / sizeof(rv9_touch_event_t));
     uint8_t *out  = (uint8_t *)buf;

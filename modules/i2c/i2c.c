@@ -12,6 +12,8 @@
  *   i2c scan             which addresses answer
  *   i2c 0x68 0x75        read one byte of register 0x75
  *   i2c 0x68 0x3b 6      read six bytes, in one transaction
+ *   i2c 0x5d 0x8140 4    a sixteen-bit register number, high byte first
+ *   i2c 0x5d 0x8040 = 0  write one byte to a register
  *
  * `scan` is the first thing anybody needs and the thing that is miserable
  * without a tool: a sensor that does not answer is indistinguishable from
@@ -22,6 +24,14 @@
  * are three axes from one instant; fetched one at a time they are three
  * axes from three instants, and the vector they describe never existed.
  * The register form here is a single transaction for exactly that reason.
+ *
+ * Writing came later and for a specific reason: a bus you can only read is
+ * a bus you cannot bring a chip up on. A touch controller that answers its
+ * address, names itself correctly and reports no touches is either asleep
+ * or in the wrong mode, and both answers live in a register you have to
+ * write to find out. Doing that from the shell is a minute; doing it by
+ * editing a driver and reflashing is twenty, and each wrong guess costs
+ * another twenty.
  */
 #include "modlib.h"
 
@@ -127,7 +137,8 @@ int rv9_module_entry(const rv9_mod_env_t *env)
                                           : "";
 
     if (word[0] == '\0') {
-        m_say(env, RV9_STDERR, "usage: i2c scan | i2c <addr> <reg> [count]\n");
+        m_say(env, RV9_STDERR, "usage: i2c scan | i2c <addr> <reg> [count] "
+                               "| i2c <addr> <reg> = <byte>...\n");
         return 4;
     }
 
@@ -147,16 +158,44 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         return 4;
     }
 
-    char counttext[8];
-    m_word(rest, counttext, sizeof(counttext));
-    uint32_t count = 1;
-    if (counttext[0] != '\0' && !parse_num(counttext, &count)) count = 1;
-    if (count == 0 || count > MAX_READ) count = 1;
+    /*
+     * What follows the register is either how many bytes to read or an `=`
+     * and the bytes to write. An equals sign is used rather than a `w`
+     * subcommand because it reads the way the operation is described: the
+     * register is being given a value.
+     */
+    char third[8];
+    const char *after = m_word(rest, third, sizeof(third));
+
+    bool     writing = m_eq(third, "=");
+    uint32_t count   = 1;
+    uint32_t wlen    = 0;
+
+    if (writing) {
+        char bytetext[8];
+        while (wlen < MAX_READ) {
+            after = m_word(after, bytetext, sizeof(bytetext));
+            if (bytetext[0] == '\0') break;
+            uint32_t v;
+            if (!parse_num(bytetext, &v) || v > 0xFFu) {
+                m_say(env, RV9_STDERR, "i2c: not a byte\n");
+                return 4;
+            }
+            st->buf[wlen++] = (uint8_t)v;
+        }
+        if (wlen == 0) {
+            m_say(env, RV9_STDERR, "i2c: nothing to write\n");
+            return 4;
+        }
+    } else {
+        if (third[0] != '\0' && !parse_num(third, &count)) count = 1;
+        if (count == 0 || count > MAX_READ) count = 1;
+    }
 
     char name[24];
     devpath(name, addr);
 
-    int p = env->open(name, RV9_MODE_READ);
+    int p = env->open(name, writing ? RV9_MODE_WRITE : RV9_MODE_READ);
     if (p < 0) {
         m_say(env, RV9_STDERR, name);
         m_say(env, RV9_STDERR, ": cannot open\n");
@@ -167,6 +206,18 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         m_say(env, RV9_STDERR, "i2c: this device takes no register\n");
         env->close(p);
         return 6;
+    }
+
+    if (writing) {
+        int w = env->write(p, st->buf, wlen);
+        env->close(p);
+        if (w != (int)wlen) {
+            m_say(env, RV9_STDERR, "i2c: 0x");
+            hex2(env, (uint8_t)addr);
+            m_say(env, RV9_STDERR, " would not take it\n");
+            return 7;
+        }
+        return 0;
     }
 
     int n = env->read(p, st->buf, count);

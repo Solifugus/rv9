@@ -840,6 +840,14 @@ _Static_assert(sizeof(rv9_touch_event_t) == 12, "touch event is 12 bytes");
  * It is a property of the path, not of the device, so two programs
  * reading different registers of the same chip do not disturb each
  * other.
+ *
+ * A register above 0xFF goes out as two bytes, high byte first, which is
+ * what every sixteen-bit register map does -- a GT911 touch controller
+ * numbers its registers 0x8040 upward. The width is not a separate
+ * setting because it follows from the number, and a width that can be set
+ * separately is a width that can be set wrong: the transaction then
+ * succeeds against some other register and the bytes that come back look
+ * like data.
  */
 #define RV9_IFM_SS_REG        22
 #define RV9_IFM_REG_NONE      0xFFFFFFFFu
