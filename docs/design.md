@@ -6694,6 +6694,56 @@ Two consequences for the design rather than for this bug:
   up on, and every hypothesis about this controller's state lived in a
   register that had to be written to test.
 
+### The C3 compiles already, which says something about the layering
+
+Four ESP32-C3 boards arrived on 2026-10-10, intended as the far end of a
+federation. Before any of them was attached, the question of what porting
+would cost was answered with a side build (`idf.py -B ... -D SDKCONFIG=...`,
+which keeps the P4's own config untouched -- `set-target` otherwise rewrites
+the one at the project root, and this repository builds two chips out of one
+directory):
+
+| | esp32c3 |
+|---|---|
+| builds | first attempt, no errors, native kernel |
+| app | 1,148,896 bytes in a 1.5 MB partition, 27% free |
+| DRAM | 149,124 of 321,296 used -- 172 KB remaining |
+| module store | byte-identical to the other boards |
+| radio | native `esp_wifi`; `esp_hosted` is P4-gated and not pulled in |
+| console | the existing USB Serial/JTAG driver |
+
+**The module store needs no C3 build at all**, and that was worth checking
+rather than assuming: modules are compiled `-march=rv32imac_...` and a C3 is
+`rv32imc`, with no atomic instructions. Building the whole store for
+`rv32imc_zicsr_zifencei` produced **all 90 modules byte-identical, every
+crc32 the same** -- no module has ever used the `a` extension. So one store
+ships to any node, which is what a federation wants.
+
+That compatibility is currently an accident. Lowering the module `-march` to
+`rv32imc` would cost nothing today and make the compiler refuse a module that
+needs atomics, rather than letting one break every C3 silently. It also
+narrows what any future module may do on every board at once, so it is a
+decision about the module ABI rather than a build tweak, and it is recorded
+here undecided.
+
+None of the above has run on hardware. Two things will not be known until it
+does:
+
+* **The heap floor.** 172 KB is what is left statically; RV-9 allocates on
+  top of it and module stacks are not small (`wtap` asks 7,168 bytes). That
+  arithmetic has only ever been exercised where there was more room.
+* **GPIO 9 is a strapping pin on the C3**, and `drv_i2c.c` compiles the
+  non-P4 branch as SDA 8, SCL 9. Held low at reset it enters download mode.
+  The internal pull-up probably carries it, but a board fact deserves a
+  board answer, the way the P4 got 7 and 8 -- see the note in that file about
+  taking the C5's numbers for a board that wanted different ones.
+
+What this says about the design is the part worth keeping: a new chip of a
+different ISA generation, with no display, no card and a radio in a different
+place, compiled without a single change. The KAL and the device model were
+the argument for doing it that way, and this is the first time that argument
+has been tested by something other than the board it was written on.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has
