@@ -106,6 +106,7 @@ typedef struct {
 } finger_t;
 
 typedef struct {
+    rv9_dev_t *dev;             /* for the complaint, which names itself */
     i2c_master_bus_handle_t bus;
     i2c_master_dev_handle_t chip;
 
@@ -123,6 +124,7 @@ typedef struct {
        nothing, or a chip that answers and reports no finger. See the note
        above the complaint in ticker(). */
     bool     asked;             /* somebody is waiting for an event */
+    bool     advised;           /* said what to do about it, once */
     uint32_t polls, ioerr, ready, points, events;
     uint8_t  status_bits;       /* every status byte seen, OR'd together */
 
@@ -230,7 +232,10 @@ static void emit(touch_t *t, uint8_t kind, uint8_t id, const finger_t *f)
         .at_ms    = (uint32_t)rv9_time_ms(),
     };
     if (t->events++ == 0) {
-        ESP_LOGI(TAG, "first touch at %u,%u -- the glass works",
+        /* Said once, and worded carefully: a single report proves the
+           reporting path works, not that the glass does. A controller
+           freshly out of reset emits a few of these with nobody near it. */
+        ESP_LOGI(TAG, "first report from the chip: a finger at %u,%u",
                  (unsigned)f->x, (unsigned)f->y);
     }
     q_put(t, &e);
@@ -351,6 +356,7 @@ static void poll_once(touch_t *t)
 static void ticker(void *arg)
 {
     touch_t *t = (touch_t *)arg;
+    rv9_dev_t *dev = t->dev;
     uint64_t said = 0;
 
     for (;;) {
@@ -381,15 +387,36 @@ static void ticker(void *arg)
          * suppressed during precisely the minute somebody is pressing the
          * glass wondering why nothing happens.
          */
+        uint64_t now = rv9_time_ms();
+
         if (t->asked && t->events == 0) {
-            uint64_t now = rv9_time_ms();
             if (now - said >= 5000) {
                 said = now;
-                ESP_LOGW(TAG, "nothing touched yet: polls %lu  bus errors "
-                              "%lu  ready %lu  points %lu  status bits 0x%02x",
+                ESP_LOGW(TAG, "polls %lu  bus errors %lu  ready %lu  "
+                              "fingers seen %lu  bits 0x%02x",
                          (unsigned long)t->polls, (unsigned long)t->ioerr,
                          (unsigned long)t->ready, (unsigned long)t->points,
                          (unsigned)t->status_bits);
+
+                /*
+                 * The remedy, said once, because it is not one this
+                 * driver can carry out and it is not one anybody guesses.
+                 * A chip answering every read while never raising its
+                 * ready flag has stopped scanning, and with no reset line
+                 * there is nothing to pulse: writing the status register,
+                 * reloading the configuration through Config_Fresh and
+                 * commanding a recalibration were all tried against a
+                 * chip in this state and none of them moved it.
+                 */
+                if (!t->advised && t->ready == 0 && t->polls > 600) {
+                    t->advised = true;
+                    ESP_LOGW(TAG, "%s: the controller answers the bus and "
+                                  "reports no finger. It has no reset line, "
+                                  "so this cannot be cleared from here -- "
+                                  "take the board's power away and put it "
+                                  "back. Flashing leaves it like this; an "
+                                  "ordinary reset does not.", dev->name);
+                }
             }
         }
 
@@ -458,6 +485,7 @@ static rv9_io_err_t touch_init(rv9_dev_t *dev)
         return RV9_IO_ERR_NOMEM;
     }
 
+    t->dev         = dev;
     dev->drv_state = t;
 
     if (rv9_task_create(ticker, "rv9-touch", 3072, t, RV9_PRIO_HIGH,
@@ -474,6 +502,39 @@ static rv9_io_err_t touch_init(rv9_dev_t *dev)
              id[2] ? id[2] : '?', (unsigned long)addr, t->w, t->h,
              (unsigned long)t->ms,
              (t->mirror_x || t->mirror_y) ? ", mirrored to the panel" : "");
+    return RV9_IO_OK;
+}
+
+/*
+ * The first reader starts from now, not from the backlog.
+ *
+ * The ticker fills the queue whether or not anybody is reading -- it has
+ * to, because a program that opens /touch a moment before a finger lands
+ * must not miss it. The consequence is that a queue which nobody has read
+ * for a while holds presses from a while ago, and the next program to open
+ * the device inherits them as though they had just happened. `wtap`
+ * measured its own finger-to-pixels time at 5,744 ms that way, which is
+ * not a slow machine: it is a stale queue being believed.
+ *
+ * A touch event means "a finger is on the glass now". That claim has a
+ * shelf life, and it expires when the program it was meant for has gone.
+ * So the queue is emptied when the device goes from nobody-using-it to
+ * somebody, which is what this hook is for.
+ *
+ * `dropped` is cleared with it rather than reported: those events were not
+ * lost from anybody's stream, because nobody had a stream.
+ */
+static rv9_io_err_t touch_open(rv9_dev_t *dev, uint32_t mode)
+{
+    (void)mode;
+    touch_t *t = (touch_t *)dev->drv_state;
+    if (t == NULL) return RV9_IO_ERR_IO;
+
+    rv9_lock_acquire(t->lock);
+    t->head = t->tail = 0;
+    t->dropped = 0;
+    rv9_lock_release(t->lock);
+
     return RV9_IO_OK;
 }
 
@@ -556,6 +617,7 @@ static const rv9_driver_t touch = {
     .name       = "touch",
     .raw_stream = true,       /* records, not lines: see rv9/io.h */
     .init       = touch_init,
+    .open       = touch_open,
     .read       = touch_read,
     .getstat    = touch_getstat,
 };

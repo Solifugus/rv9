@@ -263,7 +263,7 @@ the firmware.
 | `/pwm0/N` | `pio` | `pwm` | Duty cycle. Stops driving when the path closes — it holds a hardware channel that must be given back. |
 | `/adc0/N` | `pio` | `adc` | Analogue in. |
 | `/tsens` | `pio` | `tsens` | The die's own temperature. |
-| `/touch` | `scf` | `touch` | The touch panel, as a stream of 12-byte events. Reads block; records are never split. Only where there is one. Its reset line is not wired, so a controller that stops scanning cannot be recovered in software: the driver says what its poller sees and the board needs its power removed. |
+| `/touch` | `scf` | `touch` | The touch panel, as a stream of 12-byte events. Reads block; records are never split. The queue is emptied on first open, so a program gets fingers from now rather than a backlog. Only where there is one. **Flashing the P4 leaves the controller not scanning; an ordinary reset does not. Its reset line is not wired, so take the board's power away.** The driver says so when it sees it. |
 | `/i2c0/ADDR` | `ifm` | `i2c` | The two-wire bus. The pins are the board's; the only option is kHz (100). Shared with the touch controller. A register number above `0xff` is sent as two bytes, high first. |
 | `/n0/…` | `nfm` | `net` | TCP, out and in. |
 | `/pub0/NAME` | `pfm` | `pubmem` | Published cells. |

@@ -901,7 +901,7 @@
       "read_rt": false,
       "write_rt": null,
       "retains": false,
-      "sessions": false
+      "sessions": true
     },
     {
       "name": "tsens",

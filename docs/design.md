@@ -6558,7 +6558,7 @@ is running has to go out at WARN until the two questions are separated, and
 the comment at the complaint in `drv_touch.c` says so at the point where
 somebody would otherwise write `ESP_LOGI`.
 
-### The GT911 has no reset line, which makes one fault unrecoverable
+### Flashing the P4 stops the touch controller, and only power clears it
 
 Touch worked on the P4 on 2026-10-06 and not on 2026-10-10, with no change to
 the driver in between that could explain it. What the instrumented poller
@@ -6575,17 +6575,45 @@ The board's support package explains why nothing in software can fix that:
     #define BSP_LCD_TOUCH_INT     (GPIO_NUM_NC)
 
 Both control lines are unconnected. The only wires between the processor and
-the controller are SDA and SCL, so **RV-9 cannot reset the touch chip.** A
-reset of the processor -- by `idf.py flash`, by the watchdog, by DTR on the
-console cable -- restarts everything except the controller, which keeps its
-rail and its state. A controller in a non-scanning state therefore survives
-every reboot the software can cause, indefinitely, and the only remedy is
-removing the board's power.
+the controller are SDA and SCL, so **RV-9 cannot reset the touch chip.** Any
+restart of the processor leaves the controller untouched: it keeps its rail
+and its state across the reset. A controller in a non-scanning state
+therefore survives every reboot the software can cause, indefinitely, and the
+only remedy is removing the board's power.
 
-That also resolves the date discrepancy without anything having regressed: on
-2026-10-06 the factory firmware had just been restored to prove the panel
-innocent, and RV-9 inherited a controller that the vendor's code had already
-started. The board has been power-cycled since.
+**What actually puts it in that state is flashing**, established the same
+evening by running the same program four times with different things done to
+the board in between:
+
+| what happened first | touch afterwards |
+|---|---|
+| nothing -- the program run on a board already up | works, 66 events |
+| a processor reset over the console cable | works, 104 events |
+| nothing again | works, 101 taps |
+| `idf.py flash` | **dead** -- 5,192 polls, ready 0 |
+
+So an ordinary reset is harmless and a flash is not, which is why a day of
+work could not recover it: the fix for each theory was another flash. The
+mechanism was not chased further, because the remedy does not depend on it
+and the cost of knowing is another hour of power cycles; what matters is that
+the controller comes out of a flash not scanning and stays that way.
+
+Three software remedies were tried against a chip in this state and none of
+them moved it: writing the status register on every poll, reloading the
+configuration through `Config_Fresh` (0x8100), and commanding a baseline
+recalibration (0x8040 = 0x03). The chip accepts all three -- `Config_Fresh`
+reads back cleared, so it is executing them -- and goes on reporting nothing.
+
+**So the rule for working on this board is: after flashing the P4, take its
+power away before expecting touch.** The driver says so itself, once, when it
+sees a controller answering the bus and reporting no finger, because it is not
+advice anybody guesses and not something the driver can do.
+
+One measurement that needed the glass working, taken immediately after a power
+cycle: a finger held on the panel from power-on produces a report on **every
+poll** -- 1,427 polls, 1,427 ready, 2,852 contact points, 375 events in 34
+seconds, with zero bus errors. There is nothing marginal about this controller
+when it is scanning.
 
 Two consequences for the design rather than for this bug:
 
@@ -6595,6 +6623,19 @@ Two consequences for the design rather than for this bug:
   good at the first finger. That is an unusual shape for a driver, reporting a
   fault it has no action for, and it is correct here because the action is the
   operator's and nothing else in the machine is placed to suggest it.
+
+* **An event queue belongs to the reader that is listening, not to the
+  device's history.** The ticker fills the queue whether or not anybody
+  reads, which it must: a program that opens `/touch` a moment before a
+  finger lands must not miss it. But a queue nobody has read for a while
+  holds presses from a while ago, and the next program to open the device
+  inherited them as though they had just happened -- `wtap` reported its own
+  finger-to-pixels time as 5,744 ms that way, which was not a slow machine
+  but a stale queue being believed. A touch event claims "a finger is on the
+  glass now", and that claim expires when the program it was meant for has
+  gone, so the queue is emptied when the device goes from nobody-using-it to
+  somebody. The driver `open` hook exists for exactly this and was being
+  used by nothing but `ssh`.
 * **`i2c` had never been able to talk to this chip.** IFM truncated the
   register number to eight bits, so a sixteen-bit register map was
   unreachable from the shell: `i2c 0x5d 0x8140` addressed register `0x40`

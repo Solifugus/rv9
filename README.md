@@ -245,6 +245,12 @@ idf.py -p /dev/ttyACM0 flash
 idf.py -p /dev/ttyACM0 monitor
 ```
 
+On the P4, **unplug the board and plug it back in after flashing if you want
+the touch panel.** Flashing leaves the GT911 controller not scanning, its
+reset line is not wired to the processor, and nothing in software can clear
+it -- an ordinary reset is harmless, a flash is not. The driver says so when
+it sees it; the long version is in `docs/design.md` §56.
+
 The console shell is on USB serial. Once on a network:
 
 ```
