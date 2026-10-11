@@ -607,6 +607,20 @@ static rv9_io_err_t touch_getstat(rv9_dev_t *dev, uint32_t code, void *arg)
      */
     if (code == RV9_GS_READY) {
         if (arg == NULL) return RV9_IO_ERR_INVAL;
+
+        /*
+         * Asking counts as waiting.
+         *
+         * The complaint in ticker() fires while somebody is waiting and
+         * nothing has ever arrived, and it learned that from touch_read.
+         * Then both touch programs were changed to ask this instead of
+         * blocking in a read -- so on a machine where no finger ever
+         * registers, nothing called touch_read, and the one diagnostic
+         * that explains the silence went silent with it. A program polling
+         * readiness is waiting just as much as one blocked in a read.
+         */
+        t->asked = true;
+
         rv9_lock_acquire(t->lock);
         *(uint32_t *)arg = q_used(t);
         rv9_lock_release(t->lock);
