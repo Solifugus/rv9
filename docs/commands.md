@@ -155,6 +155,7 @@ Both share one panel, and **whoever painted last is what you see**.
 
 | `taps` | Every touch on the glass, one line each: kind, finger, position, time. `taps 20` for twenty seconds. |
 | `wtap > /w0` | A whisker button you can actually press. Reports taps, moves, and the worst finger-to-pixels time. |
+| `wslop > /w0` | Five marks, eight taps each: how far a finger lands from where it aimed — bias, scatter and drift, in pixels and millimetres. Also draws a red bar on the top rows and a cyan one on the bottom, so the first frame shows whether the picture sits where the window says. **Measured 2026-10-24: scatter 12–26 px worst, drift zero; the picture sits ~45 rows low.** |
 
 **`taps` is how you find out whether touch is wired up right.** A driver that
 reports nothing and one that reports mirrored coordinates look identical from
