@@ -407,14 +407,27 @@ static void ticker(void *arg)
                  * reloading the configuration through Config_Fresh and
                  * commanding a recalibration were all tried against a
                  * chip in this state and none of them moved it.
+                 *
+                 * Conditional, because a healthy controller that nobody
+                 * has touched looks exactly the same from here: it
+                 * answers, never raises ready, and reports no finger.
+                 * whisker's wslop met that on 2026-10-24 -- this said
+                 * "take the power away" at 32 s and touch worked at 80 s
+                 * with nothing done. Only the person at the glass knows
+                 * whether it is being pressed, so the remedy is theirs to
+                 * choose, not ours to assert.
                  */
                 if (!t->advised && t->ready == 0 && t->polls > 600) {
                     t->advised = true;
                     ESP_LOGW(TAG, "%s: the controller answers the bus and "
-                                  "reports no finger. It has no reset line, "
-                                  "so this cannot be cleared from here -- "
-                                  "take the board's power away and put it "
-                                  "back. Flashing leaves it like this; an "
+                                  "has reported no finger yet. Untouched "
+                                  "glass looks the same. If it is being "
+                                  "pressed and ready stays 0, the "
+                                  "controller is not scanning; it has no "
+                                  "reset line, so take the board's power "
+                                  "away and put it back, holding the board "
+                                  "rather than leaving it flat on a desk. "
+                                  "Flashing leaves it like this; an "
                                   "ordinary reset does not.", dev->name);
                 }
             }

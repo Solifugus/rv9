@@ -210,8 +210,13 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 				for (k = 0; k < (int)sizeof head[0].id; k++) head[0].id[k] = '\0';
 				for (k = 0; k < (int)sizeof head[0].text; k++) head[0].text[k] = '\0';
 			}
+			/* An explicit size, here and on the bars: a button left at 0
+			   takes WSK_BTN_ROWS, 64 rows, whatever its area says, and
+			   overflows it downwards. That was the "picture sits 45 rows
+			   low" of 2026-10-24 -- every mark a 64-row bar hanging below
+			   its target, and the 4-row red edge a centimetre thick. */
 			mark[0].kind = WSK_BUTTON;
-			mark[0].size = 0; mark[0].weight = 1;
+			mark[0].size = MARK - 2; mark[0].weight = 1;
 			mark[0].fill = 0xf0d070u; mark[0].ink = WSK_INHERIT; mark[0].mark = 0;
 			mark[0].id[0] = 'm';
 
@@ -253,7 +258,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 				for (k = 0; k < (int)sizeof bar[i].id; k++) bar[i].id[k] = '\0';
 				for (k = 0; k < (int)sizeof bar[i].text; k++) bar[i].text[k] = '\0';
 				bar[i].kind = WSK_BUTTON;
-				bar[i].size = 0; bar[i].weight = 1;
+				bar[i].size = EDGE; bar[i].weight = 1;
 				bar[i].ink = WSK_INHERIT; bar[i].mark = 0;
 				bar[i].id[0] = 'e';
 				bar[i].id[1] = (char)('0' + i);

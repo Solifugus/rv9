@@ -6636,6 +6636,14 @@ The driver says what it sees, once, when it finds a controller answering the
 bus and reporting no finger, because it is not advice anybody guesses and not
 something the driver can do.
 
+**And the warning cannot tell "not scanning" from "not touched yet".** A
+healthy controller nobody has pressed also answers, never raises ready, and
+reports no finger. whisker's `wslop` showed it on 2026-10-24: the driver said
+"take the board's power away" at 32 s, and taps arrived from 80 s with nothing
+done to the board. The driver has no way to know whether a finger is on the
+glass, so the warning now says what it sees and makes the remedy conditional
+on the person who does.
+
 One measurement that needed the glass working, taken immediately after a power
 cycle: a finger held on the panel from power-on produces a report on **every
 poll** -- 1,427 polls, 1,427 ready, 2,852 contact points, 375 events in 34
