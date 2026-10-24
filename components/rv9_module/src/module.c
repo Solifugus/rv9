@@ -546,7 +546,8 @@ rv9_mod_err_t rv9_mod_register_image(const void *image, uint32_t len)
     e->revision = h->revision;
     e->size     = h->module_len;
     e->image    = copy;
-    e->entry    = (rv9_mod_entry_fn)((uint8_t *)copy + h->entry_offset);
+    e->entry    = (rv9_mod_entry_fn)((uint8_t *)rv9_exec_addr(copy) +
+                                     h->entry_offset);
     e->resident = true;
 
     rv9_lock_acquire(s_lock);
@@ -639,7 +640,8 @@ rv9_mod_err_t rv9_mod_link(const char *name, rv9_mod_entry_t **out_entry)
     const rv9_mod_header_t *h = (const rv9_mod_header_t *)image;
     e->image      = image;
     e->in_place   = in_place;
-    e->entry      = (rv9_mod_entry_fn)((uint8_t *)image + h->entry_offset);
+    e->entry      = (rv9_mod_entry_fn)((uint8_t *)rv9_exec_addr(image) +
+                                       h->entry_offset);
     e->link_count = 1;
 
     /* Only needed when instructions were written through the data path. */

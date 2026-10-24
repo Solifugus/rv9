@@ -38,6 +38,7 @@
 #include "kal_internal.h"
 
 #include "esp_heap_caps.h"
+#include "soc/soc.h"
 #include "esp_cache.h"
 #include "sdkconfig.h"
 
@@ -256,6 +257,20 @@ void *rv9_alloc_exec(size_t size)
        that flag only exists when ESP_SYSTEM_MEMPROT is off. Insist on
        internal: external PSRAM would not be executable on a future board. */
     return heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+/* The C3 is the first board here where code copied into RAM is not run
+   from the address it was copied to: found when its first RAM-loaded
+   module jumped to 0x3fcb8d68 and faulted. Only memory in the data bus's
+   alias of the shared range is moved; anything else, flash included, is
+   already where it executes. */
+void *rv9_exec_addr(void *p)
+{
+#ifdef SOC_I_D_OFFSET
+    if ((uintptr_t)p >= SOC_DIRAM_DRAM_LOW && (uintptr_t)p < SOC_DIRAM_DRAM_HIGH)
+        return (void *)MAP_DRAM_TO_IRAM((uintptr_t)p);
+#endif
+    return p;
 }
 
 /*

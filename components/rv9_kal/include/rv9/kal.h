@@ -728,9 +728,21 @@ void *rv9_calloc(size_t count, size_t size);
 void *rv9_alloc_dma(size_t size);
 
 /* Memory that may be executed. The module loader copies module text here.
-   On this hardware IRAM and DRAM are the same physical range, so this is
-   cheap -- but do not assume that of every future target. */
+   The pointer returned is where it is WRITTEN; where it is run from is
+   rv9_exec_addr() of it, which differs on some chips. */
 void *rv9_alloc_exec(size_t size);
+
+/*
+ * Where the CPU fetches the code it was given at `p`, from rv9_alloc_exec.
+ *
+ * On the C5 and the P4 internal RAM has one address for data and
+ * instructions, and this returns `p`. The C3 maps the same SRAM twice --
+ * 0x3FC8xxxx on the data bus and 0x4038xxxx on the instruction bus -- and
+ * a jump to the data address is an instruction access fault. Anything
+ * that calls into copied code, or asks whether a PC is inside it, wants
+ * this address; anything that reads or frees the bytes wants `p`.
+ */
+void *rv9_exec_addr(void *p);
 
 /* Internal RAM specifically: thread stacks are written to with the flash
    cache disabled, so they cannot live anywhere else. */

@@ -947,7 +947,7 @@ static bool rt_overrun(rv9_task_t task, int why)
     }
     if (p != NULL) hold_locked(p);
     if (p != NULL && p->module != NULL) {
-        code  = p->module->image;
+        code  = rv9_exec_addr(p->module->image);   /* where its PC will be */
         len   = p->module->size;
         noted = p->overrun_noted;
         if (p->overrun_since_ms == 0) p->overrun_since_ms = rv9_time_ms();

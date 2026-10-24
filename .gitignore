@@ -1,5 +1,6 @@
-# ESP-IDF build output
+# ESP-IDF build output, and side builds for other chips (build-c3/ ...)
 build/
+build-*/
 sdkconfig
 sdkconfig.old
 managed_components/

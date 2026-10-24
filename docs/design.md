@@ -6734,17 +6734,47 @@ narrows what any future module may do on every board at once, so it is a
 decision about the module ABI rather than a build tweak, and it is recorded
 here undecided.
 
-None of the above has run on hardware. Two things will not be known until it
-does:
+**On hardware, 2026-10-24** -- a SuperMini (ESP32-C3 rev v0.4, 4 MB embedded
+flash). It compiled without a change and **did not run**: it panicked on
+every boot, at the same place, and rebooted in a loop.
 
-* **The heap floor.** 172 KB is what is left statically; RV-9 allocates on
-  top of it and module stacks are not small (`wtap` asks 7,168 bytes). That
-  arithmetic has only ever been exercised where there was more room.
-* **GPIO 9 is a strapping pin on the C3**, and `drv_i2c.c` compiles the
-  non-P4 branch as SDA 8, SCL 9. Held low at reset it enters download mode.
-  The internal pull-up probably carries it, but a board fact deserves a
-  board answer, the way the P4 got 7 and 8 -- see the note in that file about
-  taking the C5's numbers for a board that wanted different ones.
+The fault was an instruction access fault at `0x3fcb8d68`, the moment
+`lateloop` -- the first module the self-tests load into RAM rather than run
+in place -- was called. The C5 and the P4 give internal RAM one address for
+data and instructions, and the loader had always called copied code at the
+address it copied it to. The C3 maps the same SRAM twice, `0x3FC8xxxx` on
+the data bus and `0x4038xxxx` on the instruction bus (`SOC_I_D_OFFSET`), so
+that jump went to an address the CPU will not fetch from. Modules run in
+place from flash were fine, which is why `deaf` passed a moment earlier.
+`rv9_exec_addr()` in the KAL now says where copied code runs from: the
+identity on the C5 and P4, plus the offset on the C3. The loader builds entry
+points with it, and `rv9_rt_seize` uses it for the code range it tests a
+stopped PC against, or a late real-time loop on the C3 would never have been
+found inside its own code. The copy, the CRC and the free still use the data
+address. And position-independent modules read their own constants through
+the instruction-bus alias without complaint, which was the open risk in
+running them from there at all.
+
+With that, **every self-test passes on the C3** -- 259 checks across eight
+suites -- and the shell runs programs from flash and from RAM.
+
+* **The heap floor**, which nothing could predict: 164 KB free after
+  bring-up, 151 KB after the self-tests, and **116 KB for programs** with
+  `rshd` and `sshd` running. About a third of the P4's 332 KB, and enough
+  for a federation node.
+* **It boots as a C5 without the C5's parts.** The non-P4 branch is the C5's
+  board, so the C3 tries an LCD, a card, touch and a backlight on GPIO 10,
+  and each fails cleanly: no `/term`, `/w0`, `/touch` or `/sd0`, and `greet`
+  fails with -4 for want of `/term`. Nothing crashes. A C3 board description
+  that does not ask for them is the next step, not a fix.
+* **GPIO 8 and 9 are spoken for on a SuperMini**: 8 is its LED and 9 its BOOT
+  button, a strapping pin. `drv_i2c.c`'s non-P4 SDA 8, SCL 9 is the C5's
+  answer and the wrong one here; the C3 description should choose its own,
+  the way the P4 got 7 and 8.
+* **`tools/flash_modules.sh` read the P4's partition table for it**, because
+  it asks the root `sdkconfig`. It takes a side build's as a second argument
+  now; without one it would have written the store at the P4's 0x500000 on a
+  4 MB chip.
 
 What this says about the design is the part worth keeping: a new chip of a
 different ISA generation, with no display, no card and a radio in a different

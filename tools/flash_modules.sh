@@ -9,15 +9,26 @@
 # that writes 0x190000 on a 32 MB chip does not fail, it writes the store into
 # the middle of the application.
 
+#
+# "Whichever build actually used" is the root sdkconfig unless told
+# otherwise, and a side build (idf.py -B build-c3 -D SDKCONFIG=...) is
+# otherwise: name its sdkconfig as the second argument.
+#
+#     tools/flash_modules.sh /dev/ttyACM0 build-c3/sdkconfig
+#
+# Without it, the C3 got the P4's table read for it.
+
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="${1:-/dev/ttyACM0}"
+CFG="${2:-$ROOT/sdkconfig}"
+[[ "$CFG" = /* ]] || CFG="$ROOT/$CFG"
 
 CSV="$ROOT/partitions.csv"
-if [[ -f "$ROOT/sdkconfig" ]]; then
+if [[ -f "$CFG" ]]; then
     named=$(sed -n 's/^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="\(.*\)"$/\1/p' \
-            "$ROOT/sdkconfig")
+            "$CFG")
     [[ -n "$named" && -f "$ROOT/$named" ]] && CSV="$ROOT/$named"
 fi
 
