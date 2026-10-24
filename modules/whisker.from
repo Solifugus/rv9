@@ -18,7 +18,7 @@
 # what happens to be on the machine is worse than no gate.
 
 upstream  = ~/development/whisker/src/whisker.h
-commit    = e7d1a4a
-dated     = 2026-10-04
-subject   = justify: where the leftover space goes
-refreshed = 2026-10-04
+commit    = d39c751
+dated     = 2026-10-24
+subject   = D10: a stack that does not fit its area is refused
+refreshed = 2026-10-24

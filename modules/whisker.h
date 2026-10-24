@@ -241,7 +241,8 @@ enum {
 	WSK_E_NOTFOUND  = -3,        /* no widget by that id */
 	WSK_E_EMPTY     = -4,        /* an empty row range: nothing to repaint */
 	WSK_E_DEVICE    = -5,        /* a stack sized for a different screen */
-	WSK_E_KIND      = -6         /* a widget this build was compiled without */
+	WSK_E_KIND      = -6,        /* a widget this build was compiled without */
+	WSK_E_FIT       = -7         /* the widgets want more than the stack's area */
 };
 
 /* ------------------------------------------------------------------ */
@@ -362,13 +363,15 @@ static inline int wsk_text_ok(const char *t)
 
 /*
  * WSK_OK, or WSK_E_TEXT -- or WSK_E_KIND from a reduced build (see
- * Profiles, above) -- with `which` naming the widget.
+ * Profiles, above), or WSK_E_FIT -- with `which` naming the widget.
  *
  * The index comes back through a parameter rather than as the return value,
  * because the first widget in a tree has index 0 and so does WSK_OK -- a
  * refusal that cannot be told from an acceptance is worse than no check.
  * `which` may be null when only the verdict is wanted.
  */
+static inline int wsk__natural(const wsk_tree_t *t, int i);
+
 static inline int wsk_check(const wsk_tree_t *t, int *which)
 {
 	for (int i = 0; i < t->n; i++) {
@@ -392,6 +395,27 @@ static inline int wsk_check(const wsk_tree_t *t, int *which)
 			return WSK_E_KIND;
 		}
 #endif
+	}
+
+	/* And whether the stack fits its area. Layout takes each widget's
+	   natural extent first and shares only the surplus, so when there is
+	   none it used to carry on and draw past the end of the area -- with
+	   no error, and with hit agreeing with the drawing. A button left at
+	   size 0 is 64 rows, so one in a shorter area overflowed silently: on
+	   2026-10-24 that was wslop's marks and edge bars, and a day spent
+	   asking RV-9 why its panel drew low (roadmap 4.3). `which` names the
+	   first widget that crosses the end. */
+	{
+		int span = (t->axis == WSK_COL ? t->ah : t->aw) - 2 * t->pad;
+		int used = 0;
+		for (int i = 0; i < t->n; i++) {
+			if (i > 0) used += t->gap;
+			used += wsk__natural(t, i);
+			if (used > span) {
+				if (which != 0) *which = i;
+				return WSK_E_FIT;
+			}
+		}
 	}
 	return WSK_OK;
 }

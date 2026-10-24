@@ -164,6 +164,19 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 	wsk_area(&part[1], 0, top, w, h - top);
 	part[1].item = keys; part[1].n = 2;
 
+	/* Two default buttons are 64 rows each, and on the C5 the body has 112
+	   rows: they ran 28 rows off the bottom of the panel, without a word,
+	   until whisker refused a stack that overflows its area (roadmap 4.3).
+	   Sized here to what the area holds, as picture.c already did. On a
+	   screen with room they stay unsized and the weights share the rest. */
+	{
+		int fit = (h - top - 2 * part[1].pad - part[1].gap) / 2;
+		if (fit < WSK_BTN_ROWS) {
+			keys[0].size = (short)fit;
+			keys[1].size = (short)fit;
+		}
+	}
+
 	out.env = env;
 	out.path = RV9_STDOUT;
 
