@@ -182,6 +182,138 @@ static void test_tasks_and_sems(void)
     rv9_sem_destroy(h.done);
 }
 
+/* ---- floating-point state belongs to the thread ---- */
+
+#if defined(__riscv_flen)
+/*
+ * Two threads, each with its own values in fs0-fs11 and its own rounding
+ * mode, handing the CPU back and forth. fs0-fs11 are callee-saved under
+ * the hard-float ABI and the rounding mode is per-thread, so a yield must
+ * hand each thread back exactly what it had. The compiler may keep a float
+ * in any of those registers across any call, a switch included.
+ *
+ * Set and read in assembly, because a test written in float C would only
+ * be as good as the compiler's choice of registers.
+ */
+typedef struct fp_case {
+    uint32_t  seed;
+    uint32_t  frm;
+    int       rounds;
+    volatile int bad;          /* -1 until it finishes */
+    rv9_sem_t turn;            /* given when it is this thread's go */
+    rv9_sem_t done;
+    struct fp_case *other;
+} fp_case_t;
+
+/*
+ * Inlined, and with no clobber list, on purpose. Naming fs0-fs11 as
+ * clobbered makes the compiler save them on entry and put them back on
+ * return -- which is the ABI working -- so a separate function that set
+ * them undid its own work before the thread ever switched, and the first
+ * version of this test failed every register with or without the fix.
+ * fp_thread is entered from the trampoline and never returns, so nothing
+ * above it expects its FP registers back.
+ */
+static inline __attribute__((always_inline))
+void fp_set(uint32_t seed, uint32_t frm)
+{
+    uint32_t v[12];
+    for (int i = 0; i < 12; i++) v[i] = seed + (uint32_t)i * 0x01010101u;
+
+    __asm__ volatile (
+        "flw fs0,  0(%0)\n flw fs1,  4(%0)\n flw fs2,  8(%0)\n"
+        "flw fs3, 12(%0)\n flw fs4, 16(%0)\n flw fs5, 20(%0)\n"
+        "flw fs6, 24(%0)\n flw fs7, 28(%0)\n flw fs8, 32(%0)\n"
+        "flw fs9, 36(%0)\n flw fs10,40(%0)\n flw fs11,44(%0)\n"
+        "fsrm %1\n"
+        :: "r"(v), "r"(frm)
+        : "memory");
+}
+
+/* How many of the thirteen no longer hold what fp_set put there. */
+static inline __attribute__((always_inline))
+int fp_wrong(uint32_t seed, uint32_t frm)
+{
+    uint32_t v[12], rm;
+
+    __asm__ volatile (
+        "fsw fs0,  0(%1)\n fsw fs1,  4(%1)\n fsw fs2,  8(%1)\n"
+        "fsw fs3, 12(%1)\n fsw fs4, 16(%1)\n fsw fs5, 20(%1)\n"
+        "fsw fs6, 24(%1)\n fsw fs7, 28(%1)\n fsw fs8, 32(%1)\n"
+        "fsw fs9, 36(%1)\n fsw fs10,40(%1)\n fsw fs11,44(%1)\n"
+        "frrm %0\n"
+        : "=r"(rm) : "r"(v) : "memory");
+
+    int wrong = (rm != frm);
+    for (int i = 0; i < 12; i++)
+        if (v[i] != seed + (uint32_t)i * 0x01010101u) wrong++;
+    return wrong;
+}
+
+static void fp_thread(void *arg)
+{
+    fp_case_t *c = (fp_case_t *)arg;
+    int bad = 0;
+
+    /* Strict turns, so every switch goes from one to the other. A plain
+       yield goes back to the scheduler, which may pick the same thread
+       again -- the first version of this test did, and so never saw the
+       other thread's rounding mode. */
+    fp_set(c->seed, c->frm);
+    for (int i = 0; i < c->rounds; i++) {
+        rv9_sem_give(c->other->turn);
+        if (rv9_sem_take(c->turn, 1000) != RV9_OK) { bad = -2; break; }
+        bad += fp_wrong(c->seed, c->frm);
+    }
+    rv9_sem_give(c->other->turn);       /* do not leave it waiting */
+    c->bad = bad;
+    rv9_sem_give(c->done);
+    rv9_task_delete(NULL);
+}
+
+static void test_fp_state(void)
+{
+    /* Rounding modes 1 (toward zero) and 2 (down): neither is the
+       default, and they differ from each other. */
+    static fp_case_t a, b;
+    a = (fp_case_t){ .seed = 0x3f800000u, .frm = 1, .rounds = 50, .bad = -1 };
+    b = (fp_case_t){ .seed = 0xc0400000u, .frm = 2, .rounds = 50, .bad = -1 };
+
+    a.other = &b;
+    b.other = &a;
+    if (rv9_sem_create(1, 0, &a.done) != RV9_OK ||
+        rv9_sem_create(1, 0, &b.done) != RV9_OK ||
+        rv9_sem_create(1, 0, &a.turn) != RV9_OK ||
+        rv9_sem_create(1, 0, &b.turn) != RV9_OK) {
+        check(false, "semaphores for the FP test");
+        return;
+    }
+
+    bool started =
+        rv9_task_create(fp_thread, "fp-a", 2048, &a, RV9_PRIO_NORMAL, NULL) == RV9_OK &&
+        rv9_task_create(fp_thread, "fp-b", 2048, &b, RV9_PRIO_NORMAL, NULL) == RV9_OK;
+    check(started, "two threads with their own FP state");
+
+    if (started) {
+        bool finished = rv9_sem_take(a.done, 2000) == RV9_OK &&
+                        rv9_sem_take(b.done, 2000) == RV9_OK;
+        check(finished, "both handed the CPU back and forth to the end");
+        check(finished && a.bad >= 0 && b.bad >= 0,
+              "they took strict turns");
+        check(finished && a.bad == 0 && b.bad == 0,
+              "fs0-fs11 and the rounding mode survive every switch");
+        if (finished && (a.bad || b.bad))
+            ESP_LOGE(TAG, "  FP registers wrong after a switch: %d and %d",
+                     a.bad, b.bad);
+    }
+
+    rv9_sem_destroy(a.done);
+    rv9_sem_destroy(b.done);
+    rv9_sem_destroy(a.turn);
+    rv9_sem_destroy(b.turn);
+}
+#endif
+
 static void test_mutexes(void)
 {
     rv9_mutex_t m = NULL;
@@ -301,6 +433,9 @@ bool rv9_kal_selftest(void)
     test_tasks_and_sems();
     test_sem_from_isr();
     test_queue_from_isr();
+#if defined(__riscv_flen)
+    test_fp_state();
+#endif
     test_mutexes();
     test_queues();
     test_memory();

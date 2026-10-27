@@ -126,8 +126,14 @@ static void        *(*s_alloc)(size_t);
 static void         (*s_release)(void *);
 
 /* Stack layout built for a thread that has never run. Mirrors exactly what
-   rv9_ctx_switch pops, so a first entry and a resume are the same code. */
+   rv9_ctx_switch pops, so a first entry and a resume are the same code.
+   With an FPU the frame also carries fcsr and fs0-fs11 (switch.S), and a
+   new thread starts with them zeroed: round to nearest, no flags. */
+#if defined(__riscv_flen)
+#define CTX_WORDS 28
+#else
 #define CTX_WORDS 14
+#endif
 #define CTX_RA    0
 #define CTX_S0    1
 #define CTX_S1    2
