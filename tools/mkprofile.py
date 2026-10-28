@@ -122,6 +122,7 @@ STAT_HEADERS = [
     ("console",  MODULE_H,                                 "RV9_CON_"),
     ("svgwin",   MODULE_H,                                 "RV9_SVG_"),
     ("lcdcon",   MODULE_H,                                 "RV9_LCD_"),
+    ("audio",    MODULE_H,                                 "RV9_AU_"),
     ("rbf",      "components/rv9_io/include/rv9/io.h",     "RV9_RBF_"),
     ("net",      "components/rv9_io/include/rv9/net.h",    "RV9_NET_"),
     ("ssh",      "components/rv9_ssh/include/rv9/sshd.h",  "RV9_SSH_"),

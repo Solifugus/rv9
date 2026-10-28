@@ -6835,6 +6835,60 @@ PSRAM drained to its last kilobytes an external arena is refused while
 internal memory does not move. On a board without PSRAM the last of those
 is the only external one asked, and it is refused at fork.
 
+## 58. Sound
+
+The P4 board has two microphones, a speaker, and three chips between them and
+the P4, on one I2S bus the P4 clocks:
+
+| | address | |
+|---|---|---|
+| ES7210 | 0x40 | A four-channel microphone converter. MIC1 and MIC2 are the capsules printed on the board; MIC3 is wired to the speaker's output for echo cancellation and is not used yet. Its SDOUT1 is GPIO 11 — the net is called `I2S_ASDOUT`, after the ES8311 pin it is *not* connected to. |
+| ES8311 | 0x18 | A mono codec. Only the DAC is used; its ASDOUT is unconnected. |
+| NS4150B | — | The amplifier, on GPIO 53. |
+
+MCLK 13, BCLK 12, LRCK 10, to the speaker 9, from the microphones 11. Waveshare's
+board package and schematic agree, and the bus scan found both chips by their
+ID registers (`83 11`, `72 10`). The scan also found an OV5647 camera at 0x36.
+
+`/au0` is SCF over a new `audio` driver, the way `/touch` is: raw records, not
+lines. The register sequences are Espressif's `esp_codec_dev` 1.5 for these
+two chips as slaves at 256 × fs, written out in the driver rather than linked
+— a few dozen writes do not need a second device model under this one.
+
+- **One format, asked for.** 16 kHz, two 16-bit channels, both ways — what a
+  frame on the wire is. The speaker plays the left. A program with one channel
+  doubles it; `play -1` does.
+- **Running only while used.** The driver has a last-close hook and no
+  first-open hook, so the bus starts on the first read or write and stops when
+  the last path closes, amplifier included — and, having no session, two
+  processes may share it, one listening while the other speaks.
+- **Nothing blocks the host task.** Reads and writes ask the DMA queue with a
+  zero timeout; a write with no room sleeps through `rv9_task_delay_ms`.
+- **`rec` records into an external arena** and writes afterwards — the
+  arena's first real user. That was right: writing 192 KB to `/f0` takes about
+  twenty seconds, and the board does little else meanwhile. A recorder writing
+  as it went would have dropped most of what it heard.
+
+Measured, with the speaker as the source (`play beep` beside `rec`): MIC1
+peaks near 1,600–2,900 and MIC2 near 4,500 out of 32,767 at 30 dB of gain; a
+quiet room near 200; a room with somebody in it 1,300–2,000. MIC2 hears the
+speaker about twice as well as MIC1, which is where they sit.
+
+Open:
+
+- **The first recording after the very first bring-up was dead** — every
+  sample zero for eight seconds, though GPIO 11 was toggling when sampled
+  during a later run that board session. It did not happen again in eleven
+  cold starts after a reboot, and the ES7210 has no reset line, so the state it
+  powered up in cannot be recreated without taking the power away. `rec` now
+  says so when every sample is zero, and says what to do.
+- **Writing to `/f0` is about 10 KB/s** and holds up the machine while it
+  runs. That is the flash disk, not sound, and wants its own look.
+- **`/gpio` still reserves the C5's pins on the P4** — 10 and 13 among them,
+  which are LRCK and MCLK here. Harmless for sound, which does not go through
+  `/gpio`, and wrong all the same.
+- MIC3 for echo cancellation, and the camera.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

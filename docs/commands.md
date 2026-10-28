@@ -132,6 +132,8 @@ value.
 | `temp [n]` | Die temperature. With a count it reports the range, which is the part that says whether something is heating up or merely warm. |
 | `i2c scan` / `i2c <addr> <reg> [count]` / `i2c <addr> <reg> = <byte>...` | The two-wire bus. Addresses in hex as a datasheet writes them or decimal as a script does. A register number above `0xff` is sent as two bytes, high first, which is what sixteen-bit register maps expect. The `=` form writes, because a bus you can only read is a bus you cannot bring a chip up on. |
 | `range <pin> [count] [listen]` | Distance from a three-pin sonic ranger, or any pulse width. `listen` measures pulses without triggering. |
+| `rec <file> [seconds]` | Record both microphones to a raw file: 16 kHz, two 16-bit channels, MIC1 then MIC2. Records into a 1 MB external arena (16 s) and writes afterwards, so a flash stall cannot drop samples — the write takes a while, about 10 KB/s to `/f0`. Says how loud each microphone was, and says plainly when every sample was zero. P4 only. On a PC: `aplay -f S16_LE -r 16000 -c 2`. |
+| `play [-1] [-v dB] <file>` / `play beep [s]` | Through the speaker. `-1` for a one-channel file, such as `arecord -c 1` makes; `-v` sets the volume first, −95 to +32 dB (the default is −10). `beep` is 440 Hz, and with `rec` running beside it, is how to test the microphones without talking. |
 | `backlight [0..100]` | The panel. The largest continuous draw on this board, and turning it down costs nothing else — the console works at any brightness, including none. Not remembered across a reset. |
 
 ---

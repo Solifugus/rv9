@@ -513,6 +513,27 @@
   ],
   "stat_codes": [
     {
+      "name": "RV9_AU_GS_FORMAT",
+      "value": 256,
+      "direction": "get",
+      "discipline": "audio",
+      "driver_relative": 0
+    },
+    {
+      "name": "RV9_AU_SS_VOLUME",
+      "value": 257,
+      "direction": "set",
+      "discipline": "audio",
+      "driver_relative": 1
+    },
+    {
+      "name": "RV9_AU_SS_GAIN",
+      "value": 258,
+      "direction": "set",
+      "discipline": "audio",
+      "driver_relative": 2
+    },
+    {
       "name": "RV9_CON_GS_SIZE",
       "value": 32,
       "direction": "get",
@@ -841,6 +862,13 @@
       "name": "adc",
       "read_rt": false,
       "write_rt": null,
+      "retains": false,
+      "sessions": false
+    },
+    {
+      "name": "audio",
+      "read_rt": false,
+      "write_rt": false,
       "retains": false,
       "sessions": false
     },

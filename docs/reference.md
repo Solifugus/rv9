@@ -263,6 +263,7 @@ the firmware.
 | `/pwm0/N` | `pio` | `pwm` | Duty cycle. Stops driving when the path closes — it holds a hardware channel that must be given back. |
 | `/adc0/N` | `pio` | `adc` | Analogue in. |
 | `/tsens` | `pio` | `tsens` | The die's own temperature. |
+| `/au0` | `scf` | `audio` | Two microphones in, the speaker out, on one duplex bus: 16 kHz frames of two 16-bit little-endian samples both ways — MIC1 and MIC2 in, the left played out. Ask `RV9_AU_GS_FORMAT` rather than assuming it. Reads block until a frame arrives and never split one; writes return when everything is queued. The hardware and the speaker's amplifier run from the first read or write until the last close, and two processes may share it. P4 only: the codecs are found on the bus or the device does not attach. |
 | `/touch` | `scf` | `touch` | The touch panel, as a stream of 12-byte events. Reads block; records are never split. The queue is emptied on first open, so a program gets fingers from now rather than a backlog. Only where there is one. **Flashing the P4 leaves the controller not scanning; an ordinary reset does not. Its reset line is not wired, so take the board's power away.** The driver says so when it sees it. |
 | `/i2c0/ADDR` | `ifm` | `i2c` | The two-wire bus. The pins are the board's; the only option is kHz (100). Shared with the touch controller. A register number above `0xff` is sent as two bytes, high first. |
 | `/n0/…` | `nfm` | `net` | TCP, out and in. |
@@ -865,6 +866,9 @@ Relative to `RV9_SS_DRIVER_BASE`, and meaningful only on that driver's paths.
 |---|---|---|
 | `RV9_LCD_SS_CLEAR` | +0 | Superseded by `RV9_CON_SS_CLEAR`, kept because clearing a screen is not worth breaking. |
 | `RV9_LCD_SS_BRIGHTNESS` | +1 | 0–100 percent. |
+| `RV9_AU_GS_FORMAT` | +0 | `rv9_audio_format_t`: rate, channels, bits, and how many of the channels a microphone fills and a speaker plays. |
+| `RV9_AU_SS_VOLUME` | +1 | `int32_t` dB, −95 to +32. The speaker. |
+| `RV9_AU_SS_GAIN` | +2 | `uint32_t` dB, 0 to 37. Both microphones; 30 when nobody has said. |
 | `RV9_SVG_SS_ROWS` | +8 | `y0 << 16 \| y1` — the half-open row range to repaint. |
 | `RV9_NET_SS_CONNECT` | +0 | `rv9_net_creds_t`. Saved. |
 | `RV9_NET_SS_DISCONNECT` | +1 | |

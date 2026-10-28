@@ -1164,6 +1164,38 @@ _Static_assert(sizeof(rv9_svg_limits_t) == 16, "window limits are 16 bytes");
 #define RV9_LCD_SS_CLEAR      (RV9_SS_DRIVER_BASE + 0)
 #define RV9_LCD_SS_BRIGHTNESS (RV9_SS_DRIVER_BASE + 1)   /* 0..100 percent */
 
+/*
+ * Sound: /au0, a microphone pair and a speaker on one duplex bus.
+ *
+ * Reading gives what the microphones heard and writing plays it, both as
+ * whole frames of the format below and nothing else -- no header, no
+ * negotiation. The format is asked for rather than assumed, because it is
+ * the board's, and a program that writes 22 kHz audio into a 16 kHz device
+ * gets the chipmunk it deserves without any error to explain it.
+ *
+ * Reads block until there is a frame and give what has arrived, rounded
+ * down to whole frames. Writes return when everything has been queued for the speaker. The
+ * hardware runs from the first read or write until the last path closes,
+ * and the speaker's amplifier with it -- so silence is cheap and an idle
+ * device is off.
+ *
+ * Two processes may have it at once: one listening, one speaking. Neither
+ * hears the other through the device; the room is another matter.
+ */
+#define RV9_AU_GS_FORMAT  (RV9_SS_DRIVER_BASE + 0)  /* rv9_audio_format_t */
+#define RV9_AU_SS_VOLUME  (RV9_SS_DRIVER_BASE + 1)  /* int32_t dB, -95..+32 */
+#define RV9_AU_SS_GAIN    (RV9_SS_DRIVER_BASE + 2)  /* uint32_t dB, 0..37 */
+
+typedef struct __attribute__((packed)) {
+    uint32_t rate;          /* frames a second */
+    uint8_t  channels;      /* samples in a frame, interleaved */
+    uint8_t  bits;          /* per sample, signed, little-endian */
+    uint8_t  in_channels;   /* of those, how many a microphone fills */
+    uint8_t  out_channels;  /* and how many reach a speaker */
+} rv9_audio_format_t;
+
+_Static_assert(sizeof(rv9_audio_format_t) == 8, "audio format is 8 bytes");
+
 /* ------------------------------------------------------------------ */
 /* sysinfo                                                             */
 /* ------------------------------------------------------------------ */
