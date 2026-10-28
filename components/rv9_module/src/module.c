@@ -1121,6 +1121,10 @@ void rv9_mod_env_init(rv9_mod_env_t *env, void *statics,
     env->time_us      = env_time_us;
     env->signal       = env_signal;
     env->kill         = env_kill;
+
+    /* An arena is the process manager's to give: one is made at fork. */
+    env->heap         = NULL;
+    env->heap_size    = 0;
 }
 
 rv9_mod_err_t rv9_mod_run(rv9_mod_entry_t *entry, int *out_result)

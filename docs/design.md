@@ -6782,6 +6782,59 @@ place, compiled without a single change. The KAL and the device model were
 the argument for doing it that way, and this is the first time that argument
 has been tested by something other than the board it was written on.
 
+## 57. Memory of its own
+
+A module has never been able to allocate, and that was a decision rather than
+a gap: everything a process costs is spent on its behalf at fork, so the
+footprint is known before it runs and a budget can refuse it before anything
+breaks. Speech recognition is the first program that does not fit. Whistle
+needs a few megabytes of workspace beside a 17 MB model, on the P4, where
+there are 32 MB of PSRAM and no way for a module to ask for any of it.
+
+The answer keeps the decision: **`heap_max` is now an arena**, allocated at
+fork, handed over as `env->heap` and `env->heap_size` (ABI 15), and freed
+when the process has stopped. The program subdivides it however it likes;
+it is managing its own memory, not asking the system for more. `heap_max=0`
+means what it always meant, and every control loop already says it.
+
+- **Where.** `heap_in=internal` is the default, charged with the stack and
+  statics against `mem_max` and subject to the floor. `heap_in=external` is
+  PSRAM and nothing else — refused on the C5 and C3, and refused when PSRAM
+  is short, rather than placed in the 400 KB everything else needs. That is
+  why it is not `rv9_alloc_large`, which falls back.
+- **Charged separately.** External memory is a second account, against
+  `ext_max`, kept the same way as the first: the process and its eight
+  nearest ancestors. Summing the two would mean a shell's 32 KB default
+  budget refused every model, or that a 4 MB workspace could be spent from
+  the shell's internal allowance. There is no default external budget: a
+  program that declares none is limited by the board, and one that wants to
+  bound its children — a login daemon — says so.
+- **Not for a real-time process,** if external. Its latency would depend on
+  a cache the display shares, and Phase 0 measured that at up to +129%.
+- **Zeroed, every time,** including when `chain` hands the arena to the
+  next module. The block last belonged to some other process.
+- **Freed on all three ways out**: returning (`finish`), being collected
+  after a fault or a kill, and the watchdog stopping a real-time loop. Each
+  frees it after the task can no longer run, beside the statics. A fork that
+  failed to create its task now frees its statics too, which it never did.
+
+`arena` and `arenain` are the test modules. `budgets` shows the second
+account:
+
+```
+pid   par   name             own   held  budget  ext        budget
+47    46    arena         2496   2496   32768   65536      196608
+46    0     shell         4552   10568  32768   65536      -
+```
+
+`mem-test` checks, on the P4: an arena is aligned and zeroed; it is charged
+to the right account and taken from the right memory; a killed holder gives
+it back; the next one carved from the same block arrives zeroed; `arena
+spawn` is stopped by its external budget at itself and two, twice; and with
+PSRAM drained to its last kilobytes an external arena is refused while
+internal memory does not move. On a board without PSRAM the last of those
+is the only external one asked, and it is refused at fork.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

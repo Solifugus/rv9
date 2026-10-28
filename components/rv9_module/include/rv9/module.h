@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     14
+#define RV9_MODULE_ABI     15
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -134,7 +134,7 @@ typedef struct __attribute__((packed)) {
 #define RV9_MTAG_DESC         0x0001  /* string: what this program is      */
 #define RV9_MTAG_STACK        0x0002  /* u32: bytes of stack required      */
 #define RV9_MTAG_STATIC       0x0003  /* u32: bytes of per-instance data   */
-#define RV9_MTAG_HEAP_MAX     0x0004  /* u32: ceiling; 0 means none at all */
+#define RV9_MTAG_HEAP_MAX     0x0004  /* u32: arena given at fork; 0: none */
 #define RV9_MTAG_CLASS        0x0005  /* u8:  rv9_mod_class_t              */
 #define RV9_MTAG_PERIOD_US    0x0006  /* u32: release period               */
 #define RV9_MTAG_DEADLINE_US  0x0007  /* u32: from release                 */
@@ -152,10 +152,13 @@ typedef struct __attribute__((packed)) {
 #define RV9_MTAG_MEM_MAX      0x0013  /* u32: bytes it and all it starts may
                                          hold at once; see RV9_PE_BUDGET */
 #define RV9_MTAG_PLACEMENT    0x0014  /* u8:  RV9_PLACE_*                  */
+#define RV9_MTAG_HEAP_IN      0x0015  /* u8:  RV9_HEAP_*: where the arena is */
+#define RV9_MTAG_EXT_MAX      0x0016  /* u32: external bytes it and all it
+                                         starts may hold; see RV9_PE_BUDGET */
 
 /* The highest tag this build understands. Anything above it is unknown,
    and unknown plus mandatory is a refusal. */
-#define RV9_MTAG_MAX          0x0014
+#define RV9_MTAG_MAX          0x0016
 
 /*
  * Publications, declared rather than conventional.
@@ -217,6 +220,30 @@ typedef struct __attribute__((packed)) {
 #define RV9_PLACE_DERIVED 0
 #define RV9_PLACE_URGENT  1
 #define RV9_PLACE_ROUTINE 2
+
+/*
+ * A program's arena: RV9_MTAG_HEAP_MAX bytes, allocated at fork, handed
+ * over as env->heap, and freed when the process has stopped -- however it
+ * stopped. Modules cannot call an allocator, and still cannot: what a
+ * program may use is decided before it runs, like its stack, and charged
+ * to it and its ancestors before any of it is spent. A program that
+ * subdivides its arena is managing its own memory; it is not asking the
+ * system for more.
+ *
+ * The arena arrives zeroed and aligned to 16 bytes, which is what a
+ * vector load wants.
+ *
+ *   INTERNAL  the default. Charged with the stack and statics against
+ *             RV9_MTAG_MEM_MAX, and subject to the floor like them.
+ *   EXTERNAL  PSRAM and nothing else: refused on a board without it, or
+ *             with too little left, rather than quietly placed in the
+ *             memory everything else needs. Charged separately, against
+ *             RV9_MTAG_EXT_MAX, because the two are not interchangeable
+ *             and a sum of them answers nothing. Refused to a real-time
+ *             process: its latency depends on a cache.
+ */
+#define RV9_HEAP_INTERNAL 0
+#define RV9_HEAP_EXTERNAL 1
 
 /*
  * What a device must be left at when its owner stops.
@@ -491,6 +518,13 @@ typedef struct {
      */
     int       (*wait_why)(int pid, int *status, int *fault,
                           uint32_t timeout_ms);
+
+    /* --- ABI 15: memory of its own --- */
+    /* The arena its manifest declared (see RV9_HEAP_*), or NULL and 0.
+       A chained module is handed the same arena, zeroed again, if it
+       declares no more than it holds and in the same place. */
+    void       *heap;
+    uint32_t    heap_size;
 } rv9_mod_env_t;
 
 /*
@@ -1237,6 +1271,12 @@ typedef struct __attribute__((packed)) {
     uint32_t footprint;        /* its own stack, statics and descriptor */
     uint32_t held;             /* its footprint plus its live descendants' */
     uint32_t budget;           /* what `held` may not exceed */
+
+    /* External memory, which is only ever an arena. An array record, so
+       appending changes the stride; see rv9_sys_claim_t. */
+    uint32_t ext_footprint;
+    uint32_t ext_held;
+    uint32_t ext_budget;       /* 0xFFFFFFFF: none declared */
 } rv9_sys_budget_t;
 
 /*

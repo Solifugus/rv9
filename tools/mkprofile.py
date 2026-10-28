@@ -407,6 +407,7 @@ def profile():
         "on_deadline": short(defines(module_h, "RV9_ON_DEADLINE_"),
                              "RV9_ON_DEADLINE_"),
         "placement": short(defines(module_h, "RV9_PLACE_"), "RV9_PLACE_"),
+        "heap_in": short(defines(module_h, "RV9_HEAP_"), "RV9_HEAP_"),
         "faults": [{"name": n, "value": v, "r9_reason": R9_FAULT_NAMES[n]}
                    for n, v in faults.items()],
         "process_errors": short(defines(module_h, "RV9_PE_"), "RV9_PE_"),

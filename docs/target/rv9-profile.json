@@ -4,7 +4,7 @@
   "generated_by": "tools/mkprofile.py -- regenerate, do not edit",
   "module": {
     "magic": 1295603282,
-    "abi": 14,
+    "abi": 15,
     "header_bytes": 40,
     "types": {
       "PROGRAM": 1,
@@ -19,7 +19,7 @@
   },
   "manifest": {
     "mandatory_bit": 32768,
-    "highest_known_tag": 20,
+    "highest_known_tag": 22,
     "unknown_advisory": "skipped",
     "unknown_mandatory": "module refused",
     "layout": "entries of u16 tag, u16 length, value, padded to 4 bytes; ends at tag 0 or the end of the module",
@@ -178,6 +178,24 @@
           "urgent": 1,
           "routine": 2
         }
+      },
+      {
+        "name": "heap_in",
+        "tag": 21,
+        "encoding": "u8",
+        "repeatable": false,
+        "enforced": true,
+        "values": {
+          "internal": 0,
+          "external": 1
+        }
+      },
+      {
+        "name": "ext_max",
+        "tag": 22,
+        "encoding": "u32",
+        "repeatable": false,
+        "enforced": true
       }
     ]
   },
@@ -195,6 +213,10 @@
     "DERIVED": 0,
     "URGENT": 1,
     "ROUTINE": 2
+  },
+  "heap_in": {
+    "INTERNAL": 0,
+    "EXTERNAL": 1
   },
   "faults": [
     {
@@ -477,6 +499,16 @@
       "kind": "call",
       "since_abi": 14,
       "rt_safe": "no"
+    },
+    {
+      "name": "heap",
+      "kind": "value",
+      "since_abi": 15
+    },
+    {
+      "name": "heap_size",
+      "kind": "value",
+      "since_abi": 15
     }
   ],
   "stat_codes": [

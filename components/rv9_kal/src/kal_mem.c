@@ -316,6 +316,19 @@ size_t rv9_heap_large_free(void)
     return heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 }
 
+/* Zeroed here rather than trusted to be: the block last belonged to some
+   other process, and a model's weights or a key are not to be inherited. */
+void *rv9_alloc_arena(size_t size, bool external)
+{
+    if (external) {
+        return heap_caps_aligned_calloc(16, 1, size,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (would_breach(size)) return refuse();
+    return heap_caps_aligned_calloc(16, 1, size,
+                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
 void *rv9_alloc_internal(size_t size)
 {
     if (would_breach(size)) return refuse();

@@ -763,6 +763,15 @@ void *rv9_alloc_large(size_t size);
 /* External memory still free, and zero on a board with none. */
 size_t rv9_heap_large_free(void);
 
+/*
+ * A process's arena: zeroed, aligned to 16 bytes, and from exactly where
+ * it was asked for. External means PSRAM or NULL -- no fallback, because
+ * the caller charged it to an external budget and a model's workspace in
+ * internal memory would be the machine's last 400 KB. Internal is subject
+ * to the floor, like everything else of RV-9's. Freed with rv9_free.
+ */
+void *rv9_alloc_arena(size_t size, bool external);
+
 void  rv9_free(void *ptr);
 
 size_t rv9_heap_free(void);        /* bytes currently free */

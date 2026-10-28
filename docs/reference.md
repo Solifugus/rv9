@@ -21,7 +21,7 @@ The machine-readable version of most of what follows is
 sources. A compiler targeting RV-9 should read that rather than this; this
 document exists to explain what the fields mean.
 
-**Module ABI 14.** Anything below marked *since ABI n* is absent from an
+**Module ABI 15.** Anything below marked *since ABI n* is absent from an
 older firmware.
 
 ---
@@ -423,7 +423,8 @@ means it is recorded and passed on but nothing checks it.
 | `desc` | advisory | One line, for `mdir` and for humans. |
 | `stack` | **yes** | Stack bytes. Allocated at fork; a fork that cannot have it is refused. |
 | `static` | advisory | Bytes of private storage, allocated and zeroed at fork. Reaching `env->statics`. |
-| `heap_max` | **yes** | Ceiling on what the process may allocate. Zero means *none*, which is the declaration a control loop should make. |
+| `heap_max` | **yes** | Bytes of arena, allocated zeroed and 16-byte aligned at fork and reaching `env->heap`. The program's only memory beyond its stack and statics, and charged before it runs. Zero means *none*, which is the declaration a control loop should make. |
+| `heap_in` | **yes** | `INTERNAL` (the default) or `EXTERNAL`. External is PSRAM and nothing else: refused on a board without it, or without room, rather than placed inside. Refused to a real-time process, whose latency would depend on a cache. |
 | `class` | advisory | `UNSPECIFIED`, `PROACTION`, `REACTION` or `REALTIME`. |
 | `period_us` | **yes** | How often a real-time component is released. |
 | `deadline_us` | **yes** | How long after release it must have answered. |
@@ -438,7 +439,8 @@ means it is recorded and passed on but nothing checks it.
 | `on_deadline` | **yes** | `REPORT` or `FAULT`. Whether a missed deadline stops the component. |
 | `publishes` | **yes** | A cell this module owns. Reserved at fork, so a second copy is refused and nothing else can write into it. |
 | `watches` | **yes** | A cell this module reads. Admitted because the declaration of its writer exists on the machine, whether or not the writer is running. |
-| `mem_max` | **yes** | The process's whole memory budget, itself and everything it starts. |
+| `mem_max` | **yes** | The process's whole memory budget, itself and everything it starts. An internal arena counts against it. |
+| `ext_max` | **yes** | The same for external memory, which only an arena spends. No default: a program that declares none is limited by what the board has. |
 | `placement` | **yes** | `DERIVED`, `URGENT` or `ROUTINE`. A pin constrains the analysis rather than overriding it: if the pin would make any loop late, the program is refused. |
 | `mandatory` | — | Not a tag but a bitmask over them. See below. |
 
@@ -525,6 +527,8 @@ own code rather than a proof about the whole path.
 | `uint32_t statics_size` | 1 | How much was actually given. Check it against your own `sizeof` and refuse rather than overrun — every tool here does. |
 | `uint32_t pid` | 2 | **0 when the module was run outside a process**, which `rv9_mod_run` does at boot. |
 | `const char *arg` | 2 | The rest of the command line. **May be NULL.** |
+| `void *heap` | 15 | The arena the manifest's `heap_max` asked for: zeroed, aligned to 16, the program's to subdivide. **NULL when it asked for none.** Freed when the process has stopped, however it stopped. |
+| `uint32_t heap_size` | 15 | Its size. A module that arrived by `chain` gets the arena the process already holds, zeroed again, if it declares no more and in the same place; otherwise the chain is refused. |
 
 The `statics_size` check is not ceremony. A module built against a larger
 struct than its manifest declares gets a smaller allocation, and the resulting
@@ -1495,7 +1499,7 @@ do about them, which is the reason there are seventeen rather than one "no".
 | `RV9_PE_NOMEM` | 2 | Not enough memory, with the floors respected. |
 | `RV9_PE_MODULE` | 3 | The module is there but will not load: CRC, ABI, or format. |
 | `RV9_PE_INVAL` | 5 | The arguments do not make sense. |
-| `RV9_PE_BUDGET` | 17 | Starting it would take a process past its own `mem_max`, so a runaway `fork` stops at its limit instead of taking the machine down. |
+| `RV9_PE_BUDGET` | 17 | Starting it would take a process past its own `mem_max` (or `ext_max`), so a runaway `fork` stops at its limit instead of taking the machine down. |
 
 *Admission refused it* — these are the interesting ones, because each says
 something different about **whose fault it is**:
@@ -1600,7 +1604,7 @@ same quantity.
 
 | profile | value | |
 |---|---|---|
-| `abi` | 14 | What this firmware implements. See §7 on `abi_version`. |
+| `abi` | 15 | What this firmware implements. See §7 on `abi_version`. |
 | `header_bytes` | 40 | The fixed header before the manifest (§5). |
 
 Two of these are worth a sentence, because the number is not the interesting

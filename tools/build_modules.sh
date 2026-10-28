@@ -93,7 +93,8 @@ for dir in "$ROOT"/modules/*/; do
     # not understand it must refuse to run the module rather than quietly
     # ignoring the requirement.
     desc=""
-    heap_max=""
+    heap_max=""         # bytes of arena, given at fork; 0 means never
+    heap_in=""          # internal (the default) or external
     class=""
     period_us=""
     deadline_us=""
@@ -101,6 +102,7 @@ for dir in "$ROOT"/modules/*/; do
     wcet_us=""
     on_deadline=""      # report (the default) or fault
     mem_max=""          # bytes it and everything it starts may hold
+    ext_max=""          # the same, of external memory
     placement=""        # derived (the default), urgent or routine
     failsafes=""        # space separated PATH=VALUE, e.g. "/gpio/2=0"
     devices=""          # space separated, shared access
@@ -154,6 +156,7 @@ for dir in "$ROOT"/modules/*/; do
 
     add_tag desc         "$desc"
     add_tag heap_max     "$heap_max"
+    add_tag heap_in      "$heap_in"
     add_tag class        "$class"
     add_tag period_us    "$period_us"
     add_tag deadline_us  "$deadline_us"
@@ -161,6 +164,7 @@ for dir in "$ROOT"/modules/*/; do
     add_tag wcet_us      "$wcet_us"
     add_tag on_deadline  "$on_deadline"
     add_tag mem_max      "$mem_max"
+    add_tag ext_max      "$ext_max"
     add_tag placement    "$placement"
     for d in $devices;      do add_tag device     "$d"; done
     for d in $exclusives;   do add_tag exclusive  "$d"; done

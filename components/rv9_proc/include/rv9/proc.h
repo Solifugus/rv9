@@ -168,6 +168,18 @@ typedef struct rv9_proc {
     uint32_t          ancestors[8];
     uint8_t           n_ancestors;
 
+    /* The same, for external memory, which is only ever an arena. */
+    uint32_t          ext_footprint;
+    uint32_t          ext_held;
+    uint32_t          ext_budget;
+
+    /* Its arena (RV9_HEAP_* in rv9/module.h), owned like the statics:
+       freed with them, by whoever ends the process. */
+    void             *arena;
+    uint32_t          arena_size;
+    uint32_t          heap_given;     /* what the running module declared */
+    bool              arena_external;
+
     uint64_t          started_ms;
 
     char              arg[64];        /* what fork was given, for env->arg */
@@ -352,6 +364,10 @@ typedef struct {
     uint32_t         footprint;      /* its own stack, statics and descriptor */
     uint32_t         held;           /* with its live descendants */
     uint32_t         budget;
+    uint32_t         arena_size;     /* its arena, wherever it is; 0: none */
+    uint32_t         ext_footprint;  /* external memory: only ever an arena */
+    uint32_t         ext_held;
+    uint32_t         ext_budget;
 } rv9_proc_info_t;
 
 /*

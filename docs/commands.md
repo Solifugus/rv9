@@ -52,7 +52,7 @@ The habit this machine rewards: ask it, do not guess. All of these read
 | `mdir` | The module directory — name, type, revision, size, link count. It is itself a module in the directory it prints. |
 | `procs` | The process table. It always finds itself in the list. |
 | `stacks` | What each process was **given** and what it has **ever used**. The used figure is measured, not estimated — stacks are painted and the paint is looked at. |
-| `budgets` | What each process is charged (`own`), what it and its children hold (`held`), and its ceiling. Watch how close `held` is to `budget` for a shell running background work. |
+| `budgets` | What each process is charged (`own`), what it and its children hold (`held`), and its ceiling — then the same held and ceiling for external memory (`ext`, `-` for none declared). Watch how close `held` is to `budget` for a shell running background work. |
 | `free` | Memory. *Free* and *available* are different questions and both are printed; the second is the one that decides whether the next process starts. |
 | `uptime` | `up 2h 14m 8s`. |
 | `log` | What the machine has been saying — an 8 KB ring in RAM. `log \| match error` is the usual form. |
@@ -218,7 +218,9 @@ guard), `deaf` (ignores every signal, so `kill` has something to insist on),
 `forkbomb` (starts processes until refused, then cleans up — stopped by its own
 budget, not by the machine running out), `runaway` (a real-time loop that stops
 waiting), `hold` (holds declared exclusive devices and dies holding them, so
-RV-9 has to park them).
+RV-9 has to park them), `arena` and `arenain` (a 64 KB external and a 4 KB
+internal arena, proved aligned and zeroed; `arena spawn` starts copies holding
+theirs until its external budget refuses the third).
 
 **Scheduling, under load:** `worker` (CPU-bound, for proving starvation happens
 and then proving it stops), `noise` (holds the locks a real-time process might

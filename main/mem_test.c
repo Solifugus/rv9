@@ -238,12 +238,134 @@ static void budgets(void)
     check(lost < 1024, "with nothing more left allocated");
 }
 
+/* ---- arenas ---- */
+
+static int run_arena(const char *module, const char *arg)
+{
+    rv9_pid_t pid = 0;
+    rv9_proc_err_t e = rv9_proc_fork(module, RV9_PRIO_NORMAL, arg, &pid);
+    if (e != RV9_PROC_OK) return -100 - (int)e;
+    int status = -100;
+    rv9_proc_wait(pid, &status, 10000);
+    return status;
+}
+
+/* Start one holding its arena, and say what it was charged. */
+static rv9_pid_t hold_arena(const char *module, rv9_proc_info_t *info)
+{
+    rv9_pid_t pid = 0;
+    memset(info, 0, sizeof(*info));
+    if (rv9_proc_fork(module, RV9_PRIO_NORMAL, "hold", &pid) != RV9_PROC_OK) {
+        return 0;
+    }
+    rv9_task_delay_ms(50);
+    rv9_proc_info(pid, info);
+    return pid;
+}
+
+/*
+ * External memory spent to the last few kilobytes, in blocks chained
+ * through their first word for the same reason as the hog's: it stops when
+ * it is refused, on a board with any amount.
+ */
+static void *drain_external(void)
+{
+    void *head = NULL;
+    for (size_t blk = 1024 * 1024; blk >= 1024; ) {
+        void *b = rv9_alloc_arena(blk, true);
+        if (b == NULL) { blk /= 2; continue; }
+        *(void **)b = head;
+        head = b;
+    }
+    return head;
+}
+
+static void undrain(void *head)
+{
+    while (head != NULL) {
+        void *next = *(void **)head;
+        rv9_free(head);
+        head = next;
+    }
+}
+
+static void arenas(void)
+{
+    ESP_LOGI(TAG, "--- a program's own memory ---");
+
+    check(run_arena("arenain", NULL) == 0,
+          "a program is given the arena it declared, aligned and zeroed");
+
+    size_t int0 = rv9_heap_free();
+    rv9_proc_info_t info;
+    rv9_pid_t pid = hold_arena("arenain", &info);
+    check(pid != 0 && info.arena_size == 4096 && info.footprint > 4096 &&
+          info.ext_footprint == 0,
+          "an internal arena is charged with its stack and statics");
+    check(pid != 0 && int0 - rv9_heap_free() >= 4096,
+          "and taken from internal memory");
+
+    int status = -100;
+    check(pid != 0 && rv9_proc_signal(pid, RV9_SIG_STOP) == RV9_PROC_OK &&
+          rv9_proc_wait(pid, &status, 2000) == RV9_PROC_OK && status == 0,
+          "it dirtied all of it, and stopped when asked");
+    check(run_arena("arenain", NULL) == 0,
+          "the next arrives zeroed, not holding the last one's data");
+
+    rv9_pid_t rt = 0;
+    check(rv9_proc_fork_rt("arena", 10000, "hold", &rt) ==
+          RV9_PROC_ERR_CONTRACT,
+          "a real-time process may not have its arena in external memory");
+
+    if (rv9_heap_large_free() == 0) {
+        check(run_arena("arena", NULL) == -100 - RV9_PROC_ERR_NOMEM,
+              "with no external memory, an external arena is refused, "
+              "not placed inside");
+        return;
+    }
+
+    size_t ext0 = rv9_heap_large_free();
+    int0 = rv9_heap_free();
+    pid = hold_arena("arena", &info);
+    check(pid != 0 && info.arena_size == 65536 &&
+          info.ext_footprint == 65536 && info.footprint < 65536,
+          "an external arena is charged to the external account only");
+    check(pid != 0 && ext0 - rv9_heap_large_free() >= 65536 &&
+          int0 - rv9_heap_free() < 8192,
+          "and taken from external memory, not internal");
+
+    check(pid != 0 && rv9_proc_kill(pid) == RV9_PROC_OK &&
+          rv9_proc_wait(pid, &status, 2000) == RV9_PROC_OK,
+          "killed while holding it");
+    rv9_task_delay_ms(50);
+    check(rv9_heap_large_free() + 1024 >= ext0, "it is given back");
+    check(run_arena("arena", NULL) == 0,
+          "and the next arrives zeroed");
+
+    int first = run_arena("arena", "spawn");
+    check(first == 2, "a program starting copies of itself is stopped by "
+                      "its external budget: itself and two");
+    check(run_arena("arena", "spawn") == first,
+          "and gets exactly as far again: the budget was given back");
+
+    void *drained = drain_external();
+    int0 = rv9_heap_free();
+    int e = run_arena("arena", NULL);
+    size_t int1 = rv9_heap_free();
+    undrain(drained);
+    check(e == -100 - RV9_PROC_ERR_NOMEM && int0 < int1 + 8192,
+          "with external memory gone it is refused, not placed inside");
+    check(rv9_heap_large_free() + 1024 >= ext0, "nothing external is left "
+                                                "allocated");
+}
+
 bool rv9_mem_selftest(void)
 {
     s_passed = s_failed = 0;
 
     reserves();
     budgets();
+    arenas();
 
     if (s_failed == 0) {
         ESP_LOGI(TAG, "mem: %d/%d passed", s_passed, s_passed);

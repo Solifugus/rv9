@@ -31,22 +31,24 @@ TAGS = {
     "device": 0x000A, "exclusive": 0x000B, "failsafe": 0x000C,
     "capability": 0x000D, "compiler": 0x000E, "runtime": 0x000F,
     "on_deadline": 0x0010, "publishes": 0x0011, "watches": 0x0012,
-    "mem_max": 0x0013, "placement": 0x0014,
+    "mem_max": 0x0013, "placement": 0x0014, "heap_in": 0x0015,
+    "ext_max": 0x0016,
 }
 
 CLASSES = {"unspecified": 0, "proaction": 1, "reaction": 2, "realtime": 3}
 ON_DEADLINE = {"report": 0, "fault": 1}
 PLACEMENT = {"derived": 0, "urgent": 1, "routine": 2}
+HEAP_IN = {"internal": 0, "external": 1}
 
 # The names a u8 tag may be written with, per tag.
 U8_NAMES = {"class": CLASSES, "on_deadline": ON_DEADLINE,
-            "placement": PLACEMENT}
+            "placement": PLACEMENT, "heap_in": HEAP_IN}
 
 # How each tag's value is encoded, so a build.conf says `heap_max=0` and
 # gets four bytes rather than the string "0".
 U32_TAGS = {"stack", "static", "heap_max", "period_us", "deadline_us",
-            "min_inter_us", "wcet_us", "mem_max"}
-U8_TAGS = {"class", "on_deadline", "placement"}
+            "min_inter_us", "wcet_us", "mem_max", "ext_max"}
+U8_TAGS = {"class", "on_deadline", "placement", "heap_in"}
 STR_TAGS = {"desc", "device", "exclusive", "capability",
             "compiler", "runtime", "publishes", "watches"}
 

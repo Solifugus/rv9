@@ -191,12 +191,14 @@ static void put(rv9_proc_t *p)
 }
 
 /* Give an ended process's footprint back to everyone it was charged to. */
-static void uncharge_locked(const uint32_t *ancestors, int n, uint32_t bytes)
+static void uncharge_locked(const uint32_t *ancestors, int n, uint32_t bytes,
+                            uint32_t ext)
 {
     for (int i = 0; i < n; i++) {
         for (rv9_proc_t *q = s_procs; q; q = q->next) {
             if (q->serial != ancestors[i]) continue;
-            q->held = (q->held > bytes) ? q->held - bytes : 0;
+            q->held     = (q->held > bytes)   ? q->held - bytes   : 0;
+            q->ext_held = (q->ext_held > ext) ? q->ext_held - ext : 0;
             break;
         }
     }
@@ -208,9 +210,11 @@ static void ended_locked(rv9_proc_t *p)
     p->ended_seq = ++s_ended_seq;
 
     /* Once, and on every way out: every ending passes through here. */
-    uncharge_locked(p->ancestors, p->n_ancestors, p->footprint);
+    uncharge_locked(p->ancestors, p->n_ancestors, p->footprint,
+                    p->ext_footprint);
     p->n_ancestors = 0;
     p->held = 0;
+    p->ext_held = 0;
 }
 
 /* The system itself (pid 0) counts as a parent that may yet ask. */
@@ -282,7 +286,8 @@ static rv9_pid_t next_pid_locked(void)
  *
  * Modules cannot allocate: everything a process costs is spent on its
  * behalf by RV-9, and nearly all of it at fork -- the stack, the statics,
- * the descriptor. So a process's footprint is known before it runs, and
+ * the descriptor, and the arena if it declared one (RV9_HEAP_* in
+ * rv9/module.h). So a process's footprint is known before it runs, and
  * charging it to the process and to every ancestor turns "a program that
  * forks without end" into "a program that stops at its own budget", while
  * the programs beside it keep working.
@@ -293,11 +298,20 @@ static rv9_pid_t next_pid_locked(void)
  * statics -- with room left; a program that needs more says so with
  * RV9_MTAG_MEM_MAX.
  *
+ * External memory is a second account kept the same way, because the two
+ * are not interchangeable: a 4 MB model workspace in PSRAM says nothing
+ * about the 32 KB a shell may spend inside the chip. Its budget is the
+ * manifest's RV9_MTAG_EXT_MAX, and there is no default -- a program that
+ * declares none is limited only by what the board has, and one that wants
+ * to bound what everything it starts may take of it says so. A remote
+ * login daemon is the obvious one.
+ *
  * Only the nearest eight ancestors are charged. Deeper than that is not a
  * tree anyone has built here, and a fixed array is what keeps accounting
  * off the heap it is accounting for.
  */
 #define PROC_BUDGET_DEFAULT  32768
+#define PROC_EXT_UNBOUNDED   0xFFFFFFFFu
 #define PROC_ANCESTORS       8
 
 /* What RV-9 keeps about a process besides its stack and statics: the
@@ -309,6 +323,7 @@ static uint32_t s_next_serial = 1;
 typedef struct charge {
     uint32_t serial;
     uint32_t bytes;
+    uint32_t ext;
     uint32_t ancestors[PROC_ANCESTORS];
     uint8_t  n;
 } charge_t;
@@ -316,7 +331,7 @@ typedef struct charge {
 static void refuse_fork(rv9_pid_t pid, const struct charge *c)
 {
     rv9_lock_acquire(s_lock);
-    uncharge_locked(c->ancestors, c->n, c->bytes);
+    uncharge_locked(c->ancestors, c->n, c->bytes, c->ext);
     rv9_lock_release(s_lock);
     undo_fork(pid);
 }
@@ -327,13 +342,19 @@ static void refuse_fork(rv9_pid_t pid, const struct charge *c)
  * would go over budget. `whose` names the one that would.
  */
 static bool charge_locked(charge_t *c, uint32_t bytes, uint32_t budget,
+                          uint32_t ext, uint32_t ext_budget,
                           char *whose, size_t whose_len)
 {
     memset(c, 0, sizeof(*c));
     c->bytes = bytes;
+    c->ext   = ext;
 
     if (bytes > budget) {
         snprintf(whose, whose_len, "its own");
+        return false;
+    }
+    if (ext > ext_budget) {
+        snprintf(whose, whose_len, "its own external");
         return false;
     }
 
@@ -348,8 +369,16 @@ static bool charge_locked(charge_t *c, uint32_t bytes, uint32_t budget,
     for (int i = 0; i < c->n; i++) {
         for (rv9_proc_t *q = s_procs; q; q = q->next) {
             if (q->serial != c->ancestors[i]) continue;
-            if (q->state != RV9_PROC_EXITED && q->held + bytes > q->budget) {
+            if (q->state == RV9_PROC_EXITED) break;
+            /* Widened: an unbounded external budget is the top of the
+               range, and a sum that wrapped would pass. */
+            if ((uint64_t)q->held + bytes > q->budget) {
                 snprintf(whose, whose_len, "pid %u ('%s')'s",
+                         (unsigned)q->pid, q->name);
+                return false;
+            }
+            if ((uint64_t)q->ext_held + ext > q->ext_budget) {
+                snprintf(whose, whose_len, "pid %u ('%s')'s external",
                          (unsigned)q->pid, q->name);
                 return false;
             }
@@ -359,7 +388,11 @@ static bool charge_locked(charge_t *c, uint32_t bytes, uint32_t budget,
 
     for (int i = 0; i < c->n; i++) {
         for (rv9_proc_t *q = s_procs; q; q = q->next) {
-            if (q->serial == c->ancestors[i]) { q->held += bytes; break; }
+            if (q->serial == c->ancestors[i]) {
+                q->held     += bytes;
+                q->ext_held += ext;
+                break;
+            }
         }
     }
 
@@ -631,6 +664,8 @@ static void finish(rv9_proc_t *p, int rc, int fault,
     rv9_mod_unlink(p->module);
     rv9_free(p->statics);
     p->statics = NULL;
+    rv9_free(p->arena);
+    p->arena = NULL;
 
     /* The task's own hold, last: nothing below touches the descriptor. */
     put(p);
@@ -718,6 +753,8 @@ static void proc_trampoline(void *arg)
     env.rt_wait      = env_rt_wait;
     env.rt_stats     = env_rt_stats;
     env.arg          = p->arg[0] ? p->arg : NULL;
+    env.heap         = p->heap_given ? p->arena : NULL;
+    env.heap_size    = p->heap_given;
 
     rc = p->module->entry(&env);
 
@@ -762,10 +799,36 @@ static void proc_trampoline(void *arg)
         }
     }
 
+    /*
+     * The arena was sized and charged at fork, and stays what it is: a
+     * module arriving by chain may have it, zeroed, if it asks for no more
+     * than is there and in the same place. Anything else would be
+     * allocation by the back door, with nobody charged for it.
+     */
+    uint32_t next_heap = 0;
+    uint8_t  next_in   = RV9_HEAP_INTERNAL;
+    (void)rv9_mod_manifest_u32(next->image, RV9_MTAG_HEAP_MAX, &next_heap);
+    (void)rv9_mod_manifest_u8(next->image, RV9_MTAG_HEAP_IN, &next_in);
+    if (next_heap > 0 &&
+        (next_heap > p->arena_size ||
+         (next_in == RV9_HEAP_EXTERNAL) != p->arena_external)) {
+        ESP_LOGE(TAG, "pid %u: refused to chain to '%s': it wants a "
+                      "%lu-byte %s arena, and this process holds %lu %s",
+                 (unsigned)p->pid, next_name, (unsigned long)next_heap,
+                 next_in == RV9_HEAP_EXTERNAL ? "external" : "internal",
+                 (unsigned long)p->arena_size,
+                 p->arena_external ? "external" : "internal");
+        rv9_mod_unlink(next);
+        rc = -RV9_PROC_ERR_CONTRACT;
+        break;
+    }
+
     /* Swap the module out. Paths stay open, which is the point. */
     rv9_mod_unlink(p->module);
     rv9_free(p->statics);
     p->statics = NULL;
+    if (p->arena != NULL) memset(p->arena, 0, p->arena_size);
+    p->heap_given = next_heap;
 
     const rv9_mod_header_t *nh = (const rv9_mod_header_t *)next->image;
     if (nh->static_size > 0) {
@@ -860,10 +923,12 @@ static void collect_faulted(rv9_proc_t *p)
 
     rv9_mod_entry_t *mod = p->module;
     void            *st  = p->statics;
+    void            *ar  = p->arena;
     rv9_task_t       tk  = p->task;
 
     rv9_lock_acquire(s_lock);
     p->statics = NULL;
+    p->arena   = NULL;
     p->task    = NULL;
     /* Negative, and not a status any module returns, so a parent can tell
        "it failed" from "it succeeded and returned zero". */
@@ -885,6 +950,7 @@ static void collect_faulted(rv9_proc_t *p)
 
     if (mod) rv9_mod_unlink(mod);
     rv9_free(st);
+    rv9_free(ar);           /* its task is gone: nothing can be using it */
     rv9_task_reap(tk);      /* the slot may be reused now */
 
     /* The dead task's hold, dropped on its behalf. The caller's own hold,
@@ -1009,7 +1075,9 @@ static bool rt_overrun(rv9_task_t task, int why)
     rv9_lock_acquire(s_lock);
     rv9_mod_entry_t *mod = p->module;
     void *statics        = p->statics;
+    void *arena          = p->arena;
     p->statics     = NULL;
+    p->arena       = NULL;
     p->task        = NULL;
     p->exit_status = status;
     p->fault       = fault;
@@ -1033,6 +1101,7 @@ static bool rt_overrun(rv9_task_t task, int why)
     rv9_task_delete(task);
     if (mod) rv9_mod_unlink(mod);
     rv9_free(statics);
+    rv9_free(arena);        /* after the delete: it cannot run again */
 
     put(p);      /* ours */
     put(p);      /* and the deleted task's, which it cannot drop itself */
@@ -1294,6 +1363,9 @@ static int proc_budgets_op(void *buf, uint32_t len)
             out[n].footprint = p->footprint;
             out[n].held      = p->held;
             out[n].budget    = p->budget;
+            out[n].ext_footprint = p->ext_footprint;
+            out[n].ext_held      = p->ext_held;
+            out[n].ext_budget    = p->ext_budget;
         }
         n++;
     }
@@ -1891,10 +1963,46 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
      * is built around it later. A refusal spends a pid, which is the right
      * way round: the alternative is a claim with nothing to release it.
      */
+    /*
+     * Its arena, if it declared one: the only memory a module has beyond
+     * its stack and statics, and like them settled before it runs.
+     *
+     * External is refused to a real-time process outright. Its latency
+     * would depend on a cache shared with the display, and a loop that
+     * meets its deadline except when the screen redraws has no deadline.
+     */
+    uint32_t heap_max = 0;
+    uint8_t  heap_in  = RV9_HEAP_INTERNAL;
+    (void)rv9_mod_manifest_u32(mod->image, RV9_MTAG_HEAP_MAX, &heap_max);
+    (void)rv9_mod_manifest_u8(mod->image, RV9_MTAG_HEAP_IN, &heap_in);
+    if (heap_in > RV9_HEAP_EXTERNAL) {
+        ESP_LOGE(TAG, "fork '%s': heap_in %u is not a place this system "
+                      "knows", module_name, (unsigned)heap_in);
+        rv9_mod_unlink(mod);
+        return RV9_PROC_ERR_CONTRACT;
+    }
+    bool external = (heap_in == RV9_HEAP_EXTERNAL) && heap_max > 0;
+    if (external && cls == RV9_CLASS_REALTIME) {
+        ESP_LOGE(TAG, "fork '%s': a real-time process may not have its "
+                      "arena in external memory", module_name);
+        rv9_mod_unlink(mod);
+        return RV9_PROC_ERR_CONTRACT;
+    }
+    if (heap_max > 0x7FFFFFFFu) {   /* no board has it, and sums would wrap */
+        ESP_LOGE(TAG, "fork '%s': a %lu-byte arena", module_name,
+                 (unsigned long)heap_max);
+        rv9_mod_unlink(mod);
+        return RV9_PROC_ERR_NOMEM;
+    }
+
     /* Its footprint, and what it may hold with everything it starts. */
-    uint32_t footprint = (uint32_t)(stack + h->static_size + PROC_OVERHEAD);
+    uint32_t footprint = (uint32_t)(stack + h->static_size + PROC_OVERHEAD)
+                       + (external ? 0 : heap_max);
+    uint32_t ext_footprint = external ? heap_max : 0;
     uint32_t budget = PROC_BUDGET_DEFAULT;
+    uint32_t ext_budget = PROC_EXT_UNBOUNDED;
     (void)rv9_mod_manifest_u32(mod->image, RV9_MTAG_MEM_MAX, &budget);
+    (void)rv9_mod_manifest_u32(mod->image, RV9_MTAG_EXT_MAX, &ext_budget);
 
     charge_t charge;
     char whose[48] = "";
@@ -1903,8 +2011,8 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
     prune_locked();
     rv9_pid_t pid = next_pid_locked();
     bool charged = (pid != RV9_PID_NONE) &&
-                   charge_locked(&charge, footprint, budget, whose,
-                                 sizeof(whose));
+                   charge_locked(&charge, footprint, budget, ext_footprint,
+                                 ext_budget, whose, sizeof(whose));
     rv9_lock_release(s_lock);
 
     if (pid == RV9_PID_NONE) {      /* every pid names somebody */
@@ -1912,8 +2020,10 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
         return RV9_PROC_ERR_NOMEM;
     }
     if (!charged) {
-        ESP_LOGW(TAG, "fork '%s': %lu bytes would take it past %s budget",
-                 module_name, (unsigned long)footprint, whose);
+        ESP_LOGW(TAG, "fork '%s': %lu bytes (%lu external) would take it "
+                      "past %s budget", module_name,
+                 (unsigned long)footprint, (unsigned long)ext_footprint,
+                 whose);
         rv9_mod_unlink(mod);
         return RV9_PROC_ERR_BUDGET;
     }
@@ -1992,6 +2102,24 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
         }
     }
 
+    /* Last, being the largest: anything refused above costs nothing here. */
+    if (heap_max > 0) {
+        p->arena = rv9_alloc_arena(heap_max, external);
+        if (p->arena == NULL) {
+            ESP_LOGW(TAG, "fork '%s': no room for its %lu-byte arena in %s "
+                          "memory", module_name, (unsigned long)heap_max,
+                     external ? "external" : "internal");
+            rv9_free(p->statics);
+            rv9_free(p);
+            refuse_fork(pid, &charge);
+            rv9_mod_unlink(mod);
+            return RV9_PROC_ERR_NOMEM;
+        }
+        p->arena_size     = heap_max;
+        p->arena_external = external;
+        p->heap_given     = heap_max;
+    }
+
     rv9_pid_t parent = rv9_proc_current_pid();
 
     rv9_lock_acquire(s_lock);
@@ -2018,6 +2146,9 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
     p->footprint          = footprint;
     p->held               = footprint;
     p->budget             = budget;
+    p->ext_footprint      = ext_footprint;
+    p->ext_held           = ext_footprint;
+    p->ext_budget         = ext_budget;
     p->n_ancestors        = charge.n;
     memcpy(p->ancestors, charge.ancestors, sizeof(p->ancestors));
     strncpy(p->name, module_name, sizeof(p->name) - 1);
@@ -2048,6 +2179,11 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
         p->refs        = 0;
         ended_locked(p);
         rv9_lock_release(s_lock);
+
+        rv9_free(p->statics);
+        p->statics = NULL;
+        rv9_free(p->arena);
+        p->arena = NULL;
 
         /* The fork hook has already run, so this process owns a path table
            and whatever it reserved. Nothing else will ever tell the I/O
@@ -2306,6 +2442,10 @@ bool rv9_proc_info(rv9_pid_t pid, rv9_proc_info_t *out)
         out->footprint   = p->footprint;
         out->held        = p->held;
         out->budget      = p->budget;
+        out->arena_size    = p->arena_size;
+        out->ext_footprint = p->ext_footprint;
+        out->ext_held      = p->ext_held;
+        out->ext_budget    = p->ext_budget;
     }
     rv9_lock_release(s_lock);
     return p != NULL;

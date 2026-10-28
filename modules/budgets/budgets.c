@@ -6,6 +6,10 @@
  * A fork that would take any process's `held` past its `budget` is refused
  * -- so the column to watch is how close `held` is to `budget` for a
  * shell running a lot in the background.
+ *
+ * `ext` and `budget` again are the same for external memory, which only
+ * an arena spends. A process that declared no external budget has none
+ * but the board's, shown as `-`.
  */
 #include "modlib.h"
 
@@ -30,7 +34,8 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     }
     if (n > MAX_ROWS) n = MAX_ROWS;
 
-    m_say(env, RV9_STDOUT, "pid   par   name             own   held  budget\n");
+    m_say(env, RV9_STDOUT, "pid   par   name             own   held  budget"
+                           "  ext        budget\n");
     for (int i = 0; i < n; i++) {
         const rv9_sys_budget_t *r = &st->rows[i];
         m_numpad(env, RV9_STDOUT, r->pid, 6);
@@ -38,7 +43,11 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         m_pad(env, RV9_STDOUT, r->name, 14);
         m_numpad(env, RV9_STDOUT, (int32_t)r->footprint, 7);
         m_numpad(env, RV9_STDOUT, (int32_t)r->held, 7);
-        m_num(env, RV9_STDOUT, (int32_t)r->budget);
+        m_numpad(env, RV9_STDOUT, (int32_t)r->budget, 8);
+        m_numpad(env, RV9_STDOUT, (int32_t)r->ext_held, 9);
+        m_say(env, RV9_STDOUT, "  ");
+        if (r->ext_budget == 0xFFFFFFFFu) m_say(env, RV9_STDOUT, "-");
+        else m_num(env, RV9_STDOUT, (int32_t)r->ext_budget);
         m_say(env, RV9_STDOUT, "\n");
     }
     return 0;
