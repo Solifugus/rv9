@@ -7065,10 +7065,22 @@ A board mounted differently would want a setstat for it.
 
 Not yet:
 
-- **No white balance.** The sensor's raw colour goes through the ISP's
-  demosaic and nothing else, so indoor light comes out orange. The ISP has
-  AWB statistics and a colour matrix; using them is the next thing here.
+- No colour matrix or gamma: the ISP has both, and the colours are
+  plausible without them.
 - Only one size, and no preview on the screen.
+
+**White balance**, added after: indoor light came out orange, because the
+sensor's raw colour went through the ISP's demosaic and nothing else. The
+ISP sums red, green and blue over the middle of the picture, and has a gain
+stage before the colours are made; the driver closes the loop between them
+while the exposure settles. Grey-world: scale red by G/R and blue by G/B,
+half the remaining correction a frame. The statistics turned out to be
+taken after the gains — measured, not assumed: the remaining ratios went to
+1.00 while the gains stopped moving — so each step multiplies rather than
+replaces. Under an incandescent bulb, from neutral: about twenty frames, to
+red ×0.71 and blue ×1.70, and a ceiling that had been orange is off-white.
+The gains are kept between pictures. A blown-out bulb comes out cyan: its
+pixels were already at full scale, and blue was raised on them anyway.
 
 ## 9. Migration to a native kernel
 

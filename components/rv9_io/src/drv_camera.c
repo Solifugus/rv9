@@ -46,6 +46,9 @@
  * where pictures nobody asked for go) and room for a JPEG, all external
  * memory. Given back when the last path closes. Nothing at all before the
  * first open.
+ *
+ * WHITE BALANCE is the one thing the driver does to the picture rather
+ * than to the hardware: see awb_step().
  */
 #include "rv9/io.h"
 #include "rv9/kal.h"
@@ -69,6 +72,8 @@ static const char *TAG = "rv9-cam";
 #include "esp_cam_ctlr.h"
 #include "esp_cam_ctlr_csi.h"
 #include "driver/isp.h"
+#include "driver/isp_awb.h"
+#include "driver/isp_wbg.h"
 #include "driver/jpeg_encode.h"
 
 #define OV5647_ADDR   0x36
@@ -86,6 +91,10 @@ static const char *TAG = "rv9-cam";
 #define SETTLE_MS     600   /* auto-exposure, from dark to a lit room */
 #define WORKER_STACK  4096
 #define DEFAULT_QUALITY 80
+
+#define GAIN_ONE      256   /* the ISP's white balance gains are 8.8 */
+#define GAIN_MIN      (GAIN_ONE / 2)
+#define GAIN_MAX      (GAIN_ONE * 4)
 
 #define REG_END   0xffff
 #define REG_DELAY 0xeeee
@@ -154,6 +163,9 @@ typedef struct {
     esp_cam_ctlr_handle_t   csi;
     isp_proc_handle_t       isp;
     jpeg_encoder_handle_t   jpeg;
+    isp_awb_ctlr_t          awb;
+    bool                    wbg_on;
+    isp_wbg_gain_t          gain;       /* white balance, kept across pictures */
     uint8_t                *frame;      /* FRAME_BYTES, external */
     uint8_t                *out;        /* JPEG_MAX, external */
     size_t                  out_cap;
@@ -268,6 +280,82 @@ static IRAM_ATTR bool frame_done(esp_cam_ctlr_handle_t h,
     return false;
 }
 
+/*
+ * White balance.
+ *
+ * The ISP counts, over the middle of the picture, the pixels that could be
+ * something white under a coloured light -- not too bright to trust, red
+ * and blue within a factor of five of green -- and sums their three
+ * channels. Grey-world over those: whatever light they are under, they
+ * should average grey, so red is scaled by G/R and blue by G/B. The ISP's
+ * gain stage applies that to every pixel before the colours are made.
+ *
+ * The statistics are taken AFTER the gain stage, so what is measured is
+ * what is left to correct: each step multiplies the gains by the ratio
+ * that remains, half of it at a time so that one odd frame cannot swing
+ * the picture. Measured that way round, not assumed: the remaining ratios
+ * go to 1.00 while the gains stop moving. From neutral under an
+ * incandescent bulb it takes about twenty frames, inside the half second
+ * the exposure needs anyway, and the gains are kept for the next picture.
+ * The window is counted whole in ordinary light -- every pixel passes the
+ * white-patch test -- so in practice this is grey-world.
+ */
+static bool awb_start(cam_t *c)
+{
+    esp_isp_awb_config_t ac = {
+        .sample_point = ISP_AWB_SAMPLE_POINT_1,
+        .window = {
+            .top_left  = { WIDTH / 5, HEIGHT / 5 },
+            .btm_right = { WIDTH * 4 / 5 - 1, HEIGHT * 4 / 5 - 1 },
+        },
+        .white_patch = {
+            .luminance        = { 0, 220 * 3 },
+            .red_green_ratio  = { 0.2f, 3.9f },
+            .blue_green_ratio = { 0.2f, 3.9f },
+        },
+    };
+    ac.subwindow = ac.window;
+    esp_isp_wbg_config_t wc = { .flags.update_once_configured = true };
+
+    if (esp_isp_new_awb_controller(c->isp, &ac, &c->awb) != ESP_OK) {
+        c->awb = NULL;
+        return false;
+    }
+    if (esp_isp_wbg_configure(c->isp, &wc) != ESP_OK ||
+        esp_isp_wbg_enable(c->isp) != ESP_OK) {
+        return false;
+    }
+    c->wbg_on = true;
+    if (c->gain.gain_g == 0) {
+        c->gain = (isp_wbg_gain_t){ GAIN_ONE, GAIN_ONE, GAIN_ONE };
+    }
+    esp_isp_wbg_set_wb_gain(c->isp, c->gain);
+    return esp_isp_awb_controller_enable(c->awb) == ESP_OK;
+}
+
+static uint32_t clamp_gain(float g)
+{
+    return g < GAIN_MIN ? GAIN_MIN : g > GAIN_MAX ? GAIN_MAX : (uint32_t)(g + 0.5f);
+}
+
+static void awb_step(cam_t *c)
+{
+    if (c->awb == NULL || !c->wbg_on) return;
+    isp_awb_stat_result_t r;
+    if (esp_isp_awb_controller_get_oneshot_statistics(c->awb, 100, &r) != ESP_OK ||
+        r.white_patch_num < 100 || r.sum_r == 0 || r.sum_b == 0) {
+        return;
+    }
+    float gr = (float)r.sum_g / r.sum_r, gb = (float)r.sum_g / r.sum_b;
+    /* Half the remaining correction, geometrically. */
+    c->gain.gain_r = clamp_gain(c->gain.gain_r * (1.0f + gr) / 2.0f);
+    c->gain.gain_b = clamp_gain(c->gain.gain_b * (1.0f + gb) / 2.0f);
+    esp_isp_wbg_set_wb_gain(c->isp, c->gain);
+    ESP_LOGD(TAG, "awb: %lu patches, G/R %.2f G/B %.2f -> gains r %lu b %lu",
+             (unsigned long)r.white_patch_num, gr, gb,
+             (unsigned long)c->gain.gain_r, (unsigned long)c->gain.gain_b);
+}
+
 static void hw_stop(cam_t *c)
 {
     if (c->sensor) stream(c, false);
@@ -276,6 +364,15 @@ static void hw_stop(cam_t *c)
         esp_cam_ctlr_disable(c->csi);
         esp_cam_ctlr_del(c->csi);
         c->csi = NULL;
+    }
+    if (c->awb) {
+        esp_isp_awb_controller_disable(c->awb);
+        esp_isp_del_awb_controller(c->awb);
+        c->awb = NULL;
+    }
+    if (c->wbg_on) {
+        esp_isp_wbg_disable(c->isp);
+        c->wbg_on = false;
     }
     if (c->isp) {
         esp_isp_disable(c->isp);
@@ -363,6 +460,7 @@ static bool hw_start(cam_t *c)
         ESP_LOGE(TAG, "the ISP would not start");
         goto fail;
     }
+    if (!awb_start(c)) ESP_LOGW(TAG, "no white balance");
 
     jpeg_encode_engine_cfg_t jc = { .timeout_ms = 200 };
     if (jpeg_new_encoder_engine(&jc, &c->jpeg) != ESP_OK) {
@@ -406,8 +504,8 @@ static bool take(cam_t *c)
        buffer, unread; counted from when streaming started, so a second
        picture does not wait again. */
     int64_t settled = c->started_at + (int64_t)SETTLE_MS * 1000;
-    int64_t now = esp_timer_get_time();
-    if (now < settled) rv9_task_delay_ms((uint32_t)((settled - now) / 1000));
+    while (esp_timer_get_time() < settled) awb_step(c);
+    for (int i = 0; i < 2; i++) awb_step(c);    /* and the light may have changed */
 
     int64_t t0 = esp_timer_get_time();
     c->frame_in = false;
