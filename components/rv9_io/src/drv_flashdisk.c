@@ -29,6 +29,31 @@
  * The slow path remains for a genuine overwrite, which is what it was
  * always for.
  *
+ * WHAT RBF ACTUALLY ASKS FOR
+ *
+ * That was not enough. Writing to /f0 still ran at about 10 KB/s once the
+ * volume had been used, and a trace of copying 96 KB onto it said why: 567
+ * sector writes and 556 erases for 188 sectors of file. Every data sector
+ * was written twice, because `copy` moves 256 bytes at a time and RBF
+ * writes each half through. The allocation bitmap's sector was written
+ * after every one, and allocating sets a bit, which flash cannot do
+ * without an erase. And space a deleted file left behind is not erased, so
+ * the fast path above almost never applied.
+ *
+ * So the driver keeps the last few erase blocks it was asked to change in
+ * memory, folds every sector written to them into one copy, and puts each
+ * block back with one erase -- or none, if the fast path applies to the
+ * whole block -- when it has not been touched for FLUSH_IDLE_MS or when
+ * its slot is wanted for another block. Reads of a cached block come from
+ * the cache, so nobody can see the flash behind it.
+ *
+ * The cost is durability: a write is in RAM for up to FLUSH_IDLE_MS
+ * afterwards, and a power cut in that window loses it. That is the bargain
+ * every file system with a cache makes, and the alternative was an erase
+ * per 256 bytes. The flushing is done by a background task, below every
+ * RV-9 thread, so on a machine that never goes idle it waits for an
+ * eviction instead.
+ *
  * Flash wears out -- on the order of 100k erase cycles per block. This is
  * fine for configuration, programs and logs written occasionally. It is
  * the wrong device for something rewritten every second, and when that
@@ -54,12 +79,136 @@ static const char *TAG = "rv9-flashdisk";
    partition is named here. */
 #define PARTITION_LABEL "vol0"
 
+/* Blocks held in memory. Four on the P4, which has the room; two
+   elsewhere, the fewest that keep the bitmap and the file being written
+   from evicting each other on every sector. */
+#if CONFIG_IDF_TARGET_ESP32P4
+#define CACHE_SLOTS 4
+#else
+#define CACHE_SLOTS 2
+#endif
+
+#define FLUSH_IDLE_MS 50
+
+typedef struct {
+    uint32_t block;             /* erase block number */
+    bool     valid, dirty;
+    uint64_t touched_ms;        /* last write, or last use for eviction */
+    uint8_t  data[ERASE_SIZE];
+} slot_t;
+
 typedef struct {
     const esp_partition_t *part;
     uint32_t               sectors;
-    uint8_t                scratch[ERASE_SIZE];
+    uint8_t                scratch[256];   /* a block compared a piece at a time */
+    slot_t                 slot[CACHE_SLOTS];
     rv9_lock_t            lock;
+
+    /* What the cache has saved, for anyone asking whether it works. */
+    uint32_t               writes, flushes, erases;
 } flashdisk_t;
+
+/* ---- the cache, all under f->lock ---- */
+
+/*
+ * Put a dirty block back. Without an erase when every byte only clears
+ * bits -- a block written into fresh space -- and with one otherwise.
+ */
+static rv9_io_err_t flush_slot(flashdisk_t *f, slot_t *sl)
+{
+    if (!sl->valid || !sl->dirty) return RV9_IO_OK;
+
+    size_t off = (size_t)sl->block * ERASE_SIZE;
+    bool clears_only = true, same = true;
+    for (size_t at = 0; at < ERASE_SIZE && clears_only; at += sizeof(f->scratch)) {
+        if (esp_partition_read(f->part, off + at, f->scratch,
+                               sizeof(f->scratch)) != ESP_OK) {
+            clears_only = false;
+            break;
+        }
+        const uint8_t *want = sl->data + at;
+        for (size_t i = 0; i < sizeof(f->scratch); i++) {
+            if ((f->scratch[i] & want[i]) != want[i]) { clears_only = false; break; }
+            if (f->scratch[i] != want[i]) same = false;
+        }
+    }
+    if (clears_only && same) {
+        sl->dirty = false;               /* nothing changed after all */
+        return RV9_IO_OK;
+    }
+
+    if (!clears_only) {
+        if (esp_partition_erase_range(f->part, off, ERASE_SIZE) != ESP_OK) {
+            return RV9_IO_ERR_IO;
+        }
+        f->erases++;
+    }
+    if (esp_partition_write(f->part, off, sl->data, ERASE_SIZE) != ESP_OK) {
+        return RV9_IO_ERR_IO;
+    }
+    f->flushes++;
+    sl->dirty = false;
+    return RV9_IO_OK;
+}
+
+static slot_t *find_slot(flashdisk_t *f, uint32_t block)
+{
+    for (int i = 0; i < CACHE_SLOTS; i++) {
+        if (f->slot[i].valid && f->slot[i].block == block) return &f->slot[i];
+    }
+    return NULL;
+}
+
+/* A slot holding `block`, loading it -- and evicting the least recently
+   used, writing it back first if it is dirty -- when it is not there. */
+static rv9_io_err_t get_slot(flashdisk_t *f, uint32_t block, slot_t **out)
+{
+    slot_t *sl = find_slot(f, block);
+    if (sl == NULL) {
+        sl = &f->slot[0];
+        for (int i = 0; i < CACHE_SLOTS; i++) {
+            slot_t *c = &f->slot[i];
+            if (!c->valid) { sl = c; break; }
+            if (c->touched_ms < sl->touched_ms) sl = c;
+        }
+        rv9_io_err_t err = flush_slot(f, sl);
+        if (err != RV9_IO_OK) return err;
+
+        sl->valid = false;
+        if (esp_partition_read(f->part, (size_t)block * ERASE_SIZE, sl->data,
+                               ERASE_SIZE) != ESP_OK) {
+            return RV9_IO_ERR_IO;
+        }
+        sl->block = block;
+        sl->valid = true;
+        sl->dirty = false;
+    }
+    sl->touched_ms = rv9_time_ms();
+    *out = sl;
+    return RV9_IO_OK;
+}
+
+static void flusher(void *arg)
+{
+    flashdisk_t *f = (flashdisk_t *)arg;
+    for (;;) {
+        rv9_task_delay_ms(FLUSH_IDLE_MS / 2);
+        rv9_lock_acquire(f->lock);
+        uint64_t now = rv9_time_ms();
+        for (int i = 0; i < CACHE_SLOTS; i++) {
+            slot_t *sl = &f->slot[i];
+            if (sl->dirty && now - sl->touched_ms >= FLUSH_IDLE_MS) {
+                if (flush_slot(f, sl) != RV9_IO_OK) {
+                    ESP_LOGE(TAG, "block %lu could not be written back",
+                             (unsigned long)sl->block);
+                }
+            }
+        }
+        rv9_lock_release(f->lock);
+    }
+}
+
+/* ---- the driver ---- */
 
 static rv9_io_err_t flashdisk_init(rv9_dev_t *dev)
 {
@@ -80,12 +229,21 @@ static rv9_io_err_t flashdisk_init(rv9_dev_t *dev)
         return RV9_IO_ERR_NOMEM;
     }
 
+    /* Without something to write the cache back there is no cache; the
+       volume is still usable, one erase per write as it used to be. */
+    if (rv9_task_create_background(flusher, "rv9-flashdisk", 3072, f)
+            != RV9_OK) {
+        rv9_free(f);
+        return RV9_IO_ERR_NOMEM;
+    }
+
     f->sectors = f->part->size / SECTOR_SIZE;
     dev->drv_state = f;
 
-    ESP_LOGI(TAG, "%lu sectors of %d bytes (%lu KB) on '%s'",
+    ESP_LOGI(TAG, "%lu sectors of %d bytes (%lu KB) on '%s', %d blocks cached",
              (unsigned long)f->sectors, SECTOR_SIZE,
-             (unsigned long)(f->part->size / 1024), PARTITION_LABEL);
+             (unsigned long)(f->part->size / 1024), PARTITION_LABEL,
+             CACHE_SLOTS);
     return RV9_IO_OK;
 }
 
@@ -107,10 +265,38 @@ static rv9_io_err_t flashdisk_read(rv9_dev_t *dev, uint32_t lsn, void *buf,
     if (f == NULL) return RV9_IO_ERR_IO;
     if (lsn + count > f->sectors) return RV9_IO_ERR_INVAL;
 
-    /* Reads are direct: flash is memory that happens to be slow. */
-    esp_err_t err = esp_partition_read(f->part, (size_t)lsn * SECTOR_SIZE,
-                                       buf, (size_t)count * SECTOR_SIZE);
-    return (err == ESP_OK) ? RV9_IO_OK : RV9_IO_ERR_IO;
+    uint8_t *dst = (uint8_t *)buf;
+    rv9_io_err_t result = RV9_IO_OK;
+
+    /* Direct, a run at a time, except where a cached block stands in for
+       the flash behind it. */
+    rv9_lock_acquire(f->lock);
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t sector = lsn + done;
+        slot_t  *sl = find_slot(f, sector / SECTORS_PER_ERASE);
+        if (sl != NULL) {
+            memcpy(dst + (size_t)done * SECTOR_SIZE,
+                   sl->data + (sector % SECTORS_PER_ERASE) * SECTOR_SIZE,
+                   SECTOR_SIZE);
+            done++;
+            continue;
+        }
+        uint32_t run = 1;
+        while (done + run < count &&
+               find_slot(f, (sector + run) / SECTORS_PER_ERASE) == NULL) {
+            run++;
+        }
+        if (esp_partition_read(f->part, (size_t)sector * SECTOR_SIZE,
+                               dst + (size_t)done * SECTOR_SIZE,
+                               (size_t)run * SECTOR_SIZE) != ESP_OK) {
+            result = RV9_IO_ERR_IO;
+            break;
+        }
+        done += run;
+    }
+    rv9_lock_release(f->lock);
+    return result;
 }
 
 static rv9_io_err_t flashdisk_write(rv9_dev_t *dev, uint32_t lsn,
@@ -124,73 +310,16 @@ static rv9_io_err_t flashdisk_write(rv9_dev_t *dev, uint32_t lsn,
     rv9_io_err_t result = RV9_IO_OK;
 
     rv9_lock_acquire(f->lock);
-
-    uint32_t done = 0;
-    while (done < count) {
+    for (uint32_t done = 0; done < count; done++) {
         uint32_t sector = lsn + done;
-        uint32_t block  = sector / SECTORS_PER_ERASE;
-        uint32_t within = sector % SECTORS_PER_ERASE;
-
-        /* How many of the remaining sectors fall inside this erase block?
-           Batching them means one erase cycle instead of one per sector. */
-        uint32_t here = SECTORS_PER_ERASE - within;
-        if (here > count - done) here = count - done;
-
-        size_t block_off  = (size_t)block * ERASE_SIZE;
-        size_t sector_off = block_off + (size_t)within * SECTOR_SIZE;
-        size_t span       = (size_t)here * SECTOR_SIZE;
-        const uint8_t *from = src + (size_t)done * SECTOR_SIZE;
-
-        /*
-         * Can this be written where it stands?
-         *
-         * Only if every bit we are turning on is already on, because flash
-         * writing clears bits and never sets them. Reading the span costs
-         * one read; getting the answer right saves an erase and a 4 KB
-         * write, which is the whole difference between this volume being
-         * usable and not.
-         */
-        if (esp_partition_read(f->part, sector_off, f->scratch,
-                               span) == ESP_OK) {
-            bool clears_only = true;
-            for (size_t i = 0; i < span; i++) {
-                if ((f->scratch[i] & from[i]) != from[i]) {
-                    clears_only = false;
-                    break;
-                }
-            }
-
-            if (clears_only) {
-                if (esp_partition_write(f->part, sector_off, from,
-                                        span) != ESP_OK) {
-                    result = RV9_IO_ERR_IO;
-                    break;
-                }
-                done += here;
-                continue;
-            }
-        }
-
-        if (esp_partition_read(f->part, block_off, f->scratch,
-                               ERASE_SIZE) != ESP_OK) {
-            result = RV9_IO_ERR_IO;
-            break;
-        }
-
-        memcpy(f->scratch + (size_t)within * SECTOR_SIZE,
-               src + (size_t)done * SECTOR_SIZE,
-               (size_t)here * SECTOR_SIZE);
-
-        if (esp_partition_erase_range(f->part, block_off, ERASE_SIZE) != ESP_OK ||
-            esp_partition_write(f->part, block_off, f->scratch,
-                                ERASE_SIZE) != ESP_OK) {
-            result = RV9_IO_ERR_IO;
-            break;
-        }
-
-        done += here;
+        slot_t  *sl = NULL;
+        result = get_slot(f, sector / SECTORS_PER_ERASE, &sl);
+        if (result != RV9_IO_OK) break;
+        memcpy(sl->data + (sector % SECTORS_PER_ERASE) * SECTOR_SIZE,
+               src + (size_t)done * SECTOR_SIZE, SECTOR_SIZE);
+        sl->dirty = true;
+        f->writes++;
     }
-
     rv9_lock_release(f->lock);
     return result;
 }

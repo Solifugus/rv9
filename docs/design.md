@@ -6882,11 +6882,9 @@ Open:
   cold starts after a reboot, and the ES7210 has no reset line, so the state it
   powered up in cannot be recreated without taking the power away. `rec` now
   says so when every sample is zero, and says what to do.
-- **Writing to `/f0` is about 10 KB/s** and holds up the machine while it
-  runs. That is the flash disk, not sound, and wants its own look.
-- **`/gpio` still reserves the C5's pins on the P4** — 10 and 13 among them,
-  which are LRCK and MCLK here. Harmless for sound, which does not go through
-  `/gpio`, and wrong all the same.
+- ~~Writing to `/f0` is about 10 KB/s~~ — about 90 KB/s now; see §60.
+- ~~`/gpio` still reserves the C5's pins on the P4~~ — each board has its own
+  list now (1b25c09).
 - MIC3 for echo cancellation, and the camera.
 
 ## 59. Speech, written down
@@ -6965,6 +6963,49 @@ Not yet:
   engine and not reachable through the device.
 - An engine of its own, as a module with an external arena, is the next
   arrangement after this one.
+
+## 60. Writing to flash at the speed of flash
+
+`/f0` wrote at about 10 KB/s once it had been used, and stalled the board
+while it did. The flash disk already had a fast path — write in place when
+every bit only goes from one to zero, which is what fresh space allows — so
+the question was why it so rarely applied. A trace of copying 96 KB onto the
+volume answered it: **567 sector writes and 556 erases for 188 sectors of
+file.**
+
+- Every data sector went down **twice**: `copy` moves 256 bytes at a time,
+  and RBF writes each half of a sector through as it arrives.
+- The allocation bitmap's sector went down after **every** data sector, and
+  allocating sets a bit — the one thing flash cannot do without an erase.
+- Space a deleted file left behind is old data, not erased, so the fast
+  path almost never applied on a volume anybody had used.
+
+Each of those cost a 4 KB read, erase and write. The fix is below RBF,
+where the cost is: the flash disk keeps the last few erase blocks it was
+asked to change in memory — four on the P4, two on the C5 and C3, the fewest
+that keep the bitmap and the file from evicting each other — folds every
+write into them, and puts each block back with one erase, or none if the
+fast path covers the whole block. A block goes back when it has been idle
+for 50 ms, from a background task (`rv9_task_create_background`), or when
+its slot is wanted. Reads of a cached block come from the cache.
+
+| | before | after |
+|---|---|---|
+| copy 96 KB to `/f0` | 26.1 s | 0.3–1.2 s |
+| `rec` writing 512 KB | 30–40 s | 5.5 s (≈ 93 KB/s) |
+
+Both copies transcribe as "Hello, this is me." through `listen -f`, and the
+second did after a restart, so what the cache held reached the flash.
+
+**The cost is durability.** A write sits in memory for up to 50 ms, and a
+power cut in that window loses it — the bargain every file system with a
+cache makes, against an erase per 256 bytes. RBF is not crash-consistent
+either way; the window just got wider by 50 ms. On a machine that never goes
+idle the flusher waits, and blocks go back as slots are wanted instead.
+
+RBF could also stop writing half-sectors through and stop rewriting the
+bitmap per sector. Both would help every device under it, and neither is
+needed for this one any more.
 
 ## 9. Migration to a native kernel
 
