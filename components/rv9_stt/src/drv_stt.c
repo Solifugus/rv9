@@ -103,7 +103,7 @@ void *rv9_stt_calloc_ext(size_t n, size_t size)
 
 static void say_memory(const char *when)
 {
-    ESP_LOGW(TAG, "%s: internal %u free, largest %u; external %u free",
+    ESP_LOGI(TAG, "%s: internal %u free, largest %u; external %u free",
              when, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));

@@ -9,6 +9,10 @@
  * wants one channel, and on this board MIC2 is the more sensitive capsule
  * of the two -- about twice MIC1's level for the same sound.
  *
+ * It beeps when it starts listening. Without that the only cue was a line
+ * on a terminal the speaker might not be watching, and the first live test
+ * lost the front of its first word -- "talking" came back as "King".
+ *
  * The first use after a restart also reads the 17 MB model, which takes a
  * while and is said.
  */
@@ -16,6 +20,8 @@
 
 #define RATE   16000
 #define CHUNK  640               /* stereo frames, 40 ms */
+#define BEEP   (RATE * 3 / 20)   /* 150 ms */
+#define DISCARD (RATE * 3 / 10)  /* the beep, its echo, and the codecs settling */
 
 typedef struct {
     int16_t st[CHUNK * 2];
@@ -71,15 +77,28 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         }
         env->close(f);
     } else {
-        int au = env->open("/au0", RV9_MODE_READ);
+        int au = env->open("/au0", RV9_MODE_RW);
         if (au < 0) {
             m_say(env, RV9_STDERR, "listen: /au0: cannot open\n");
             env->close(stt);
             return 4;
         }
-        /* The codecs settle for a tenth of a second after they start. */
-        for (uint32_t got = 0; got < RATE / 10 * 4; ) {
-            int n = env->read(au, st->st, RATE / 10 * 4 - got);
+        /* 880 Hz, a square wave at an eighth of full scale: short and
+           unmistakable. Written first, so it is playing while the input
+           below is thrown away. */
+        for (uint32_t i = 0; i < CHUNK; i++) {
+            int16_t v = ((i / 9) & 1) ? 4096 : -4096;
+            st->st[2 * i] = v;
+            st->st[2 * i + 1] = v;
+        }
+        for (uint32_t done = 0; done < BEEP; done += CHUNK) {
+            uint32_t k = BEEP - done < CHUNK ? BEEP - done : CHUNK;
+            env->write(au, st->st, k * 4);
+        }
+        for (uint32_t got = 0; got < DISCARD * 4; ) {
+            uint32_t want = DISCARD * 4 - got;
+            if (want > sizeof(st->st)) want = sizeof(st->st);
+            int n = env->read(au, st->st, want);
             if (n <= 0) break;
             got += (uint32_t)n;
         }

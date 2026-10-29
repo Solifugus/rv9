@@ -38,8 +38,44 @@ static const char *TAG = "rv9-gpio";
  * unless asked very deliberately. There is no override here yet; when
  * there is, it should be harder to reach than a typo.
  */
+/*
+ * Per board, because the pins are. The P4's list was the C5's for a month:
+ * it protected nothing the P4 uses and refused 10 and 13, which on the P4
+ * are the sound bus's frame clock and master clock -- found when `pin 10`
+ * was refused while debugging the microphones, for a reason that named the
+ * wrong board's display.
+ */
 static bool pin_is_reserved(uint32_t pin)
 {
+#if CONFIG_IDF_TARGET_ESP32P4
+    switch (pin) {
+    case 37: case 38:                       /* UART0: the console, via the CH343 */
+    case 24: case 25:                       /* USB Serial/JTAG, the other port */
+    case 7: case 8:                         /* I2C: touch, codecs, camera */
+    case 9: case 10: case 11: case 12:
+    case 13: case 53:                       /* sound, and the amplifier */
+    case 14: case 15: case 16: case 17:
+    case 18: case 19: case 54:              /* the radio's SDIO link, its reset */
+    case 32: case 33:                       /* backlight, LCD reset */
+    case 39: case 40: case 41: case 42:
+    case 43: case 44:                       /* microSD */
+        return true;
+    default:
+        return false;
+    }
+#elif CONFIG_IDF_TARGET_ESP32C3
+    /* A SuperMini: the console is USB on 18 and 19, the flash is on 12-17,
+       and nothing else is spoken for -- 8 is its LED and 9 its BOOT
+       button, both usable once it has booted. */
+    switch (pin) {
+    case 18: case 19:                       /* USB: the console */
+    case 12: case 13: case 14:
+    case 15: case 16: case 17:              /* the flash chip */
+        return true;
+    default:
+        return false;
+    }
+#else
     switch (pin) {
     case 13: case 14:                                     /* USB: the console */
     case 6: case 7: case 23: case 24: case 26: case 10:   /* LCD */
@@ -48,6 +84,7 @@ static bool pin_is_reserved(uint32_t pin)
     default:
         return false;
     }
+#endif
 }
 
 typedef struct {
@@ -151,7 +188,7 @@ static RV9_RT_CODE void gpio_edge_isr(void *arg)
  * of what the openers asked for: if anyone wants to drive it, it is an
  * output, because an output on this chip still reads back.
  */
-#define MAX_PINS 40
+#define MAX_PINS SOC_GPIO_PIN_COUNT     /* 29 on the C5, 55 on the P4 */
 static uint8_t s_open_count[MAX_PINS];
 static uint8_t s_output_count[MAX_PINS];
 
@@ -186,7 +223,8 @@ static rv9_io_err_t gpio_unit_open(rv9_dev_t *dev, uint32_t unit,
     if (!GPIO_IS_VALID_GPIO((gpio_num_t)unit)) return RV9_IO_ERR_NOTFOUND;
     if (unit >= MAX_PINS) return RV9_IO_ERR_NOTFOUND;
     if (pin_is_reserved(unit)) {
-        ESP_LOGW(TAG, "pin %lu is spoken for (USB console, display or card)",
+        ESP_LOGW(TAG, "pin %lu is one of this board's own: its console, "
+                      "display, card, radio, sound or flash",
                  (unsigned long)unit);
         return RV9_IO_ERR_EXISTS;
     }

@@ -259,7 +259,7 @@ the firmware.
 | `/r0` | `rbf` | `ramdisk` | RAM disk. Fast, and gone at reboot. |
 | `/f0` | `rbf` | `flashdisk` | A flash partition. Where modules live to survive a reboot. |
 | `/sd0` | `rbf` | `sdcard` | microSD. Over SPI on the C5, sharing the display's bus; four-line SDMMC on the P4. |
-| `/gpio/N` | `pio` | `gpio` | Pins. Refuses the ones the board has spoken for: USB console, display, card. |
+| `/gpio/N` | `pio` | `gpio` | Pins. Refuses the ones the board's own devices use — on the P4 the console (37, 38), the other USB port (24, 25), I2C (7, 8), sound (9–13, 53), the radio's link (14–19, 54), the display (32, 33) and the card (39–44); on a C3 SuperMini the USB console (18, 19) and the flash (12–17). Every other pin the chip has, up to 54 on the P4. |
 | `/pwm0/N` | `pio` | `pwm` | Duty cycle. Stops driving when the path closes — it holds a hardware channel that must be given back. |
 | `/adc0/N` | `pio` | `adc` | Analogue in. |
 | `/tsens` | `pio` | `tsens` | The die's own temperature. |
@@ -1555,7 +1555,7 @@ the end rather than in a sensible place.
 | `RV9_IO_ERR_WOULDBLOCK` | 7 | Nothing to read and the caller asked not to wait. |
 | `RV9_IO_ERR_IO` | 8 | The hardware said no. |
 | `RV9_IO_ERR_INVAL` | 9 | The arguments do not make sense — an I²C address above 0x77, a negative length. |
-| `RV9_IO_ERR_EXISTS` | 10 | It is already there, or the pin is spoken for by the board (the USB console, the display, the card). |
+| `RV9_IO_ERR_EXISTS` | 10 | It is already there, or the pin is one the board's own devices use (see `/gpio/N`). |
 | `RV9_IO_ERR_TIMEOUT` | 11 | The device did not answer in time. Distinct from `IO` on purpose: a slow device and a broken one need different reactions. |
 | `RV9_IO_ERR_BUSY` | 12 | Somebody else owns it exclusively. |
 
