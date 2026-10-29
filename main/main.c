@@ -263,6 +263,7 @@ static void io_bringup(void)
     REGISTER(rv9_drv_svgwin_register());
     REGISTER(rv9_drv_touch_register());
     REGISTER(rv9_drv_audio_register());
+    REGISTER(rv9_drv_camera_register());
     REGISTER(rv9_drv_stt_register());
     REGISTER(rv9_drv_pubmem_register());
     REGISTER(rv9_drv_pipemem_register());

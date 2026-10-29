@@ -1230,6 +1230,51 @@ typedef struct __attribute__((packed)) {
 
 _Static_assert(sizeof(rv9_stt_timing_t) == 16, "stt timing is 16 bytes");
 
+/*
+ * The camera: /cam0, one still at a time.
+ *
+ *   setstat  RV9_CAM_SS_FORMAT / RV9_CAM_SS_QUALITY, if the defaults --
+ *            JPEG at quality 80 -- are not what is wanted
+ *   read     the picture. The first read takes it and waits until it is
+ *            ready; later reads carry on through it
+ *   getstat  RV9_CAM_GS_FRAME, once a read has returned something: how
+ *            big the picture is, so the reader knows where it ends
+ *
+ * A read after the last byte of one picture takes the next. Nothing marks
+ * the end in the bytes themselves -- a JPEG says where it ends and an
+ * image of pixels is width x height x 2 -- which is why the size is asked
+ * for rather than read until something stops.
+ *
+ * The first picture after opening waits about half a second more than the
+ * others: the sensor is started on first use and its exposure has to find
+ * the light. It stops, and gives back the memory it held, when the last
+ * path closes. The work is done below RV-9's own threads, as /stt0's is,
+ * so the rest of the board carries on while a picture is taken.
+ *
+ * RGB565 pixels are little-endian, top row first, which is what the
+ * board's own screen takes.
+ *
+ * One process at a time: the device has a session.
+ */
+#define RV9_CAM_SS_FORMAT  (RV9_SS_DRIVER_BASE + 0)  /* uint32_t RV9_CAM_FMT_* */
+#define RV9_CAM_SS_QUALITY (RV9_SS_DRIVER_BASE + 1)  /* uint32_t 1..100, JPEG */
+#define RV9_CAM_GS_FRAME   (RV9_SS_DRIVER_BASE + 2)  /* rv9_cam_frame_t */
+
+#define RV9_CAM_FMT_JPEG    0
+#define RV9_CAM_FMT_RGB565  1
+
+typedef struct __attribute__((packed)) {
+    uint32_t size;          /* bytes in this picture */
+    uint16_t width, height;
+    uint8_t  format;        /* RV9_CAM_FMT_* */
+    uint8_t  quality;       /* JPEG's, or 0 */
+    uint16_t start_ms;      /* starting the sensor, if this one had to */
+    uint16_t capture_ms;    /* waiting for the frame */
+    uint16_t encode_ms;     /* compressing it, for a JPEG */
+} rv9_cam_frame_t;
+
+_Static_assert(sizeof(rv9_cam_frame_t) == 16, "camera frame is 16 bytes");
+
 /* ------------------------------------------------------------------ */
 /* sysinfo                                                             */
 /* ------------------------------------------------------------------ */

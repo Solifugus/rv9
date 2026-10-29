@@ -34,7 +34,15 @@ set(RV9_IO_REQ rv9_kal rv9_module rv9_proc driver esp_driver_i2c
 list(APPEND RV9_IO_SRCS "src/nfm.c" "src/drv_net.c")
 list(APPEND RV9_IO_REQ lwip esp_netif esp_wifi esp_event)
 
+#
+# The camera. The driver is built everywhere and finds no camera except on
+# the P4, which is the only one with the MIPI receiver, image processor and
+# JPEG engine it drives -- see src/drv_camera.c.
+#
+list(APPEND RV9_IO_SRCS "src/drv_camera.c")
+
 if("${IDF_TARGET}" STREQUAL "esp32p4")
+    list(APPEND RV9_IO_REQ esp_driver_cam esp_driver_isp esp_driver_jpeg)
     # The console is a real UART here, behind the board's CH343 bridge --
     # see the header of src/drv_uart.c, which is a USB Serial/JTAG driver
     # everywhere else despite its name.

@@ -7007,6 +7007,69 @@ RBF could also stop writing half-sectors through and stop rewriting the
 bitmap per sector. Both would help every device under it, and neither is
 needed for this one any more.
 
+## 61. A camera, one still at a time
+
+`/cam0` is the OV5647 on the P4 board's ribbon: read it and get a picture.
+The first step of three toward a machine that sees — pictures now, a
+detector behind a device like `/stt0` next, markers for range after.
+
+The hardware is a line of four. The sensor sends raw Bayer pixels over two
+MIPI lanes; the P4's CSI receiver takes them in; its ISP, between the two,
+makes each one-colour pixel three on the way to memory; its JPEG engine
+compresses. The driver touches no pixel itself. The sensor's settings —
+Espressif's 800x640 RAW8 mode, the exposure target and the banding filter,
+from esp_cam_sensor 2.6.0 — are written out in `drv_camera.c` rather than
+linked, as the codecs' are in `drv_audio.c`: a hundred register writes are
+not worth a second device model and a component manager dependency.
+
+- **No new system call**, again. `open`, `read`, and a `getstat` for the
+  size, because nothing in a picture's bytes marks its end in a way SCF can
+  pass on: a raw read of nothing is "not yet", never "finished".
+- **The work happens below RV-9**, as in §59 and on the same KAL call. A
+  picture is not long — 40 ms for the frame, 5 for the JPEG — but starting
+  the sensor is 150 bus writes and then half a second for its exposure, and
+  none of it should stop the shell.
+- **800x640** is the whole sensor scaled down: the widest view it has, in a
+  megabyte. The 1920x1080 mode is a crop of the middle and four times the
+  memory, and a detector wants less, not more.
+- **It holds nothing until used, and lets go at the last close**: 2.5 MB of
+  external memory for a frame, the CSI driver's spare frame and room for a
+  JPEG.
+
+Measured, from `snap`:
+
+| | |
+|---|---|
+| starting the sensor, CSI, ISP and JPEG engine | 68 ms |
+| exposure settling, first picture only | 600 ms (fixed) |
+| taking a frame | 39 ms |
+| compressing it, quality 80 | 5 ms, 67 KB |
+
+Two things ESP-IDF 6.0.3 does that its own example does not survive:
+
+- **CSI's colour types are its converter's, not the sensor's.** The
+  example says RAW8 in, RGB565 out; on 6.0 that asks the bridge, which sits
+  after the ISP, to convert from RAW, and it refuses. RGB565 both ways is
+  pass-through. esp_video says as much, behind a version test.
+- **`esp_cam_ctlr_alloc_buffer` does not align.** The interrupt that hands
+  a buffer to DMA syncs the cache over it and asserts when that is refused,
+  so the first picture restarted the board. The frame is allocated aligned
+  by hand.
+
+And one the board does: Espressif's settings gave a picture upside down
+and mirrored, as the camera is mounted here — looking up from below the
+screen. Found with a left hand held over the lens; the sensor now flips
+both ways, and is told so in the colour pattern too (GRBG, not GBRG),
+since turning the window moves the filter under it by a pixel each way.
+A board mounted differently would want a setstat for it.
+
+Not yet:
+
+- **No white balance.** The sensor's raw colour goes through the ISP's
+  demosaic and nothing else, so indoor light comes out orange. The ISP has
+  AWB statistics and a colour matrix; using them is the next thing here.
+- Only one size, and no preview on the screen.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

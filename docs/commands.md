@@ -135,6 +135,7 @@ value.
 | `rec <file> [seconds]` | Record both microphones to a raw file: 16 kHz, two 16-bit channels, MIC1 then MIC2. Records into a 1 MB external arena (16 s) and writes afterwards, so a flash stall cannot drop samples — about 90 KB/s to `/f0`, more to `/sd0`. Says how loud each microphone was, and says plainly when every sample was zero. P4 only. On a PC: `aplay -f S16_LE -r 16000 -c 2`. |
 | `play [-1] [-v dB] <file>` / `play beep [s]` | Through the speaker. `-1` for a one-channel file, such as `arecord -c 1` makes; `-v` sets the volume first, −95 to +32 dB (the default is −10). `beep` is 440 Hz, and with `rec` running beside it, is how to test the microphones without talking. |
 | `listen [seconds]` / `listen -f <file>` | Speech to text. Beeps, then records MIC2 — the more sensitive capsule — for four seconds by default, hands it to `/stt0`, and prints what Whistle heard and how long it took. `-f` takes a one-channel 16 kHz recording instead. The first use after a restart also reads the 17 MB model from `/sd0/whistle.cact`. P4 only. |
+| `snap [-q 1..100 \| -r] <file>` | Take a picture with the camera and save it: an 800x640 JPEG, quality 80 unless `-q` says, or with `-r` the raw RGB565 pixels (1 MB). Says how big it is and how long starting the camera, taking and compressing took — about 70 ms, 40 ms and 5 ms. P4 only. |
 | `backlight [0..100]` | The panel. The largest continuous draw on this board, and turning it down costs nothing else — the console works at any brightness, including none. Not remembered across a reset. |
 
 ---
