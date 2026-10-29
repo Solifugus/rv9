@@ -1196,6 +1196,40 @@ typedef struct __attribute__((packed)) {
 
 _Static_assert(sizeof(rv9_audio_format_t) == 8, "audio format is 8 bytes");
 
+/*
+ * Speech to text: /stt0, a recogniser that is a device.
+ *
+ *   write    16 kHz mono 16-bit samples, as many writes as it takes
+ *   setstat  RV9_STT_SS_DONE: that was the utterance; recognise it
+ *   read     the text, one line ending in a newline, once it is ready
+ *
+ * The read blocks until the text is there -- seconds, not milliseconds:
+ * about twice the length of the speech on the P4 -- while every other
+ * process carries on, because the work is done below RV-9's own threads
+ * and only when none of them wants the processor. A read with nothing
+ * asked of it is RV9_IO_ERR_INVAL rather than a wait for ever.
+ *
+ * One utterance at a time, and one process at a time: the device has a
+ * session, so a second opener is refused until the first closes. The model
+ * is read on first use, from RV9_STT_SS_MODEL's path if one was given and
+ * /sd0/whistle.cact if not, and stays in external memory after that.
+ *
+ * This is the proposal's prototype arrangement: the engine is linked into
+ * the firmware, behind a driver, rather than being a module of its own.
+ */
+#define RV9_STT_SS_DONE   (RV9_SS_DRIVER_BASE + 0)  /* arg ignored */
+#define RV9_STT_SS_MODEL  (RV9_SS_DRIVER_BASE + 1)  /* const char *path */
+#define RV9_STT_GS_TIMING (RV9_SS_DRIVER_BASE + 2)  /* rv9_stt_timing_t */
+
+typedef struct __attribute__((packed)) {
+    uint32_t load_ms;       /* reading the model, if this one had to */
+    uint32_t audio_ms;      /* how long the last utterance was */
+    uint32_t encode_ms;     /* listening to it */
+    uint32_t decode_ms;     /* writing it down */
+} rv9_stt_timing_t;
+
+_Static_assert(sizeof(rv9_stt_timing_t) == 16, "stt timing is 16 bytes");
+
 /* ------------------------------------------------------------------ */
 /* sysinfo                                                             */
 /* ------------------------------------------------------------------ */

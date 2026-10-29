@@ -12,6 +12,7 @@
 #include "rv9/proc.h"
 #include "rv9/io.h"
 #include "rv9/io_builtin.h"
+#include "rv9/stt.h"
 #include "rv9/ssh_builtin.h"
 #include "kal_selftest.h"
 #include "logring.h"
@@ -262,6 +263,7 @@ static void io_bringup(void)
     REGISTER(rv9_drv_svgwin_register());
     REGISTER(rv9_drv_touch_register());
     REGISTER(rv9_drv_audio_register());
+    REGISTER(rv9_drv_stt_register());
     REGISTER(rv9_drv_pubmem_register());
     REGISTER(rv9_drv_pipemem_register());
     REGISTER(rv9_drv_i2c_register());

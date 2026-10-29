@@ -272,6 +272,10 @@ static void exclusive_open(void)
 bool rv9_io_selftest(void)
 {
     s_passed = s_failed = 0;
+
+    check(rv9_io_refused_registrations() == 0,
+          "every driver and file manager found room to register");
+
     ESP_LOGI(TAG, "device ownership");
 
     resource_names();

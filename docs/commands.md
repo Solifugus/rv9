@@ -134,6 +134,7 @@ value.
 | `range <pin> [count] [listen]` | Distance from a three-pin sonic ranger, or any pulse width. `listen` measures pulses without triggering. |
 | `rec <file> [seconds]` | Record both microphones to a raw file: 16 kHz, two 16-bit channels, MIC1 then MIC2. Records into a 1 MB external arena (16 s) and writes afterwards, so a flash stall cannot drop samples — the write takes a while, about 10 KB/s to `/f0`. Says how loud each microphone was, and says plainly when every sample was zero. P4 only. On a PC: `aplay -f S16_LE -r 16000 -c 2`. |
 | `play [-1] [-v dB] <file>` / `play beep [s]` | Through the speaker. `-1` for a one-channel file, such as `arecord -c 1` makes; `-v` sets the volume first, −95 to +32 dB (the default is −10). `beep` is 440 Hz, and with `rec` running beside it, is how to test the microphones without talking. |
+| `listen [seconds]` / `listen -f <file>` | Speech to text. Records MIC2 — the more sensitive capsule — for four seconds by default, hands it to `/stt0`, and prints what Whistle heard and how long it took. `-f` takes a one-channel 16 kHz recording instead. The first use after a restart also reads the 17 MB model from `/sd0/whistle.cact`. P4 only. |
 | `backlight [0..100]` | The panel. The largest continuous draw on this board, and turning it down costs nothing else — the console works at any brightness, including none. Not remembered across a reset. |
 
 ---

@@ -452,6 +452,10 @@ rv9_io_err_t rv9_io_init(void);
 rv9_io_err_t rv9_io_register_filemgr(const rv9_filemgr_t *fm);
 rv9_io_err_t rv9_io_register_driver(const rv9_driver_t *drv);
 
+/* How many drivers and file managers found no room since boot. Zero, or a
+   built-in device is missing; io-test checks it. */
+uint32_t     rv9_io_refused_registrations(void);
+
 /* Bind a descriptor to its manager and driver, creating the device. */
 rv9_io_err_t rv9_io_attach(const rv9_devdesc_t *desc);
 

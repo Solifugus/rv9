@@ -6889,6 +6889,79 @@ Open:
   `/gpio`, and wrong all the same.
 - MIC3 for echo cancellation, and the camera.
 
+## 59. Speech, written down
+
+`/stt0` is Whistle behind a device: write 16 kHz mono samples, setstat
+`RV9_STT_SS_DONE`, read a line of text. The engine is Whistle's portable C,
+vendored in `components/rv9_stt/needle` (Apache-2.0, `whistle.from` says from
+where) with the P4 PIE dot product from Phase 0. It is linked into the
+firmware rather than being a module: the proposal's prototype arrangement,
+and the one a first measurement wanted.
+
+- **No new system call.** A program recognises speech with `open`, `write`,
+  `setstat` and `read`, as it would talk to anything else. `listen` is forty
+  lines of that.
+- **The work happens below RV-9.** Recognising a sentence is seconds of
+  arithmetic, and every RV-9 thread shares one host task: inside a read it
+  would stop the shell, the network and every process. So the engine has a
+  host task of its own, made with a new KAL call,
+  `rv9_task_create_background`, below every RV-9 thread, and the reader's
+  read says "not yet" — which SCF turns into a sleep. The P4 runs FreeRTOS
+  unicore here, so this is priority, not a second processor; the engine
+  gets the time RV-9 does not want.
+- **The model is a file**, `/sd0/whistle.cact`, read on first use into
+  external memory and kept: 17 MB in 4.9 s. It reached the card by `fetch`
+  from a PC over WiFi, 72 s, because the card holds an RBF volume a PC
+  cannot write. The P4 cannot cache-map flash past 16 MB (§12 of the
+  proposal), and the volume is the obvious home anyway.
+
+Measured, "Hello, this is me." from a laptop microphone, 3 s:
+
+| | |
+|---|---|
+| benchmark, bare ESP-IDF, one core | 5.9 s |
+| `/stt0` under RV-9, idle shell | 6.6 s |
+| model load, once per boot | 4.9 s |
+| internal memory, with the model loaded | 68 KB, 48 of it the engine's stack |
+
+Same text every run. The 13% over the benchmark is RV-9 taking its turns
+and the firmware's own work; it has not been looked into.
+
+Two things the engine assumed that an OS does not give it, both found by
+crashing:
+
+- **Internal memory is not all yours.** Three allocations in the matrix
+  code and the MLP's 54 KB scratch asked for internal memory and did not
+  check: the first sentence stored to address zero, and after that fix the
+  second one did. Both now fall back to external memory — the first by a
+  change to `nd_quant_p4.c`, the second through `ND_ALLOC_FAST`, which the
+  engine lets its host define. A forced include (`src/nd_rv9.h`) does that,
+  so the rest of the vendored files stay byte-for-byte.
+- **Its tokenizer wanted 160 KB of internal memory for ever.** Three
+  `calloc`s at load, read only to turn tokens back into text. Another forced
+  include, on that one file, sends them to external memory. Loading the
+  model went from costing 275 KB of internal memory to 19 KB.
+
+Found on the way, and fixed:
+
+- **The driver table was full.** Sixteen slots; `/au0` made seventeen and
+  pushed `ssh` off the end, so 434b58d shipped with SSH logins broken and a
+  single line in the boot log to say so. It is 32 now, refusals are
+  counted, and io-test fails if any happened. The same limit had been hit at
+  nine, which is in the comment above it.
+
+Not yet:
+
+- **The card and the radio share one SDMMC controller**, the card on slot 0
+  and the C6's SDIO link on slot 1. Formatting a 60 GB card held it for 28
+  seconds, the radio's receive pool ran dry, and WiFi stayed down — `netstat`
+  said "up" and nothing answered — until a restart. Downloading the model
+  afterwards, radio and card at once, was fine.
+- Keyword biasing, language choice and the confidence score are in the
+  engine and not reachable through the device.
+- An engine of its own, as a module with an external arena, is the next
+  arrangement after this one.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

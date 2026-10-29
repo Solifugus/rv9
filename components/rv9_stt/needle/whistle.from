@@ -1,0 +1,25 @@
+# Where needle/ came from.
+#
+# Whistle's portable C engine, from the whistle-esp32 repository, Apache-2.0
+# (needle/LICENSE). Vendored for the reason modules/whisker.from gives: an
+# include path into another working tree breaks every clean checkout.
+#
+# Byte-for-byte copies of engine/include/*.h and engine/src/*.c, except
+# nd_quant.c, which is replaced by nd_quant_p4.c: the same file with a P4 PIE
+# path for the 128-element int8 dot product (esp.vmulas.s8.xacc), measured in
+# docs/rv9-voice-modules-design.md §12 at 3.3x the portable C. Upstream has
+# such a path for the S3 only. And ND_QUANT_ALLOC falls back to PSRAM when
+# internal memory is refused: three of its callers did not check, and under
+# RV-9 the first sentence found the internal heap too short and crashed.
+#
+# The model is not here and never will be: 17 MB, fetched to /sd0.
+# Hugging Face Cactus-Compute/whistle, whistle.cact, 16,919,407 bytes.
+#
+# To see whether this copy is current, if you have the upstream:
+#
+#     diff -r components/rv9_stt/needle/include ~/development/esp32/whistle-esp32/engine/include
+
+upstream  = https://github.com/andrisgauracs/whistle-esp32 (engine/)
+commit    = 383e008
+subject   = Show firmware and host errors in the Whistle console (#1)
+vendored  = 2026-10-28

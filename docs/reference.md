@@ -264,6 +264,7 @@ the firmware.
 | `/adc0/N` | `pio` | `adc` | Analogue in. |
 | `/tsens` | `pio` | `tsens` | The die's own temperature. |
 | `/au0` | `scf` | `audio` | Two microphones in, the speaker out, on one duplex bus: 16 kHz frames of two 16-bit little-endian samples both ways — MIC1 and MIC2 in, the left played out. Ask `RV9_AU_GS_FORMAT` rather than assuming it. Reads block until a frame arrives and never split one; writes return when everything is queued. The hardware and the speaker's amplifier run from the first read or write until the last close, and two processes may share it. P4 only: the codecs are found on the bus or the device does not attach. |
+| `/stt0` | `scf` | `stt` | Speech to text: Whistle behind a device. Write 16 kHz mono 16-bit samples, setstat `RV9_STT_SS_DONE`, read one line of text. The read takes about twice the length of the speech and blocks only the reader: the engine runs below every RV-9 thread, on time nobody else wants. A session device: one process at a time. The model is read on first use from `/sd0/whistle.cact` (or `RV9_STT_SS_MODEL`) and stays in external memory. P4 only. **The prototype arrangement** — the engine is linked into the firmware, not a module. |
 | `/touch` | `scf` | `touch` | The touch panel, as a stream of 12-byte events. Reads block; records are never split. The queue is emptied on first open, so a program gets fingers from now rather than a backlog. Only where there is one. **Flashing the P4 leaves the controller not scanning; an ordinary reset does not. Its reset line is not wired, so take the board's power away.** The driver says so when it sees it. |
 | `/i2c0/ADDR` | `ifm` | `i2c` | The two-wire bus. The pins are the board's; the only option is kHz (100). Shared with the touch controller. A register number above `0xff` is sent as two bytes, high first. |
 | `/n0/…` | `nfm` | `net` | TCP, out and in. |
@@ -869,6 +870,9 @@ Relative to `RV9_SS_DRIVER_BASE`, and meaningful only on that driver's paths.
 | `RV9_AU_GS_FORMAT` | +0 | `rv9_audio_format_t`: rate, channels, bits, and how many of the channels a microphone fills and a speaker plays. |
 | `RV9_AU_SS_VOLUME` | +1 | `int32_t` dB, −95 to +32. The speaker. |
 | `RV9_AU_SS_GAIN` | +2 | `uint32_t` dB, 0 to 37. Both microphones; 30 when nobody has said. |
+| `RV9_STT_SS_DONE` | +0 | That was the utterance; recognise it. At least a tenth of a second, or `RV9_IO_ERR_INVAL`. |
+| `RV9_STT_SS_MODEL` | +1 | `const char *` path to the model, before first use. One model per boot. |
+| `RV9_STT_GS_TIMING` | +2 | `rv9_stt_timing_t`: how long the last utterance was, how long it took to encode and decode, and how long reading the model took if that run had to. |
 | `RV9_SVG_SS_ROWS` | +8 | `y0 << 16 \| y1` — the half-open row range to repaint. |
 | `RV9_NET_SS_CONNECT` | +0 | `rv9_net_creds_t`. Saved. |
 | `RV9_NET_SS_DISCONNECT` | +1 | |

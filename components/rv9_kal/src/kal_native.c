@@ -421,6 +421,23 @@ void rv9_task_delay_ms(uint32_t ms)
     }
 }
 
+/* Below the kernel's own host task and everything the host runs, above
+   only its idle task: see rv9/kal.h. */
+rv9_err_t rv9_task_create_background(rv9_task_fn fn, const char *name,
+                                     size_t stack_bytes, void *arg)
+{
+    if (fn == NULL || stack_bytes == 0) return RV9_ERR_INVAL;
+    if (stack_bytes > rv9_heap_available()) return RV9_ERR_NOMEM;
+
+    if (xTaskCreatePinnedToCore((TaskFunction_t)fn, name ? name : "rv9-bg",
+                                (uint32_t)stack_bytes, arg,
+                                tskIDLE_PRIORITY + 1, NULL,
+                                RV9_CORE) != pdPASS) {
+        return RV9_ERR_NOMEM;
+    }
+    return RV9_OK;
+}
+
 rv9_err_t rv9_task_priority_set(rv9_task_t task, int priority)
 {
     /* A real-time task's priority is not RV-9's to change: it sits above

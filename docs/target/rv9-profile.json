@@ -800,6 +800,27 @@
       "driver_relative": 17
     },
     {
+      "name": "RV9_STT_SS_DONE",
+      "value": 256,
+      "direction": "set",
+      "discipline": "stt",
+      "driver_relative": 0
+    },
+    {
+      "name": "RV9_STT_SS_MODEL",
+      "value": 257,
+      "direction": "set",
+      "discipline": "stt",
+      "driver_relative": 1
+    },
+    {
+      "name": "RV9_STT_GS_TIMING",
+      "value": 258,
+      "direction": "get",
+      "discipline": "stt",
+      "driver_relative": 2
+    },
+    {
       "name": "RV9_SVG_SS_ROWS",
       "value": 264,
       "direction": "set",
@@ -944,6 +965,13 @@
     },
     {
       "name": "ssh",
+      "read_rt": false,
+      "write_rt": false,
+      "retains": false,
+      "sessions": true
+    },
+    {
+      "name": "stt",
       "read_rt": false,
       "write_rt": false,
       "retains": false,

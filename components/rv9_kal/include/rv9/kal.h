@@ -126,6 +126,24 @@ rv9_err_t rv9_kal_start(rv9_task_fn fn, const char *name, size_t stack_bytes,
 rv9_err_t rv9_task_create(rv9_task_fn fn, const char *name, size_t stack_bytes,
                           void *arg, int priority, rv9_task_t *out_task);
 
+/*
+ * Work that takes seconds and must not hold anybody up: a host task below
+ * every RV-9 thread, which runs only when none of them wants the processor.
+ *
+ * RV-9's threads share one host task and take turns, so a driver that did
+ * six seconds of arithmetic inside a read would stop the shell, every
+ * other process and the network for six seconds. Done here instead, it is
+ * done in the gaps -- and on a machine mostly waiting for people, the gaps
+ * are most of the time.
+ *
+ * It is not an RV-9 thread. It may take KAL locks, call the I/O manager as
+ * the system (pid 0) and sleep with rv9_task_delay_ms; it may not wait on
+ * an rv9_sem_t, which belongs to RV-9's scheduler. Its stack is internal
+ * memory and checked against the floor. It is not stopped by anything.
+ */
+rv9_err_t rv9_task_create_background(rv9_task_fn fn, const char *name,
+                                     size_t stack_bytes, void *arg);
+
 /* Passing NULL deletes the calling task, which does not return. */
 void      rv9_task_delete(rv9_task_t task);
 

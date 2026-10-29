@@ -36,9 +36,18 @@ static const char *TAG = "rv9-io";
 
 /* Room to grow. These were sized to what existed at the time, and the
    moment a ninth driver appeared its registration failed -- silently,
-   because the caller ignored the error. */
+   because the caller ignored the error.
+
+   Then it happened again at the seventeenth. The caller logged it this
+   time, one line among four hundred at boot, and `ssh` was the driver
+   pushed off the end by `audio`, so nothing failed until somebody tried
+   to log in. A limit that is only ever found by exceeding it needs a test
+   rather than a bigger number, so refusals are counted and io-test checks
+   the count; the bigger number is as well. */
 #define MAX_FILEMGRS 8
-#define MAX_DRIVERS  16
+#define MAX_DRIVERS  32
+
+static uint32_t s_refused_registrations;
 
 static const rv9_filemgr_t *s_filemgrs[MAX_FILEMGRS];
 static const rv9_driver_t  *s_drivers[MAX_DRIVERS];
@@ -98,6 +107,7 @@ rv9_io_err_t rv9_io_register_filemgr(const rv9_filemgr_t *fm)
 
     ESP_LOGE(TAG, "no room for file manager '%s': %d already registered",
              fm->name, MAX_FILEMGRS);
+    s_refused_registrations++;
     return RV9_IO_ERR_NOMEM;
 }
 
@@ -116,7 +126,13 @@ rv9_io_err_t rv9_io_register_driver(const rv9_driver_t *drv)
 
     ESP_LOGE(TAG, "no room for driver '%s': %d already registered",
              drv->name, MAX_DRIVERS);
+    s_refused_registrations++;
     return RV9_IO_ERR_NOMEM;
+}
+
+uint32_t rv9_io_refused_registrations(void)
+{
+    return s_refused_registrations;
 }
 
 static const rv9_filemgr_t *find_filemgr(const char *name)
