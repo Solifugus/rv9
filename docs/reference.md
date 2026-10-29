@@ -1361,8 +1361,12 @@ and only one of those leaves a system running. It is a convention rather than
 a wall: nothing stops ESP-IDF spending the reserve, the point is that RV-9
 does not spend it first.
 
-`RV9_HEAP_FLOOR` is 12,288 bytes by default. Zero disables it, which is how
-RV-9 behaved before phase 4.
+`RV9_HEAP_FLOOR` is 12,288 bytes by default, and **49,152 on the P4**. Zero
+disables it, which is how RV-9 behaved before phase 4. The P4's radio is a
+separate chip behind esp_hosted, whose receive path takes a 1.5 KB buffer per
+frame from this heap and drops the frame when it cannot have one; at 12 KB,
+spending ordinary memory to the floor starved it, and once the link did not
+come back. The figures below are the C5's; on the P4 each is 36 KB higher.
 
 ### Three classes, three floors
 

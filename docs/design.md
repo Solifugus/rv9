@@ -6952,11 +6952,15 @@ Found on the way, and fixed:
 
 Not yet:
 
-- **The card and the radio share one SDMMC controller**, the card on slot 0
-  and the C6's SDIO link on slot 1. Formatting a 60 GB card held it for 28
-  seconds, the radio's receive pool ran dry, and WiFi stayed down — `netstat`
-  said "up" and nothing answered — until a restart. Downloading the model
-  afterwards, radio and card at once, was fine.
+- ~~The card and the radio share one SDMMC controller~~ — that was the first
+  guess, and wrong. WiFi died on the boot that formatted a new card, but the
+  format only delayed boot: it pushed mem-test, which spends ordinary memory
+  to the floor on purpose, into the window where WiFi was associating, and
+  esp_hosted's receive path, which allocates a buffer per frame and drops
+  the frame without one, starved. Reproduced on every boot under ping —
+  "mempool OOM (RX)" 0.4 s into the drain — and gone with the P4's floor at
+  48 KB rather than the C5's 12 (`sdkconfig.defaults.esp32p4`). mem-test was
+  right; the floor was sized for a radio on the die.
 - Keyword biasing, language choice and the confidence score are in the
   engine and not reachable through the device.
 - An engine of its own, as a module with an external arena, is the next

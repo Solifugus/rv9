@@ -309,3 +309,19 @@ CONFIG_ESP_HOST_WIFI_ENABLED=n
 # RV-9's tasks are pinned explicitly; and the kernel's tick hook names its
 # core instead of taking whichever one happened to call.
 CONFIG_FREERTOS_UNICORE=y
+
+# The floor, for this board.
+#
+# 12 KB was sized on the C5, whose radio is on the die and keeps its own
+# buffers. The P4's radio is a separate ESP32-C6 behind esp_hosted, and the
+# host side's receive path takes a ~1.5 KB DMA buffer per frame from this
+# heap -- a queue of 20 -- and when it cannot have one it drops the frame
+# without a word to anyone. mem-test, which spends ordinary memory down to
+# the floor on purpose, showed it: "mempool OOM (RX)" 0.4 s into the
+# drain, every boot, under ping. On the boot where formatting a new card
+# pushed mem-test into the window where WiFi was associating, the link
+# never came back: `netstat` said up and nothing answered until a restart.
+#
+# 48 KB is the receive queue and what transmitting and lwIP want beside it.
+# The P4 has 370 KB free with everything running; the C5 keeps its 12.
+CONFIG_RV9_HEAP_FLOOR=49152
