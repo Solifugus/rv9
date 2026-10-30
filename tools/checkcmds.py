@@ -46,8 +46,10 @@ def main():
                          r"(?![A-Za-z0-9_-])")
         return any(pat.search(sp) for sp in spans)
 
+    # A directory with no build.conf is not built into the store -- see
+    # build_modules.sh -- so it is not a command yet either.
     names = sorted(d for d in os.listdir(MODULES)
-                   if os.path.isdir(os.path.join(MODULES, d))
+                   if os.path.isfile(os.path.join(MODULES, d, "build.conf"))
                    and not d.startswith("desc_"))
 
     missing = [n for n in names if not named(n)]
