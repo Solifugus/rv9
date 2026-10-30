@@ -166,6 +166,7 @@ typedef struct {
     isp_awb_ctlr_t          awb;
     bool                    wbg_on;
     isp_wbg_gain_t          gain;       /* white balance, kept across pictures */
+    int64_t                 awb_at;     /* when it was last measured */
     uint8_t                *frame;      /* FRAME_BYTES, external */
     uint8_t                *out;        /* JPEG_MAX, external */
     size_t                  out_cap;
@@ -305,8 +306,10 @@ static bool awb_start(cam_t *c)
     esp_isp_awb_config_t ac = {
         .sample_point = ISP_AWB_SAMPLE_POINT_1,
         .window = {
-            .top_left  = { WIDTH / 5, HEIGHT / 5 },
-            .btm_right = { WIDTH * 4 / 5 - 1, HEIGHT * 4 / 5 - 1 },
+            /* The middle 60% across and 62% down: each side a multiple of
+               five, which the ISP's 5x5 grid of sub-windows wants. */
+            .top_left  = { 160, 120 },
+            .btm_right = { 639, 519 },
         },
         .white_patch = {
             .luminance        = { 0, 220 * 3 },
@@ -505,7 +508,12 @@ static bool take(cam_t *c)
        picture does not wait again. */
     int64_t settled = c->started_at + (int64_t)SETTLE_MS * 1000;
     while (esp_timer_get_time() < settled) awb_step(c);
-    for (int i = 0; i < 2; i++) awb_step(c);    /* and the light may have changed */
+    /* And the light may have changed -- but not in the 200 ms between two
+       frames of a live view, which these two steps used to cost a third of. */
+    if (esp_timer_get_time() - c->awb_at > 1000 * 1000) {
+        for (int i = 0; i < 2; i++) awb_step(c);
+        c->awb_at = esp_timer_get_time();
+    }
 
     int64_t t0 = esp_timer_get_time();
     c->frame_in = false;

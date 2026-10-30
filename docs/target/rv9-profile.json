@@ -833,6 +833,13 @@
       "direction": "get",
       "discipline": "svgwin",
       "driver_relative": 9
+    },
+    {
+      "name": "RV9_SVG_SS_PIXELS",
+      "value": 266,
+      "direction": "set",
+      "discipline": "svgwin",
+      "driver_relative": 10
     }
   ],
   "rt_safety": {

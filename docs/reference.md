@@ -878,6 +878,7 @@ Relative to `RV9_SS_DRIVER_BASE`, and meaningful only on that driver's paths.
 | `RV9_CAM_SS_QUALITY` | +1 | `uint32_t` 1–100, JPEG only; 80 when nobody has said. |
 | `RV9_CAM_GS_FRAME` | +2 | `rv9_cam_frame_t`, once a read has returned part of the picture: its size in bytes, width, height, format, quality, and how long starting the sensor, taking the frame and compressing it took. `RV9_IO_ERR_BUSY` while a picture is being taken. |
 | `RV9_SVG_SS_ROWS` | +8 | `y0 << 16 \| y1` — the half-open row range to repaint. |
+| `RV9_SVG_SS_PIXELS` | +10 | `rv9_svg_pixels_t`: a rectangle of RGB565 pixels, native order, packed row after row, drawn at `x`,`y` on the window and clipped to it. Copied before the call returns. For pictures, which SVG is the wrong language for. |
 | `RV9_NET_SS_CONNECT` | +0 | `rv9_net_creds_t`. Saved. |
 | `RV9_NET_SS_DISCONNECT` | +1 | |
 | `RV9_NET_GS_STATUS` | +2 | `rv9_net_status_t`. |

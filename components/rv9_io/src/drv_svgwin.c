@@ -1389,6 +1389,41 @@ static rv9_io_err_t svgwin_write(rv9_dev_t *dev, const void *buf, size_t len,
     return RV9_IO_OK;
 }
 
+/*
+ * A rectangle of the caller's pixels, through the band buffer: clipped to
+ * the window a band at a time and swapped there for a panel that wants it,
+ * so the caller's buffer is never written and need not be the panel's
+ * order. See RV9_SVG_SS_PIXELS.
+ */
+static rv9_io_err_t put_pixels(svgwin_t *s, const rv9_svg_pixels_t *p)
+{
+    const uint16_t *px = (const uint16_t *)(uintptr_t)p->px;
+    int x0 = p->x, y0 = p->y, w = p->w, h = p->h;
+    if (px == NULL || w == 0 || h == 0) return RV9_IO_ERR_INVAL;
+
+    int cx0 = x0, cx1 = x0 + w > s->w ? s->w : x0 + w;
+    int cy1 = y0 + h > s->h ? s->h : y0 + h;
+    if (cx0 >= cx1 || y0 >= cy1) return RV9_IO_OK;     /* all outside */
+    int cw = cx1 - cx0;
+
+    rband_t b = { .px = s->band, .w = cw };
+    rv9_lock_acquire(s->lock);
+    rv9_panel_take(s);
+    for (int y = y0; y < cy1; y += BAND_ROWS) {
+        int rows = cy1 - y < BAND_ROWS ? cy1 - y : BAND_ROWS;
+        for (int r = 0; r < rows; r++) {
+            memcpy(s->band + r * cw, px + (size_t)(y - y0 + r) * w,
+                   (size_t)cw * 2);
+        }
+        b.y0 = y;
+        b.rows = rows;
+        if (rv9_panel_swaps_bytes()) rv9_raster_to_panel(&b);
+        rv9_panel_blit(cx0, y, cx1, y + rows, s->band);
+    }
+    rv9_lock_release(s->lock);
+    return RV9_IO_OK;
+}
+
 static rv9_io_err_t svgwin_setstat(rv9_dev_t *dev, uint32_t code, void *arg)
 {
     svgwin_t *s = (svgwin_t *)dev->drv_state;
@@ -1409,6 +1444,7 @@ static rv9_io_err_t svgwin_setstat(rv9_dev_t *dev, uint32_t code, void *arg)
         rv9_lock_release(s->lock);
         return RV9_IO_OK;
     }
+    if (code == RV9_SVG_SS_PIXELS) return put_pixels(s, (const rv9_svg_pixels_t *)arg);
     return RV9_IO_ERR_UNSUPPORTED;
 }
 

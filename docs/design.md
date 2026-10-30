@@ -7067,7 +7067,7 @@ Not yet:
 
 - No colour matrix or gamma: the ISP has both, and the colours are
   plausible without them.
-- Only one size, and no preview on the screen.
+- Only one size.
 
 **White balance**, added after: indoor light came out orange, because the
 sensor's raw colour went through the ISP's demosaic and nothing else. The
@@ -7081,6 +7081,19 @@ replaces. Under an incandescent bulb, from neutral: about twenty frames, to
 red ×0.71 and blue ×1.70, and a ceiling that had been orange is off-white.
 The gains are kept between pictures. A blown-out bulb comes out cyan: its
 pixels were already at full scale, and blue was raised on them anyway.
+
+**On the screen**, added after that: `view`. The window device took only
+SVG, the right language for a gauge and the wrong one for a photograph — a
+frame as `<rect>`s would be megabytes of text parsed once per band — so
+`/w0` gained `RV9_SVG_SS_PIXELS`, a rectangle of RGB565 pixels copied
+through the band buffer, clipped and byte-swapped there for a panel that
+wants it. `view` reads raw frames eight rows at a time and drops one row
+and column in sixteen to fit 800x640 into the panel's 600 rows: nearest
+neighbour, no arithmetic per pixel. Live, 5.6 frames a second, then 8.6
+once white balance was measured once a second rather than before every
+frame — two statistics frames had been a third of each picture. A touch
+on the screen stops it; the terminal cannot be asked whether a key is
+waiting.
 
 ## 9. Migration to a native kernel
 

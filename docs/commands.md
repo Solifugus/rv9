@@ -136,6 +136,7 @@ value.
 | `play [-1] [-v dB] <file>` / `play beep [s]` | Through the speaker. `-1` for a one-channel file, such as `arecord -c 1` makes; `-v` sets the volume first, −95 to +32 dB (the default is −10). `beep` is 440 Hz, and with `rec` running beside it, is how to test the microphones without talking. |
 | `listen [seconds]` / `listen -f <file>` | Speech to text. Beeps, then records MIC2 — the more sensitive capsule — for four seconds by default, hands it to `/stt0`, and prints what Whistle heard and how long it took. `-f` takes a one-channel 16 kHz recording instead. The first use after a restart also reads the 17 MB model from `/sd0/whistle.cact`. P4 only. |
 | `snap [-q 1..100 \| -r] <file>` | Take a picture with the camera and save it: an 800x640 JPEG, quality 80 unless `-q` says, or with `-r` the raw RGB565 pixels (1 MB). Says how big it is and how long starting the camera, taking and compressing took — about 70 ms, 40 ms and 5 ms. P4 only. |
+| `view [seconds]` / `view -1` / `view <file>` | What the camera sees, on the screen: live until the screen is touched (or for that many seconds; 30 with no touch screen), one picture with `-1`, or a picture `snap -r` saved. Scaled to fit — 750x600 on the P4's panel — and about 8.6 frames a second live. P4 only. |
 | `backlight [0..100]` | The panel. The largest continuous draw on this board, and turning it down costs nothing else — the console works at any brightness, including none. Not remembered across a reset. |
 
 ---

@@ -1161,6 +1161,30 @@ typedef struct __attribute__((packed)) {
 
 _Static_assert(sizeof(rv9_svg_limits_t) == 16, "window limits are 16 bytes");
 
+/*
+ * Pixels, for what is not a drawing: a picture from the camera.
+ * setstat, arg is an rv9_svg_pixels_t.
+ *
+ * SVG is the right language for a gauge and the wrong one for a photograph
+ * -- 800x640 pixels as <rect>s would be twenty megabytes of text, parsed
+ * once per band. So the window also takes a rectangle of RGB565 pixels,
+ * native order, `w` x `h` of them packed row after row, and puts them where
+ * it is told. Whatever falls outside the window is dropped.
+ *
+ * They are copied before the call returns, so the buffer is the caller's
+ * again at once. They are not kept: the next document drawn over them, or
+ * the console taking the panel back, is the end of them.
+ */
+#define RV9_SVG_SS_PIXELS     (RV9_SS_DRIVER_BASE + 10)
+
+typedef struct __attribute__((packed)) {
+    uint16_t x, y;          /* top left, in window pixels */
+    uint16_t w, h;
+    uint32_t px;            /* const uint16_t *, as an address */
+} rv9_svg_pixels_t;
+
+_Static_assert(sizeof(rv9_svg_pixels_t) == 12, "window pixels are 12 bytes");
+
 #define RV9_LCD_SS_CLEAR      (RV9_SS_DRIVER_BASE + 0)
 #define RV9_LCD_SS_BRIGHTNESS (RV9_SS_DRIVER_BASE + 1)   /* 0..100 percent */
 
