@@ -1594,6 +1594,7 @@ same quantity.
 | `history` | 16 | Exited processes remembered, so `wait_why` still answers after the fact. |
 | `budget_default` | 32768 | Bytes a process and everything it starts may hold when its manifest says nothing. Sized so a shell can hold its largest ordinary command — `ed`, 17 KB with its statics — with room left. Say `mem_max` to want more. |
 | `budget_ancestors` | 8 | How far up a charge is carried, so a fork bomb is paid for by whoever started it. |
+| `isa` | board | `rv9_sys_limits_t.isa`, from `sysinfo(RV9_SYS_LIMITS)`: instructions beyond the RV32IMAC every module may assume. `RV9_ISA_PIE` is the P4's vector unit. Modules are built once for every board, so one that carries such opcodes asks first; an instruction the CPU lacks is a fault, not a slow path. Reads 0 from firmware older than the field. |
 
 ### Real time
 

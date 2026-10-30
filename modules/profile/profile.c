@@ -68,6 +68,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 
     m_say(env, RV9_STDOUT, "{\n  \"profile\": \"rv9-board\",\n");
     num(env, "  ", "module_abi", l->module_abi, false);
+    num(env, "  ", "isa", l->isa, false);        /* RV9_ISA_* */
 
     m_say(env, RV9_STDOUT, "  \"realtime\": {\n");
     num(env, "    ", "slots", l->rt_slots, false);

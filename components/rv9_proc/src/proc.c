@@ -37,6 +37,7 @@ _Static_assert(RV9_TASK_FAULT_STACK  == RV9_FAULT_STACK,  "ABI drift");
 _Static_assert(RV9_TASK_FAULT_KILLED == RV9_FAULT_KILLED, "ABI drift");
 
 #include "esp_log.h"
+#include "soc/soc_caps.h"
 
 static const char *TAG = "rv9-proc";
 
@@ -1340,6 +1341,9 @@ static int proc_limits_op(void *buf, uint32_t len)
     l.max_paths                = RV9_MAX_PATHS;
     l.rt_reserve               = (uint32_t)rv9_heap_rt_reserve();
     l.budget_default           = PROC_BUDGET_DEFAULT;
+#if SOC_CPU_HAS_PIE
+    l.isa                     |= RV9_ISA_PIE;
+#endif
 
     memcpy(buf, &l, len < sizeof(l) ? len : sizeof(l));
     return 1;

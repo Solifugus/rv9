@@ -27,7 +27,9 @@ THE FILE, all little-endian:
     blob     weights, biases and tables, each 16-byte aligned
 
 Weights in the blob:
-    conv     [cout][k][k][cin] int8, then bias [cout] int32
+    conv     [cout/16][k][k][cin][16] int8 when cout is a multiple of 16
+             (flag F_LANES: ESP-DL's own order), else [cout][k][k][cin];
+             then bias [cout] int32
     dwconv   [k][k][c] int8, then bias [c] int32
     sigmoid  256 int8: y = table[x + 128]
     gap      aux = the float32 bits of 2^(in-out) / (h*w), which ESP-DL
@@ -37,7 +39,8 @@ import struct
 import sys
 
 OP_CONV, OP_DW, OP_GAP, OP_LUT, OP_MUL, OP_UP2, OP_CAT = range(1, 8)
-F_REM = 1      # flags: the conv's output channels are fewer than 16
+F_REM = 1      # flags: the conv's output channels are not a multiple of 16
+F_LANES = 2    # weights kept in ESP-DL's 16-lane order, for the vector unit
 
 
 class T:
@@ -215,11 +218,20 @@ def main():
             assert B['exp'][0] == ein + W['exp'][0]
             ho, wo = (h + 2 * p - k) // s + 1, (w + 2 * p - k) // s + 1
             nb = k * k * cin * (1 if dw else cout)
-            wt = unpack_dw(W['raw'][:nb], k, c) if dw else \
-                unpack_conv(W['raw'][:nb], k, cin, cout)
+            # A conv whose outputs come in sixteens keeps ESP-DL's order:
+            # sixteen output channels side by side is what the P4's vector
+            # unit multiplies, one input at a time. The rest are unpacked.
+            lanes = not dw and cout % 16 == 0
+            if dw:
+                wt = unpack_dw(W['raw'][:nb], k, c)
+            elif lanes:
+                wt = W['raw'][:nb]
+            else:
+                wt = unpack_conv(W['raw'][:nb], k, cin, cout)
             node.update(op=OP_DW if dw else OP_CONV, k=k, stride=s, pad=p,
                         relu=1 if a['activation'] == 'Relu' else 0,
-                        flags=F_REM if cout % 16 else 0,
+                        flags=(F_REM if cout % 16 else 0) |
+                              (F_LANES if lanes else 0),
                         shift=exps[out] - W['exp'][0] - ein,
                         w_off=put(wt), b_off=put(B['raw'][:4 * cout]))
             assert a['activation'] in ('Relu', 'Linear')

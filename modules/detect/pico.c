@@ -17,6 +17,7 @@
 #include "pico.h"
 
 enum { OP_CONV = 1, OP_DW, OP_GAP, OP_LUT, OP_MUL, OP_UP2, OP_CAT };
+#define F_LANES  2      /* conv weights in ESP-DL's [cout/16][k][k][cin][16] */
 
 #define HDR      56
 #define TSZ      12
@@ -109,6 +110,7 @@ int pico_open(pico_t *p, const void *model, uint32_t size)
         return -1;
     if (rd32(m + 4) != 1) return -2;
     p->m = m;
+    p->pie = 0;
     p->n_tensors = rd32(m + 8);
     p->n_nodes   = rd32(m + 12);
     p->arena     = rd32(m + 44);
@@ -146,12 +148,16 @@ void pico_input(const pico_t *p, void *arena, const void *px, int w, int h,
     tinfo_t ti = tinfo(p, 0);
     int8_t *out = (int8_t *)arena + ti.off;
     uint32_t fx = fdiv((uint32_t)w, IN_SIZE), fy = fdiv((uint32_t)h, IN_SIZE);
+    uint16_t col[IN_SIZE];           /* the same 224 columns every row */
+    for (int x = 0; x < IN_SIZE; x++) {
+        int sx = fmul(x, fx, 1);
+        col[x] = (uint16_t)(sx > w - 1 ? w - 1 : sx);
+    }
     for (int y = 0; y < IN_SIZE; y++) {
         int sy = fmul(y, fy, 1);
         if (sy > h - 1) sy = h - 1;
         for (int x = 0; x < IN_SIZE; x++) {
-            int sx = fmul(x, fx, 1);
-            if (sx > w - 1) sx = w - 1;
+            int sx = col[x];
             uint32_t rgb[3];
             if (fmt == PICO_RGB565) {
                 uint32_t v = ((const uint16_t *)px)[sy * w + sx];
@@ -175,14 +181,18 @@ void pico_input(const pico_t *p, void *arena, const void *px, int w, int h,
 
 static void conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                  const int8_t *wt, const uint8_t *bias, int k, int s, int pad,
-                 int shift, int relu)
+                 int shift, int relu, int lanes)
 {
     int cin = ti.c;
     for (int oy = 0; oy < to.h; oy++) {
         for (int ox = 0; ox < to.w; ox++) {
             for (int co = 0; co < to.c; co++) {
                 int32_t acc = (int32_t)rd32(bias + 4 * co);
-                const int8_t *f = wt + co * k * k * cin;
+                /* Lanes: sixteen output channels side by side, so one
+                   channel's weights are every sixteenth byte. */
+                const int8_t *f = lanes ? wt + (co >> 4) * k * k * cin * 16 + (co & 15)
+                                        : wt + co * k * k * cin;
+                int step = lanes ? 16 : 1;
                 for (int ky = 0; ky < k; ky++) {
                     int iy = oy * s - pad + ky;
                     if (iy < 0 || iy >= ti.h) continue;      /* zero padding */
@@ -190,8 +200,8 @@ static void conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                         int ix = ox * s - pad + kx;
                         if (ix < 0 || ix >= ti.w) continue;
                         const int8_t *a = in + (iy * ti.w + ix) * cin;
-                        const int8_t *b = f + (ky * k + kx) * cin;
-                        for (int ci = 0; ci < cin; ci++) acc += a[ci] * b[ci];
+                        const int8_t *b = f + (ky * k + kx) * cin * step;
+                        for (int ci = 0; ci < cin; ci++) acc += a[ci] * b[ci * step];
                     }
                 }
                 int8_t y = sat8(rhe(acc, shift));
@@ -227,6 +237,143 @@ static void dwconv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
     }
 }
 
+#ifdef PICO_PIE
+/*
+ * The P4's vector unit, as ESP-DL drives it (esp-dl dl_esp32p4_s8*.S): the
+ * accumulator QACC holds sixteen 32-bit lanes, one per channel; the bias
+ * is loaded into it, sixteen int8 multiply-adds go in per instruction, and
+ * esp.srcmb shifts, rounds and saturates all sixteen to int8 on the way
+ * out -- rounding by the mode in the unit's CFG register, which is set to
+ * half to even first, as ESP-DL sets it. So the answer is ESP-DL's by
+ * construction rather than by imitation.
+ *
+ * Every 16-byte load here is aligned: channel counts are multiples of 16
+ * on these paths, and the model and arena start on 16 bytes.
+ *
+ * Nothing in here calls the system, and RV-9 switches threads only at
+ * system calls -- which matters, because the context switch does not save
+ * the vector registers. The caller yields between layers.
+ */
+/*
+ * The vector instructions name their general registers in three bits, so
+ * only x8..x15 will do; every operand here is pinned to one of those.
+ */
+static void pie_round_half_even(void)
+{
+    register uint32_t cfg __asm__("a2");
+    __asm__ volatile("esp.movx.r.cfg %0" : "=r"(cfg));
+    cfg = (cfg & ~0xf0u) | (6u << 4);
+    __asm__ volatile("esp.movx.w.cfg %0" :: "r"(cfg));
+}
+
+static inline void pie_bias(const uint8_t *bias)
+{
+    register const uint8_t *b __asm__("a0") = bias;
+    __asm__ volatile("esp.ld.qacc.l.l.128.ip %0, 16\n"
+                     "esp.ld.qacc.l.h.128.ip %0, 16\n"
+                     "esp.ld.qacc.h.l.128.ip %0, 16\n"
+                     "esp.ld.qacc.h.h.128.ip %0, 16\n"
+                     : "+r"(b) :: "memory");
+}
+
+/* QACC to sixteen int8 at `out`: shift, round, saturate, then Relu. */
+static inline void pie_out(int8_t *dst, int shift, int relu)
+{
+    register int     sh   __asm__("a2") = shift;
+    register int     zero __asm__("a3") = 0;
+    register int8_t *out  __asm__("a0") = dst;
+    __asm__ volatile("esp.srcmb.s8.qacc q2, %0, 1" :: "r"(sh));
+    if (relu) __asm__ volatile("esp.vrelu.s8 q2, %0, %0" :: "r"(zero));
+    __asm__ volatile("esp.vst.128.ip q2, %0, 16" : "+r"(out) :: "memory");
+}
+
+#define VSM(l) "esp.vld.128.ip q1, %1, 16\n esp.vsmulas.s8.qacc q1, q0, " #l "\n"
+
+static void pie_conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
+                     const int8_t *wt, const uint8_t *bias, int k, int s, int pad,
+                     int shift, int relu)
+{
+    int cin = ti.c, groups = to.c / 16;
+    pie_round_half_even();
+    for (int oy = 0; oy < to.h; oy++) {
+        for (int ox = 0; ox < to.w; ox++) {
+            for (int g = 0; g < groups; g++) {
+                pie_bias(bias + g * 64);
+                const int8_t *f = wt + g * k * k * cin * 16;
+                for (int ky = 0; ky < k; ky++) {
+                    int iy = oy * s - pad + ky;
+                    if (iy < 0 || iy >= ti.h) continue;
+                    for (int kx = 0; kx < k; kx++) {
+                        int ix = ox * s - pad + kx;
+                        if (ix < 0 || ix >= ti.w) continue;
+                        register const int8_t *a __asm__("a0") =
+                            in + (iy * ti.w + ix) * cin;
+                        register const int8_t *b __asm__("a1") =
+                            f + (ky * k + kx) * cin * 16;
+                        if ((cin & 15) == 0) {
+                            /* Sixteen inputs at once, each times a vector
+                               of sixteen output channels' weights. */
+                            for (int c = 0; c < cin; c += 16) {
+                                __asm__ volatile(
+                                    "esp.vld.128.ip q0, %0, 16\n"
+                                    VSM(0) VSM(1) VSM(2) VSM(3) VSM(4) VSM(5)
+                                    VSM(6) VSM(7) VSM(8) VSM(9) VSM(10) VSM(11)
+                                    VSM(12) VSM(13) VSM(14) VSM(15)
+                                    : "+r"(a), "+r"(b) :: "memory");
+                            }
+                        } else {
+                            /* The first layer's three colours: one input,
+                               broadcast, at a time. */
+                            for (int c = 0; c < cin; c++) {
+                                __asm__ volatile(
+                                    "esp.vldbc.8.ip q0, %0, 1\n"
+                                    "esp.vld.128.ip q1, %1, 16\n"
+                                    "esp.vmulas.s8.qacc q0, q1\n"
+                                    : "+r"(a), "+r"(b) :: "memory");
+                            }
+                        }
+                    }
+                }
+                pie_out(out + (oy * to.w + ox) * to.c + g * 16, shift, relu);
+            }
+        }
+    }
+}
+
+static void pie_dwconv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
+                       const int8_t *wt, const uint8_t *bias, int k, int s,
+                       int pad, int shift, int relu)
+{
+    int c = ti.c;
+    pie_round_half_even();
+    for (int oy = 0; oy < to.h; oy++) {
+        for (int ox = 0; ox < to.w; ox++) {
+            for (int g = 0; g < c; g += 16) {
+                pie_bias(bias + g * 4);
+                for (int ky = 0; ky < k; ky++) {
+                    int iy = oy * s - pad + ky;
+                    if (iy < 0 || iy >= ti.h) continue;
+                    for (int kx = 0; kx < k; kx++) {
+                        int ix = ox * s - pad + kx;
+                        if (ix < 0 || ix >= ti.w) continue;
+                        register const int8_t *a __asm__("a0") =
+                            in + (iy * ti.w + ix) * c + g;
+                        register const int8_t *b __asm__("a1") =
+                            wt + (ky * k + kx) * c + g;
+                        __asm__ volatile(
+                            "esp.vld.128.ip q0, %0, 16\n"
+                            "esp.vld.128.ip q1, %1, 16\n"
+                            "esp.vmulas.s8.qacc q0, q1\n"
+                            : "+r"(a), "+r"(b) :: "memory");
+                    }
+                }
+                pie_out(out + (oy * to.w + ox) * c + g, shift, relu);
+            }
+        }
+    }
+}
+#endif
+
 void pico_node(const pico_t *p, void *arena, uint32_t i)
 {
     const uint8_t *n = p->nodes + i * NSZ;
@@ -245,9 +392,22 @@ void pico_node(const pico_t *p, void *arena, uint32_t i)
 
     switch (op) {
     case OP_CONV:
-        conv(x, t0, y, to, (const int8_t *)w, b, k, s, pad, shift, relu);
+#ifdef PICO_PIE
+        if (p->pie && (n[5] & F_LANES)) {
+            pie_conv(x, t0, y, to, (const int8_t *)w, b, k, s, pad, shift, relu);
+            break;
+        }
+#endif
+        conv(x, t0, y, to, (const int8_t *)w, b, k, s, pad, shift, relu,
+             n[5] & F_LANES);
         break;
     case OP_DW:
+#ifdef PICO_PIE
+        if (p->pie) {
+            pie_dwconv(x, t0, y, to, (const int8_t *)w, b, k, s, pad, shift, relu);
+            break;
+        }
+#endif
         dwconv(x, t0, y, to, (const int8_t *)w, b, k, s, pad, shift, relu);
         break;
     case OP_GAP: {
@@ -423,4 +583,19 @@ int pico_run(const pico_t *p, void *arena, const void *px, int w, int h,
     pico_input(p, arena, px, w, h, fmt);
     for (uint32_t i = 0; i < p->n_nodes; i++) pico_node(p, arena, i);
     return pico_post(p, arena, w, h, out, max);
+}
+
+uint32_t pico_hash(const pico_t *p, const void *arena)
+{
+    uint32_t h = 2166136261u;                /* FNV-1a */
+    for (int k = 0; k < 6; k++) {
+        int th, tw, tc;
+        const int8_t *d = pico_tensor(p, arena, rd32(p->m + 20 + 4 * k),
+                                      &th, &tw, &tc, 0);
+        for (int i = 0; i < th * tw * tc; i++) {
+            h ^= (uint8_t)d[i];
+            h *= 16777619u;
+        }
+    }
+    return h;
 }

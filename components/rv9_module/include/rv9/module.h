@@ -1449,7 +1449,20 @@ typedef struct __attribute__((packed)) {
     uint32_t max_paths;
     uint32_t rt_reserve;       /* above the floor, for real-time work only */
     uint32_t budget_default;   /* a process's budget when it declares none */
+    uint32_t isa;              /* RV9_ISA_*: what this CPU has beyond a module's baseline */
 } rv9_sys_limits_t;
+
+/*
+ * Instructions beyond RV32IMAC, which is all a module may assume.
+ *
+ * Modules are built once for every board, so a module that has code for
+ * an extension carries it everywhere and must ask before running it -- an
+ * instruction the CPU lacks is a fault, not a slow path. `detect` is the
+ * first: its layers use the P4's vector unit when this says there is one
+ * and plain C when not. An older firmware fills fewer bytes and the field
+ * reads 0, which is the right answer for it to give.
+ */
+#define RV9_ISA_PIE   (1u << 0)   /* Espressif's vector unit (esp.* opcodes) */
 
 /*
  * Who owns what.

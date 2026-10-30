@@ -7095,6 +7095,57 @@ frame — two statistics frames had been a third of each picture. A touch
 on the screen stops it; the terminal cannot be asked whether a key is
 waiting.
 
+## 62. Seeing people, from the card
+
+`detect` finds the people in front of the camera. The model is Espressif's
+pedestrian detector (esp-dl `pedestrian_detect_pico_s8_v1`, MIT), and none
+of it is in the firmware: the program is a module, its model a file on
+`/sd0`, and both cost nothing until somebody runs them.
+
+**Why not ESP-DL.** It is C++ with an allocator, a FlatBuffers loader and
+its own runtime, and linked into a test program for this board it made a
+3.7 MB image. A module has no C library and no floating point. So the
+detector is rewritten: `tools/mkpico.py` turns the `.espdl` file into a flat
+table — 114 layers in order, weights unpacked where plain C wants them and
+left in ESP-DL's 16-lane order where the vector unit does, and a 539 KB
+activation arena planned ahead — and `modules/detect/pico.c` runs it, in
+integers.
+
+**Bit-exact, and shown to be.** The arithmetic was read out of ESP-DL's
+source: requantization rounds half to even on the P4 (its plain C path
+elsewhere rounds half up — a different answer at every exact half), and
+the one float in the network, the average pool's `sum * 2^k * (float)(1/n)`,
+is reproduced bit for bit in integers. Then ESP-DL itself was run on the
+P4 — a separate program, flashed over RV-9's program area only, given the
+same raw pixels — and every byte of its six output tensors matched ours,
+from RGB888 and from the camera's RGB565. Espressif's README scores
+differed first; that was their JPEG decoder, not the arithmetic.
+
+**The vector unit, safely.** Modules are built once for every board, so
+`detect` carries the P4's `esp.*` opcodes to the C3 and C5 too. It asks
+first: `rv9_sys_limits_t` gained `isa`, and `RV9_ISA_PIE` turns the vector
+kernels on. They load the bias into the accumulator and let `esp.srcmb`
+round, half to even, as ESP-DL does — exact by construction. RV-9 switches
+threads only at system calls and does not save the vector registers, so the
+kernels make none, and `detect` yields between layers.
+
+| a picture | |
+|---|---|
+| plain C, `-Os` | 2.65 s |
+| plain C, `-O2` | 2.04 s |
+| vector unit | 154 ms (129 ms of layers) |
+| ESP-DL, for comparison | 55 ms |
+
+All three of ours print the same hash of the output tensors. The rest of
+the gap to ESP-DL is in the kernels — ESP-DL fuses its loads into the
+multiply-adds and loops in hardware — and in the few layers still in C.
+
+Found on the way: a module cannot have 64-bit division, shifts or
+`__builtin_clzll` without libgcc, nor struct copies without `memcpy`, so
+`modules/detect/rt.c` supplies them on 32-bit halves; `build.conf` gained
+`opt` and `cflags`; and a directory with source but no `build.conf` is
+skipped rather than linked into an empty module.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

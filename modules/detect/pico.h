@@ -26,7 +26,17 @@ typedef struct {
     const uint8_t *m;           /* the model file */
     const uint8_t *tensors, *nodes, *blob;
     uint32_t n_tensors, n_nodes, arena;
+    int pie;                    /* use the P4's vector unit: see below */
 } pico_t;
+
+/*
+ * The P4's vector unit. pico_open leaves it off; a caller that knows the
+ * CPU has one (RV9_ISA_PIE) turns it on. Only a build with PICO_PIE has the
+ * code at all, and the answers are the same either way: the vector kernels
+ * round in the hardware exactly as ESP-DL has it do, half to even.
+ *
+ * The model and the arena must be 16-byte aligned for it.
+ */
 
 /* 0, or negative if this is not a model file this engine reads. */
 int pico_open(pico_t *p, const void *model, uint32_t size);
@@ -50,3 +60,7 @@ int  pico_post(const pico_t *p, void *arena, int w, int h, pico_box_t *out,
 /* Tensor t: where it is in the arena and what shape. */
 const int8_t *pico_tensor(const pico_t *p, const void *arena, uint32_t t,
                           int *h, int *w, int *c, int *exp);
+
+/* A hash of the six output tensors, after a run: the same number on the
+   board and on a PC means the same bytes, without moving 34 KB to show it. */
+uint32_t pico_hash(const pico_t *p, const void *arena);

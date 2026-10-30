@@ -119,10 +119,20 @@ for dir in "$ROOT"/modules/*/; do
     publishes=""        # space separated cells it writes, e.g. "/pub0/CONTROL"
     watches=""          # space separated cells it reads
     mandatory=""        # space separated key names, e.g. "heap_max class"
+    opt=""              # e.g. O2: arithmetic that is the point of the
+                        # module, where -Os costs more than bytes. Not a
+                        # manifest key; it changes only how it is built.
+    cflags=""           # more compiler flags, e.g. an -march with an
+                        # extension. Such a module carries those opcodes
+                        # to every board and must ask RV9_ISA_* first.
 
     [[ -f "$dir/build.conf" ]] && source "$dir/build.conf"
 
-    "$CC" "${CFLAGS[@]}" "${LDFLAGS[@]}" -o "$OUT/$name.elf" "${srcs[@]}"
+    MODFLAGS=("${CFLAGS[@]}")
+    [[ -n "$opt" ]] && MODFLAGS+=("-$opt")
+    [[ -n "$cflags" ]] && read -ra extra <<< "$cflags" && MODFLAGS+=("${extra[@]}")
+
+    "$CC" "${MODFLAGS[@]}" "${LDFLAGS[@]}" -o "$OUT/$name.elf" "${srcs[@]}"
     "$OBJCOPY" -O binary "$OUT/$name.elf" "$OUT/$name.bin"
 
     # Prove position independence instead of assuming it.
@@ -132,7 +142,7 @@ for dir in "$ROOT"/modules/*/; do
     # linked; anything holding an absolute address differs. This catches the
     # constructs that quietly break the loader -- pointer tables built from
     # a switch over string literals being the one that actually bit us.
-    "$CC" "${CFLAGS[@]}" "${LDFLAGS[@]}" "${PROBE_BASE[@]}" \
+    "$CC" "${MODFLAGS[@]}" "${LDFLAGS[@]}" "${PROBE_BASE[@]}" \
         -o "$OUT/$name.probe.elf" "${srcs[@]}"
     "$OBJCOPY" -O binary "$OUT/$name.probe.elf" "$OUT/$name.probe.bin"
 

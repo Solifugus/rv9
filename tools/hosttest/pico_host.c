@@ -112,6 +112,7 @@ int main(int argc, char **argv)
         n = pico_run(&p, arena, in, w, h, fmt, b, 10);
     }
 
+    printf("outputs hash %08x\n", pico_hash(&p, arena));
     for (int i = 0; i < n; i++) {
         printf("[score: %f, x1: %d, y1: %d, x2: %d, y2: %d]\n",
                b[i].score / 65536.0, b[i].x1, b[i].y1, b[i].x2, b[i].y2);
