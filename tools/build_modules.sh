@@ -78,6 +78,14 @@ for dir in "$ROOT"/modules/*/; do
     srcs=("$dir"*.c)
     [[ ${#srcs[@]} -gt 0 ]] || continue
 
+    # Source with no build.conf is not a module yet -- modules/detect held
+    # only its engine, built and checked on a PC, before it had a program
+    # around it. Linked anyway, it was an empty blob with no entry point.
+    if [[ ! -f "$dir/build.conf" ]]; then
+        echo "  ($name has no build.conf: not a module yet)"
+        continue
+    fi
+
     # Per-module build knobs live in the module's own build.conf.
     static_size=0
     stack_size=0        # 0 lets the loader decide (PROC_DEFAULT_STACK)
