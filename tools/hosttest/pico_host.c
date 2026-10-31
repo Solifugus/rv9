@@ -3,6 +3,7 @@
  *
  *   cc -O2 -I modules/detect tools/hosttest/pico_host.c modules/detect/pico.c
  *   ./a.out model.rv9m picture.ppm [boxed.ppm] [dump-dir]
+ *   ./a.out face1.rv9m face2.rv9m picture.ppm [boxed.ppm]
  *
  * Prints what it found in ESP-DL's own format, so the lines can be put
  * beside the ones in Espressif's README; draws the boxes on a copy of the
@@ -65,21 +66,41 @@ static void box(uint8_t *px, int w, int h, const pico_box_t *b)
     }
 }
 
+static void face_points(uint8_t *px, int w, int h, const pico_face_t *f)
+{
+    for (int k = 0; k < 5; k++)
+        for (int dy = -2; dy <= 2; dy++)
+            for (int dx = -2; dx <= 2; dx++) {
+                int x = f->pt[2 * k] + dx, y = f->pt[2 * k + 1] + dy;
+                if (x >= 0 && x < w && y >= 0 && y < h)
+                    memcpy(px + (y * w + x) * 3, "\xff\x30\x30", 3);
+            }
+}
+
+static pico_t open_model(const char *path)
+{
+    long size;
+    void *m = slurp(path, &size);
+    pico_t p;
+    int rc = pico_open(&p, m, (uint32_t)size);
+    if (rc) { fprintf(stderr, "%s: not a model (%d)\n", path, rc); exit(1); }
+    return p;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s model.rv9m picture.ppm [boxed.ppm] [dump-dir]\n",
-                argv[0]);
+        fprintf(stderr, "usage: %s model.rv9m [face2.rv9m] picture.ppm "
+                        "[boxed.ppm] [dump-dir]\n", argv[0]);
         return 2;
     }
-    long msize;
-    void *model = slurp(argv[1], &msize);
-    pico_t p;
-    int rc = pico_open(&p, model, (uint32_t)msize);
-    if (rc) { fprintf(stderr, "not a model (%d)\n", rc); return 1; }
+    pico_t p = open_model(argv[1]), p2;
+    int face = p.kind == PICO_KIND_FACE1;
+    int a = 2;
+    if (face) p2 = open_model(argv[a++]);
 
     int w, h;
-    uint8_t *px = read_ppm(argv[2], &w, &h);
+    uint8_t *px = read_ppm(argv[a], &w, &h);
     const void *in = px;
     int fmt = PICO_RGB888;
     if (getenv("PICO_565")) {
@@ -90,36 +111,65 @@ int main(int argc, char **argv)
         in = p16;
         fmt = PICO_RGB565;
     }
+    const char *boxed = argc > a + 1 ? argv[a + 1] : NULL;
+    const char *dump  = argc > a + 2 ? argv[a + 2] : NULL;
 
-    void *arena = calloc(1, pico_arena_bytes(&p));
-    pico_box_t b[10];
-    int n;
-    if (argc > 4) {
-        char name[512];
+    uint32_t asize = pico_arena_bytes(&p);
+    if (face && pico_arena_bytes(&p2) > asize) asize = pico_arena_bytes(&p2);
+    void *arena = calloc(1, asize);
+
+    if (face) {
+        pico_face_t f[10];
+        int n = pico_faces(&p, &p2, arena, in, w, h, fmt, f, 10, NULL);
+        /* The first stage again, alone, for its hash and its candidates. */
         pico_input(&p, arena, in, w, h, fmt);
-        for (uint32_t i = 0; i < p.n_nodes; i++) {
-            pico_node(&p, arena, i);
-            uint32_t t = i + 1;          /* node i writes tensor i + 1 */
-            int th, tw, tc, te;
-            const int8_t *d = pico_tensor(&p, arena, t, &th, &tw, &tc, &te);
-            snprintf(name, sizeof(name), "%s/t%03u.bin", argv[4], t);
-            FILE *f = fopen(name, "wb");
-            fwrite(d, 1, (size_t)th * tw * tc, f);
-            fclose(f);
+        pico_layers(&p, arena);
+        printf("stage 1 outputs hash %08x\n", pico_hash(&p, arena));
+        pico_face_t c[10];
+        int nc = pico_msr_post(&p, arena, w, h, c, 10);
+        for (int i = 0; i < nc; i++)
+            printf("candidate [score: %f, x1: %d, y1: %d, x2: %d, y2: %d]\n",
+                   c[i].box.score / 65536.0, c[i].box.x1, c[i].box.y1,
+                   c[i].box.x2, c[i].box.y2);
+        for (int i = 0; i < n; i++) {
+            printf("[score: %f, x1: %d, y1: %d, x2: %d, y2: %d] points",
+                   f[i].box.score / 65536.0, f[i].box.x1, f[i].box.y1,
+                   f[i].box.x2, f[i].box.y2);
+            for (int k = 0; k < 10; k++) printf(" %d", f[i].pt[k]);
+            printf("\n");
+            box(px, w, h, &f[i].box);
+            face_points(px, w, h, &f[i]);
         }
-        n = pico_post(&p, arena, w, h, b, 10);
     } else {
-        n = pico_run(&p, arena, in, w, h, fmt, b, 10);
+        pico_box_t b[10];
+        int n;
+        if (dump) {
+            char name[512];
+            pico_input(&p, arena, in, w, h, fmt);
+            for (uint32_t i = 0; i < p.n_nodes; i++) {
+                pico_node(&p, arena, i);
+                const uint8_t *nd = p.nodes + i * 32;
+                uint32_t t = nd[16] | nd[17] << 8;
+                int th, tw, tc, te;
+                const int8_t *d = pico_tensor(&p, arena, t, &th, &tw, &tc, &te);
+                snprintf(name, sizeof(name), "%s/t%03u.bin", dump, t);
+                FILE *f = fopen(name, "wb");
+                fwrite(d, 1, (size_t)th * tw * tc, f);
+                fclose(f);
+            }
+            n = pico_post(&p, arena, w, h, b, 10);
+        } else {
+            n = pico_run(&p, arena, in, w, h, fmt, b, 10);
+        }
+        printf("outputs hash %08x\n", pico_hash(&p, arena));
+        for (int i = 0; i < n; i++) {
+            printf("[score: %f, x1: %d, y1: %d, x2: %d, y2: %d]\n",
+                   b[i].score / 65536.0, b[i].x1, b[i].y1, b[i].x2, b[i].y2);
+            box(px, w, h, &b[i]);
+        }
     }
-
-    printf("outputs hash %08x\n", pico_hash(&p, arena));
-    for (int i = 0; i < n; i++) {
-        printf("[score: %f, x1: %d, y1: %d, x2: %d, y2: %d]\n",
-               b[i].score / 65536.0, b[i].x1, b[i].y1, b[i].x2, b[i].y2);
-        box(px, w, h, &b[i]);
-    }
-    if (argc > 3) {
-        FILE *f = fopen(argv[3], "wb");
+    if (boxed) {
+        FILE *f = fopen(boxed, "wb");
         fprintf(f, "P6 %d %d 255\n", w, h);
         fwrite(px, 3, (size_t)w * h, f);
         fclose(f);

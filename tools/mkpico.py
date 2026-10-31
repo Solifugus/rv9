@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-Turn Espressif's pedestrian detector into a file `detect` can read.
+Turn Espressif's detectors into files `detect` can read.
 
     tools/mkpico.py pedestrian_detect_pico_s8_v1.espdl /tmp/pico.rv9m
+    tools/mkpico.py human_face_detect_msr_s8_v1.espdl  /tmp/face1.rv9m
+    tools/mkpico.py human_face_detect_mnp_s8_v1.espdl  /tmp/face2.rv9m
+
+Which of the three a file is follows from its outputs, and is written into
+it, so the engine knows how to read the answer.
 
 The .espdl file is a FlatBuffers graph meant for ESP-DL's C++ loader. RV-9's
 engine is a freestanding module with no FlatBuffers, no allocator and no
@@ -14,31 +19,39 @@ floating point, so everything that can be decided once is decided here:
   - every activation tensor is given an offset in one arena, planned from
     when each tensor is last read, so the engine never allocates.
 
-The model itself is Espressif's (esp-dl, models/pedestrian_detect, MIT).
-This changes its container, not one weight.
+The models are Espressif's (esp-dl, models/pedestrian_detect and
+models/human_face_detect, MIT). This changes their container, not one
+weight.
 
-THE FILE, all little-endian:
+THE FILE, version 2, all little-endian:
 
-    header   magic "RV9M", version, tensors, nodes, input, outputs[6],
-             arena bytes, blob bytes, 0                           (56 bytes)
+    header   magic "RV9M", version, tensors, nodes, input tensor,
+             kind (KIND_*), input h, input w, flags (FL_BGR),
+             outputs, output tensors[8], arena bytes, blob bytes  (80 bytes)
     tensor   h, w, c (u16), exp (i16), arena offset (u32)          (12 each)
-    node     op, relu, k, stride, pad, flags (u8), shift (i8), 0,
-             in0, in1, out (u16), 0, w_off, b_off, aux, 0 (u32)    (32 each)
+    node     op, relu, k, stride, pad top, bottom, left, right,
+             flags, shift (i8), 0, 0, in0, in1, out (u16), 0,
+             w_off, b_off (NONE: no bias), aux (u32)               (32 each)
     blob     weights, biases and tables, each 16-byte aligned
 
 Weights in the blob:
     conv     [cout/16][k][k][cin][16] int8 when cout is a multiple of 16
              (flag F_LANES: ESP-DL's own order), else [cout][k][k][cin];
-             then bias [cout] int32
-    dwconv   [k][k][c] int8, then bias [c] int32
+             then bias [cout] int32, if it has one
+    dwconv   [k][k][c] int8, then bias [c] int32 if any
     sigmoid  256 int8: y = table[x + 128]
+    prelu    alpha [c] int8; shift = the negative side's right shift,
+             aux = the positive side's left shift
     gap      aux = the float32 bits of 2^(in-out) / (h*w), which ESP-DL
              multiplies by in float; the engine reproduces that exactly
 """
 import struct
 import sys
 
-OP_CONV, OP_DW, OP_GAP, OP_LUT, OP_MUL, OP_UP2, OP_CAT = range(1, 8)
+OP_CONV, OP_DW, OP_GAP, OP_LUT, OP_MUL, OP_UP2, OP_CAT, OP_PRELU = range(1, 9)
+KIND_PICO, KIND_MSR, KIND_MNP = 1, 2, 3
+FL_BGR = 1     # header flags: the model wants blue first
+NONE = 0xffffffff
 F_REM = 1      # flags: the conv's output channels are not a multiple of 16
 F_LANES = 2    # weights kept in ESP-DL's 16-lane order, for the vector unit
 
@@ -144,16 +157,29 @@ def unpack_conv(raw, k, cin, cout):
 
 
 def unpack_dw(raw, k, c):
-    """ESP-DL's depthwise packing, [c/16][k][k][16], to [k][k][c]."""
+    """ESP-DL's depthwise packing to [k][k][c]: whole groups of sixteen
+    channels as [c/16][k][k][16], then what is left as [k][k][rem]."""
+    full, rem = c // 16 * 16, c % 16
     out = bytearray(k * k * c)
     for ch in range(c):
         for t in range(k * k):
-            out[t * c + ch] = raw[((ch // 16) * k * k + t) * 16 + ch % 16]
+            if ch < full:
+                src = ((ch // 16) * k * k + t) * 16 + ch % 16
+            else:
+                src = full * k * k + t * rem + (ch - full)
+            out[t * c + ch] = raw[src]
     return bytes(out)
 
 
 def f32_bits(x):
     return struct.unpack('<I', struct.pack('<f', x))[0]
+
+
+KINDS = {
+    KIND_PICO: ('score0', 'bbox0', 'score1', 'bbox1', 'score2', 'bbox2'),
+    KIND_MSR:  ('score0', 'box0', 'score1', 'box1'),
+    KIND_MNP:  ('score', 'box', 'landmark'),
+}
 
 
 def main():
@@ -177,6 +203,20 @@ def main():
         if e:
             exps[v.string(0)] = e[0]
 
+    graph_outs = [v.string(0) for v in g.tables(5)]
+    kind = next((k for k, o in KINDS.items() if set(o) == set(graph_outs)),
+                None)
+    if kind is None and set(KINDS[KIND_MSR]) <= set(graph_outs):
+        kind = KIND_MSR          # its landmark outputs are never read
+    if kind is None:
+        sys.exit('not a detector this knows: outputs %s' % graph_outs)
+    # Size and channel order, which the file does not say: Espressif's
+    # wrappers do (models/*/...cpp), and these are theirs.
+    in_h, in_w, flags = {KIND_PICO: (224, 224, 0),
+                         KIND_MSR: (120, 160, FL_BGR),
+                         KIND_MNP: (48, 48, FL_BGR)}[kind]
+    in_name = g.tables(4)[0].string(0)
+
     names = {}                  # tensor name -> index
     tensors = []                # [h, w, c, exp]
 
@@ -185,7 +225,7 @@ def main():
         tensors.append([h, w, c, exps[name]])
         return names[name]
 
-    tensor('input', 224, 224, 3)
+    tensor(in_name, in_h, in_w, 3)
     blob = bytearray()
 
     def put(data):
@@ -195,28 +235,41 @@ def main():
         blob.extend(data)
         return off
 
+    # Nodes nothing reads -- MSR's landmark heads -- are left out.
+    nodes_all = g.tables(0)
+    needed = set(KINDS[kind])
+    for n in reversed(nodes_all):
+        if n.strings(1)[0] in needed:
+            needed.update(x for x in n.strings(0) if x)
+
     nodes = []
-    for n in g.tables(0):
+    for n in nodes_all:
         op, a = n.string(3), attrs(n)
         ins = [x for x in n.strings(0) if x]
         out = n.strings(1)[0]
+        if out not in needed:
+            continue
         src = [names[x] for x in ins if x in names]
         h, w, c = tensors[src[0]][:3]
         ein = tensors[src[0]][3]
-        node = dict(op=0, relu=0, k=0, stride=0, pad=0, flags=0, shift=0,
-                    in0=src[0], in1=src[1] if len(src) > 1 else 0xffff,
-                    w_off=0, b_off=0, aux=0)
+        node = dict(op=0, relu=0, k=0, stride=0, pads=(0, 0, 0, 0), flags=0,
+                    shift=0, in0=src[0], in1=src[1] if len(src) > 1 else 0xffff,
+                    w_off=0, b_off=NONE, aux=0)
         if op == 'Conv':
-            W, B = inits[ins[1]], inits[ins[2]]
+            W = inits[ins[1]]
+            B = inits[ins[2]] if len(ins) > 2 else None
             k, cin = a['kernel_shape'][0], c
-            s, p = a['strides'][0], a['pads'][0]
+            s = a['strides'][0]
+            # ONNX order is top, left, bottom, right.
+            pt, pl, pb, pr = a['pads']
             assert a['kernel_shape'][0] == a['kernel_shape'][1]
-            assert len(set(a['pads'])) == 1 and a['strides'][0] == a['strides'][1]
+            assert a['strides'][0] == a['strides'][1]
             dw = a['group'] != 1
+            assert not dw or a['group'] == c
             cout = c if dw else W['dims'][3]
             assert W['dims'][:3] == ([k, k, c] if dw else [k, k, cin])
-            assert B['exp'][0] == ein + W['exp'][0]
-            ho, wo = (h + 2 * p - k) // s + 1, (w + 2 * p - k) // s + 1
+            assert B is None or B['exp'][0] == ein + W['exp'][0]
+            ho, wo = (h + pt + pb - k) // s + 1, (w + pl + pr - k) // s + 1
             nb = k * k * cin * (1 if dw else cout)
             # A conv whose outputs come in sixteens keeps ESP-DL's order:
             # sixteen output channels side by side is what the P4's vector
@@ -228,15 +281,25 @@ def main():
                 wt = W['raw'][:nb]
             else:
                 wt = unpack_conv(W['raw'][:nb], k, cin, cout)
-            node.update(op=OP_DW if dw else OP_CONV, k=k, stride=s, pad=p,
+            assert a['activation'] in ('Relu', 'Linear')
+            node.update(op=OP_DW if dw else OP_CONV, k=k, stride=s,
+                        pads=(pt, pb, pl, pr),
                         relu=1 if a['activation'] == 'Relu' else 0,
                         flags=(F_REM if cout % 16 else 0) |
                               (F_LANES if lanes else 0),
                         shift=exps[out] - W['exp'][0] - ein,
-                        w_off=put(wt), b_off=put(B['raw'][:4 * cout]))
-            assert a['activation'] in ('Relu', 'Linear')
+                        w_off=put(wt),
+                        b_off=put(B['raw'][:4 * cout]) if B else NONE)
             assert node['shift'] > 0
             o = tensor(out, ho, wo, cout)
+        elif op == 'PRelu':
+            A = inits[ins[1]]
+            assert A['dims'][0] == c and A['dt'] == 3
+            neg = exps[out] - ein - A['exp'][0]
+            assert neg > 0 and ein >= exps[out]
+            node.update(op=OP_PRELU, shift=neg, aux=ein - exps[out],
+                        w_off=put(A['raw'][:c]))
+            o = tensor(out, h, w, c)
         elif op == 'GlobalAveragePool':
             node['op'] = OP_GAP
             # As ESP-DL computes it: 2^in * (float)(1/(h*w)) * 2^-out, each
@@ -262,18 +325,27 @@ def main():
             node.update(op=OP_UP2)
             o = tensor(out, 2 * h, 2 * w, c)
         elif op == 'Concat':
-            t1 = tensors[src[1]]
-            assert a['axis'] == 3 and len(src) == 2
-            assert ein == t1[3] == exps[out] and (h, w) == tuple(t1[:2])
-            node.update(op=OP_CAT)
-            o = tensor(out, h, w, c + t1[2])
+            # Any number of inputs: chained in pairs, the last one writing
+            # the real output. Exponents must agree; ESP-DL never rescales.
+            assert a['axis'] == 3
+            for x in src:
+                assert tensors[x][3] == exps[out] and tuple(tensors[x][:2]) == (h, w)
+            acc = src[0]
+            for j, x in enumerate(src[1:]):
+                last = j == len(src) - 2
+                cc = tensors[acc][2] + tensors[x][2]
+                tname = out if last else '%s#cat%d' % (out, j)
+                exps.setdefault(tname, exps[out])
+                t_ = tensor(tname, h, w, cc)
+                nodes.append(dict(node, op=OP_CAT, in0=acc, in1=x, out=t_))
+                acc = t_
+            continue
         else:
             sys.exit('unknown op ' + op)
         node['out'] = o
         nodes.append(node)
 
-    outs = [names[x] for x in ('score0', 'bbox0', 'score1', 'bbox1',
-                               'score2', 'bbox2')]
+    outs = [names[x] for x in KINDS[kind]]
 
     # The arena: each tensor lives from the node that writes it to the last
     # node that reads it, and outputs to the end. First fit, by address.
@@ -305,24 +377,25 @@ def main():
     arena = max(offs[t] + size(t) for t in offs)
 
     f = bytearray(b'RV9M')
-    f += struct.pack('<III', 1, len(tensors), len(nodes))
-    f += struct.pack('<I6I', 0, *outs)
-    f += struct.pack('<III', arena, len(blob), 0)
-    assert len(f) == 56
+    f += struct.pack('<9I', 2, len(tensors), len(nodes), 0, kind, in_h, in_w,
+                     flags, len(outs))
+    f += struct.pack('<8I', *(outs + [0] * (8 - len(outs))))
+    f += struct.pack('<II', arena, len(blob))
+    assert len(f) == 80
     for i, (h, w, c, e) in enumerate(tensors):
         f += struct.pack('<HHHhI', h, w, c, e, offs[i])
     for n in nodes:
-        f += struct.pack('<BBBBBBbBHHHHIIII', n['op'], n['relu'], n['k'],
-                         n['stride'], n['pad'], n['flags'], n['shift'], 0,
+        f += struct.pack('<BBBBBBBBBbBBHHHHIII', n['op'], n['relu'], n['k'],
+                         n['stride'], *n['pads'], n['flags'], n['shift'], 0, 0,
                          n['in0'], n['in1'], n['out'], 0,
-                         n['w_off'], n['b_off'], n['aux'], 0)
+                         n['w_off'], n['b_off'], n['aux'])
     while len(f) % 16:
         f.append(0)
     f += blob
     open(sys.argv[2], 'wb').write(f)
-    print('%s: %d nodes, %d tensors, %d KB of weights, %d KB arena, %d bytes'
-          % (sys.argv[2], len(nodes), len(tensors), len(blob) // 1024,
-             arena // 1024, len(f)))
+    print('%s: kind %d, %d nodes, %d tensors, %d KB of weights, %d KB arena, '
+          '%d bytes' % (sys.argv[2], kind, len(nodes), len(tensors),
+                        len(blob) // 1024, arena // 1024, len(f)))
 
 
 if __name__ == '__main__':

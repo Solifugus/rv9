@@ -7146,6 +7146,34 @@ Found on the way: a module cannot have 64-bit division, shifts or
 `opt` and `cflags`; and a directory with source but no `build.conf` is
 skipped rather than linked into an empty module.
 
+**Faces**, after: Espressif's default face detector is two models — a
+22 KB one that proposes squares over the whole picture, and a 114 KB one
+that looks at each square at 48x48 and places the eyes, nose and mouth
+corners. New to the engine: PReLU, convolutions without a bias, padding
+that differs side to side, weights packed for channel counts that are not
+multiples of 16, blue-first input, and cropping. The model file went to
+version 2 to carry the input size, colour order and kind. The answer's
+coordinates come from float sums truncated to pixels in ESP-DL, so the
+engine gained a float32 in integers (`sf_t`), rounding after every
+operation as the FPU does.
+
+Bit-exact again, shown the same way — ESP-DL on the board, the same
+pixels: all output bytes of both stages, on Espressif's example and on a
+camera frame. One question the source could not settle — how the vector
+unit's PReLU rounds — the board did: half to even. 110 ms with the vector
+unit (377 in plain C; ESP-DL 32), and the 24-channel layers are still C.
+
+It finds a face seen from the front. Looking up from the desk at somebody
+leaning over, it finds nothing: the first model's best score over the
+whole frame is far below its threshold, and ESP-DL's would say the same.
+That is the model, not the port. Espressif's single-stage face model
+(`espdet_pico_224`), markedly more accurate by their own measure, is the
+way past it if the camera has to stay where it is.
+
+Found on the way: `detect` needed a bigger stack once a face reached the
+second stage, and an SD card's occasional CRC error on one sector had
+failed a whole model load — the driver now tries each sector three times.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has
