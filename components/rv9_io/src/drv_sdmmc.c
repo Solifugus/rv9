@@ -168,6 +168,41 @@ static rv9_io_err_t sdcard_geometry(rv9_dev_t *dev, uint32_t *sector_size,
     return RV9_IO_OK;
 }
 
+/*
+ * One sector, tried up to three times.
+ *
+ * A card answers with a CRC error now and then -- a transfer garbled on
+ * the four data lines, not a bad block -- and the next attempt succeeds.
+ * On 2026-10-30 one read of sector 29851 failed twice, 1.3 s apart, and
+ * took `detect`'s model load down with it; the whole card then read back
+ * clean, 17 MB of it. Giving up on the first error made a glitch into a
+ * failed program. Three tries, and the error code said when it happens,
+ * so a card that really is failing still shows as one.
+ */
+#define TRIES 3
+
+static esp_err_t sector_io(sdcard_t *s, const char *name, uint32_t lsn,
+                           bool write)
+{
+    esp_err_t e = ESP_FAIL;
+    for (int t = 1; t <= TRIES; t++) {
+        e = write ? sdmmc_write_sectors(s->card, s->bounce, lsn, 1)
+                  : sdmmc_read_sectors(s->card, s->bounce, lsn, 1);
+        if (e == ESP_OK) {
+            if (t > 1) {
+                ESP_LOGW(TAG, "%s: %s of sector %lu worked at try %d",
+                         name, write ? "write" : "read",
+                         (unsigned long)lsn, t);
+            }
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "%s: %s of sector %lu failed (%s), try %d of %d",
+                 name, write ? "write" : "read", (unsigned long)lsn,
+                 esp_err_to_name(e), t, TRIES);
+    }
+    return e;
+}
+
 static rv9_io_err_t sdcard_read(rv9_dev_t *dev, uint32_t lsn, void *buf,
                                 uint32_t count)
 {
@@ -180,9 +215,7 @@ static rv9_io_err_t sdcard_read(rv9_dev_t *dev, uint32_t lsn, void *buf,
 
     rv9_lock_acquire(s->lock);
     for (uint32_t i = 0; i < count; i++) {
-        if (sdmmc_read_sectors(s->card, s->bounce, lsn + i, 1) != ESP_OK) {
-            ESP_LOGW(TAG, "%s: read of sector %lu failed",
-                     dev->name, (unsigned long)(lsn + i));
+        if (sector_io(s, dev->name, lsn + i, false) != ESP_OK) {
             err = RV9_IO_ERR_IO;
             break;
         }
@@ -205,9 +238,7 @@ static rv9_io_err_t sdcard_write(rv9_dev_t *dev, uint32_t lsn, const void *buf,
     rv9_lock_acquire(s->lock);
     for (uint32_t i = 0; i < count; i++) {
         memcpy(s->bounce, src + (size_t)i * SECTOR_SIZE, SECTOR_SIZE);
-        if (sdmmc_write_sectors(s->card, s->bounce, lsn + i, 1) != ESP_OK) {
-            ESP_LOGW(TAG, "%s: write of sector %lu failed",
-                     dev->name, (unsigned long)(lsn + i));
+        if (sector_io(s, dev->name, lsn + i, true) != ESP_OK) {
             err = RV9_IO_ERR_IO;
             break;
         }
