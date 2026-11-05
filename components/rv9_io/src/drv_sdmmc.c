@@ -178,8 +178,17 @@ static rv9_io_err_t sdcard_geometry(rv9_dev_t *dev, uint32_t *sector_size,
  * clean, 17 MB of it. Giving up on the first error made a glitch into a
  * failed program. Three tries, and the error code said when it happens,
  * so a card that really is failing still shows as one.
+ *
+ * And spaced out. On 2026-11-05 the same sector failed all three, 8 ms
+ * apart, with ESP_ERR_TIMEOUT -- the first read after the board had sat
+ * idle for hours, as the first failure had been, and the same sector both
+ * times, which is the directory every open starts with. Read again a
+ * minute later it was fine. A card that has dropped into its deepest idle
+ * takes longer than 8 ms to answer, so the tries wait 20, 100 and then
+ * 500 ms -- through rv9_task_delay_ms, so nothing else waits with them.
  */
-#define TRIES 3
+#define TRIES 4
+static const uint16_t s_backoff_ms[TRIES - 1] = { 20, 100, 500 };
 
 static esp_err_t sector_io(sdcard_t *s, const char *name, uint32_t lsn,
                            bool write)
@@ -199,6 +208,7 @@ static esp_err_t sector_io(sdcard_t *s, const char *name, uint32_t lsn,
         ESP_LOGW(TAG, "%s: %s of sector %lu failed (%s), try %d of %d",
                  name, write ? "write" : "read", (unsigned long)lsn,
                  esp_err_to_name(e), t, TRIES);
+        if (t < TRIES) rv9_task_delay_ms(s_backoff_ms[t - 1]);
     }
     return e;
 }
