@@ -31,7 +31,10 @@
  * where the horizontal half of the anti-aliasing comes from -- the
  * vertical half is the subsampling.
  */
-static void add_span(uint16_t *cov, int w, int32_t xa, int32_t xb, int amount)
+/* Coverage for [xa, xb) in 8.8, and the pixels it touched widened into
+   [*lo, *hi] -- so the row is blended and cleared over those alone. */
+static void add_span(uint16_t *cov, int w, int32_t xa, int32_t xb, int amount,
+                     int *lo, int *hi)
 {
     if (xb <= xa) return;
 
@@ -41,6 +44,8 @@ static void add_span(uint16_t *cov, int w, int32_t xa, int32_t xb, int amount)
 
     int ia = (int)(xa >> 8);
     int ib = (int)((xb - 1) >> 8);
+    if (ia < *lo) *lo = ia;
+    if (ib > *hi) *hi = ib;
 
     if (ia == ib) {
         cov[ia] = (uint16_t)(cov[ia] + (amount * (xb - xa) >> 8));
@@ -58,6 +63,7 @@ typedef struct {
 } cross_t;
 
 #define MAX_CROSS 64
+#define SLOPE_MAX 16      /* edges whose slopes are worked out ahead */
 
 /*
  * Where the edges cross this subscanline, left to right.
@@ -72,7 +78,7 @@ typedef struct {
  * difference.
  */
 static int crossings(const int32_t *pts, const rcontour_t *c, int nc,
-                     int32_t sy, cross_t *out)
+                     int32_t sy, cross_t *out, const int64_t *slope)
 {
     int m = 0;
     int base = 0;
@@ -99,8 +105,15 @@ static int crossings(const int32_t *pts, const rcontour_t *c, int nc,
            and shapes do not develop pinholes along their seams. */
         if (sy < y0 || sy >= y1) continue;
 
-        int64_t dx = (int64_t)(x1 - x0) * (sy - y0);
-        out[m].x = x0 + (int32_t)(dx / (y1 - y0));
+        if (slope != NULL) {
+            /* Worked out once per edge: a multiply here, not a 64-bit
+               division -- which RV32 has no instruction for, and which was
+               most of what an outlined shape cost. */
+            out[m].x = x0 + (int32_t)((slope[a] * (sy - y0)) >> 16);
+        } else {
+            int64_t dx = (int64_t)(x1 - x0) * (sy - y0);
+            out[m].x = x0 + (int32_t)(dx / (y1 - y0));
+        }
         out[m].dir = dir;
         m++;
       }
@@ -152,43 +165,77 @@ void rv9_raster_fill_n(rband_t *b, const int32_t *pts, const rcontour_t *c,
 
     cross_t cr[MAX_CROSS];
 
+    /* Each edge's dx/dy in 16.16, for a shape small enough to keep them on
+       the stack -- which is every stroke segment and most shapes; a long
+       path divides as it always did. Edge a runs from point a to the next
+       in its contour, upward in y, as crossings() walks them. */
+    int64_t slope_tab[SLOPE_MAX];
+    const int64_t *slope = NULL;
+    if (total <= SLOPE_MAX) {
+        int base = 0;
+        for (int k = 0; k < nc; k++) {
+            int n = c[k].n;
+            for (int i = 0; i < n; i++) {
+                int a = base + i, j = base + ((i + 1) % n);
+                int32_t x0 = pts[2 * a], y0 = pts[2 * a + 1];
+                int32_t x1 = pts[2 * j], y1 = pts[2 * j + 1];
+                if (y0 > y1) {
+                    int32_t t;
+                    t = x0; x0 = x1; x1 = t;
+                    t = y0; y0 = y1; y1 = t;
+                }
+                slope_tab[a] = y1 == y0 ? 0
+                             : ((int64_t)(x1 - x0) << 16) / (y1 - y0);
+            }
+            base += n;
+        }
+        slope = slope_tab;
+    }
+
     for (int row = 0; row < b->rows; row++) {
         int py = b->y0 + row;
         if (((int32_t)(py + 1) << 8) <= ymin) continue;
         if (((int32_t)py << 8) >= ymax) continue;
 
-        memset(b->cov, 0, (size_t)b->w * sizeof(uint16_t));
-        bool any = false;
+        /*
+         * Only the pixels the shape reaches on this row: a thin line across
+         * a 1024-wide window touches a few, and clearing and blending the
+         * whole row for each one -- as this did -- cost an outlined polygon
+         * 28 ms on the P4, where it costs a fraction of one now. The buffer
+         * is zero coming in, and is put back to zero going out.
+         */
+        int lo = b->w, hi = -1;
 
         for (int s = 0; s < SUB; s++) {
             int32_t sy = ((int32_t)py << 8) + (256 * s + 128) / SUB;
 
-            int m = crossings(pts, c, nc, sy, cr);
+            int m = crossings(pts, c, nc, sy, cr, slope);
             if (m < 2) continue;
 
             if (evenodd) {
                 for (int i = 0; i + 1 < m; i += 2) {
-                    add_span(b->cov, b->w, cr[i].x, cr[i + 1].x, SUB_FULL);
-                    any = true;
+                    add_span(b->cov, b->w, cr[i].x, cr[i + 1].x, SUB_FULL,
+                             &lo, &hi);
                 }
             } else {
                 int wind = 0;
                 for (int i = 0; i + 1 < m; i++) {
                     wind += cr[i].dir;
                     if (wind != 0) {
-                        add_span(b->cov, b->w, cr[i].x, cr[i + 1].x, SUB_FULL);
-                        any = true;
+                        add_span(b->cov, b->w, cr[i].x, cr[i + 1].x, SUB_FULL,
+                                 &lo, &hi);
                     }
                 }
             }
         }
 
-        if (!any) continue;
+        if (hi < lo) continue;
 
         uint16_t *line = &b->px[(size_t)row * b->w];
-        for (int x = 0; x < b->w; x++) {
+        for (int x = lo; x <= hi; x++) {
             int a = b->cov[x];
             if (a == 0) continue;
+            b->cov[x] = 0;
             if (a > 255) a = 255;
             line[x] = blend(colour, line[x], a);
         }

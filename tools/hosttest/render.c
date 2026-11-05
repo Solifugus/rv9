@@ -1,8 +1,10 @@
 #include "drv_svgwin.c"      /* statics and all: this is a test of the inside */
 #include <stdio.h>
 
+#ifndef PW            /* -DPW=1024 -DPH=600 for the P4's panel */
 #define PW 320
 #define PH 172
+#endif
 static uint16_t screen[PW*PH];
 
 rv9_io_err_t rv9_panel_open(bool l, int *w, int *h)

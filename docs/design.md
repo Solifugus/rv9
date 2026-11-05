@@ -7174,6 +7174,34 @@ Found on the way: `detect` needed a bigger stack once a face reached the
 second stage, and an SD card's occasional CRC error on one sector had
 failed a whole model load — the driver now tries each sector three times.
 
+## 63. Fast enough to animate
+
+`mystify` — the old screen saver, a dozen outlined polygons a frame on `/w0`
+— first ran at 1.7 frames a second, and the time was not in the shapes but
+in how the window drew an outline. Three fixes, all in the rasteriser, so
+everything drawn on the window gained:
+
+| | full trail | each outlined polygon |
+|---|---|---|
+| as it was | 1.7 fps | 28 ms |
+| clear and blend only the pixels a row touches | 4.0 | |
+| no full-screen background rect (the window clears to black already) | 7.0 | |
+| each edge's slope once, not a 64-bit division per row | 8.5 | 6.7 ms |
+
+- **Every row a shape touched cleared and blended the whole 1024-pixel
+  coverage row** — for an outline drawn as thin quads, hundreds of rows a
+  segment at a few pixels each. Now `add_span` widens a per-row [lo, hi]
+  and only that is blended and zeroed; the coverage buffer is zero between
+  calls, a rule `raster.h` now states and the window keeps by zeroing it
+  once at allocation.
+- **Each crossing was a 64-bit division**, which RV32 has no instruction
+  for: a libgcc call, some 180,000 a frame. Up to 16 edges now get their
+  slope in 16.16 once per call and each crossing is a multiply.
+- An empty frame went from 9 to 39 fps. What remains, by a profile of the
+  same frame on a PC, is the edge-walking itself and re-reading every
+  element's attributes once per 8-row band — the cost of keeping the
+  document as the display list. Fine for a screen saver.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

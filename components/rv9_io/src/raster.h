@@ -15,7 +15,9 @@ typedef struct {
     int       y0;      /* first panel row this band covers */
     int       w, rows;
     uint16_t *px;      /* w * rows, RGB565 native order while drawing */
-    uint16_t *cov;     /* w, scratch coverage for one row */
+    uint16_t *cov;     /* w, scratch coverage for one row: all zero between
+                          calls -- zero it once when allocating, and the
+                          rasteriser leaves it zero */
 } rband_t;
 
 #define RV9_FIX(n)  ((int32_t)((n) * 256))

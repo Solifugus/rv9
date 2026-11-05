@@ -31,6 +31,10 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
   uint32_t src_max, pts_max, contours_max, depth_max;
 } rv9_svg_limits_t;
+#define RV9_SVG_SS_PIXELS (RV9_SS_DRIVER_BASE + 10)
+typedef struct __attribute__((packed)) {
+  uint16_t x, y, w, h; uint32_t px;
+} rv9_svg_pixels_t;
 struct rv9_dev;
 typedef struct rv9_driver {
   const char *name;

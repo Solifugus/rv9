@@ -1296,6 +1296,7 @@ static rv9_io_err_t svgwin_open(rv9_dev_t *dev, uint32_t mode)
         rv9_free(s->cs);   s->cs = NULL;
         return RV9_IO_ERR_NOMEM;
     }
+    memset(s->cov, 0, (size_t)s->w * sizeof(uint16_t));   /* see raster.h */
 
     s->len = 0;
     s->term = 0;
