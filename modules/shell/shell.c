@@ -8,12 +8,15 @@
  * There is almost no built-in command table, because a command is just a
  * module in the store. Adding a command means adding a module.
  *
- * Line editing, echo and blocking all happen below it in SCF, which is why
- * this file contains no terminal handling whatsoever.
+ * Echo and blocking happen below it in SCF, and so does line editing for a
+ * script. For a person at a terminal the shell edits the line itself --
+ * history and cursor keys; see edit_line -- and that is the only terminal
+ * handling in this file.
  */
 #include "modlib.h"
 
 #define LINE_MAX  256
+#define HIST_BYTES 1024   /* thirty-odd typical commands */
 #define ARG_MAX   8
 #define SAVE_PATH 5     /* spare slot used to park stdout during redirection */
 
@@ -131,6 +134,14 @@ typedef struct {
      * already says it is the emergency version.
      */
     rv9_sys_proc_t procs[8];
+
+    /* Interactive history: recent lines, oldest first, each ended by a
+       NUL, in HIST_BYTES -- the oldest are dropped to make room. See
+       edit_line. */
+    char     hist[HIST_BYTES];
+    uint16_t hist_len;
+    uint8_t  last_cr;       /* the previous key was CR: a LF after it is not
+                               a second Enter */
 } shell_statics_t;
 
 /* Why a fork was refused, in words. Wanted by three callers above its
@@ -313,6 +324,238 @@ static int read_line(const rv9_mod_env_t *env, shell_statics_t *st, int src)
         st->in_len  += k;
         st->src_pos += k;
     }
+}
+
+/*
+ * History and line editing, for a person at a terminal.
+ *
+ * SCF's line discipline gives every program backspace and nothing else,
+ * which is right for a program asking a question and thin for a shell
+ * somebody types at all day. So the shell, when nobody is scripting it,
+ * takes its keys raw (RV9_SS_RAW) and edits the line itself: up and down
+ * through what was typed before, left and right to mend a typo, Home and
+ * End, Delete, ^U to start again, ^C to give up. It hands the terminal back
+ * cooked before running anything, so a program the line starts finds the
+ * line discipline it expects.
+ *
+ * Only backspace and reprinting move the cursor -- no escape sequences go
+ * out. Those mean nothing to the panel's console, and backspace means the
+ * same thing everywhere: a serial terminal, an SSH window and the glass.
+ *
+ * History is the shell's, not the terminal's: each session has its own,
+ * and it ends with the session.
+ */
+static void hist_add(shell_statics_t *st, const char *line, int len)
+{
+    if (len <= 0 || len >= HIST_BYTES / 2) return;
+    /* Not the same line twice running. */
+    if (st->hist_len > 0) {
+        int b = st->hist_len - 1;
+        while (b > 0 && st->hist[b - 1] != '\0') b--;
+        int k = 0;
+        while (k < len && st->hist[b + k] == line[k]) k++;
+        if (k == len && st->hist[b + k] == '\0') return;
+    }
+    while (st->hist_len + len + 1 > HIST_BYTES) {   /* drop the oldest */
+        int k = 0;
+        while (st->hist[k] != '\0') k++;
+        k++;
+        for (int i = k; i < st->hist_len; i++) st->hist[i - k] = st->hist[i];
+        st->hist_len -= k;
+    }
+    for (int i = 0; i < len; i++) st->hist[st->hist_len++] = line[i];
+    st->hist[st->hist_len++] = '\0';
+}
+
+/* The n-th most recent line (1 is the last), or NULL. */
+static const char *hist_get(const shell_statics_t *st, int n)
+{
+    int end = st->hist_len;
+    for (int i = 0; i < n; i++) {
+        if (end <= 0) return NULL;
+        int b = end - 1;
+        while (b > 0 && st->hist[b - 1] != '\0') b--;
+        if (i == n - 1) return &st->hist[b];
+        end = b;
+    }
+    return NULL;
+}
+
+static void put(const rv9_mod_env_t *env, const char *p, int n)
+{
+    if (n > 0) env->write(RV9_STDOUT, p, (uint32_t)n);
+}
+
+static void back(const rv9_mod_env_t *env, int n)
+{
+    static const char bs[8] = { 8, 8, 8, 8, 8, 8, 8, 8 };
+    while (n > 0) {
+        int k = n < 8 ? n : 8;
+        put(env, bs, k);
+        n -= k;
+    }
+}
+
+/* Spaces over n characters, and back to where it started. */
+static void blank(const rv9_mod_env_t *env, int n)
+{
+    static const char sp[8] = { ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
+    for (int k = n; k > 0; k -= 8) put(env, sp, k < 8 ? k : 8);
+    back(env, n);
+}
+
+/* Show `text` in place of the line being edited; the cursor ends after it. */
+static void replace(const rv9_mod_env_t *env, shell_statics_t *st, int *len,
+                    int *cur, const char *text)
+{
+    int n = 0;
+    while (text[n] != '\0' && n < LINE_MAX - 1) n++;
+    back(env, *cur);
+    for (int i = 0; i < n; i++) st->line[i] = text[i];
+    put(env, st->line, n);
+    if (n < *len) blank(env, *len - n);
+    *len = n;
+    *cur = n;
+}
+
+/* The next key, from what has arrived or by waiting for more. -1 at the
+   end of the source. */
+static int next_key(const rv9_mod_env_t *env, shell_statics_t *st)
+{
+    if (st->in_len == 0) {
+        int k = env->read(RV9_STDIN, st->in, LINE_MAX - 1);
+        if (k <= 0) return -1;
+        st->in_len = k;
+        st->src_pos += k;
+    }
+    int c = (uint8_t)st->in[0];
+    st->in_len--;
+    for (int i = 0; i < st->in_len; i++) st->in[i] = st->in[i + 1];
+    return c;
+}
+
+/* Keys that are not characters, once their escape sequences are read. */
+#define K_UP    0x100
+#define K_DOWN  0x101
+#define K_RIGHT 0x102
+#define K_LEFT  0x103
+#define K_DEL   0x104
+#define K_HOME  0x105
+#define K_END   0x106
+
+static int edit_line(const rv9_mod_env_t *env, shell_statics_t *st)
+{
+    uint32_t on = 1, off = 0;
+    if (env->setstat(RV9_STDIN, RV9_SS_RAW, &on) < 0) {
+        return read_line(env, st, RV9_STDIN);   /* not a terminal */
+    }
+
+    int len = 0, cur = 0, nav = 0, esc = 0, arg = 0, result = -1;
+    for (;;) {
+        int c = next_key(env, st);
+        if (c < 0) {                             /* the far end has gone */
+            result = len > 0 ? len : -1;
+            break;
+        }
+        int was_cr = st->last_cr;
+        st->last_cr = (c == '\r');
+
+        /* Escape sequences: ESC [ or ESC O, perhaps a number, then a
+           letter or ~. Anything else after ESC is dropped with it. */
+        if (esc == 1) { esc = (c == '[' || c == 'O') ? 2 : 0; arg = 0; continue; }
+        if (esc == 2) {
+            if (c >= '0' && c <= '9') { arg = arg * 10 + (c - '0'); continue; }
+            esc = 0;
+            if (c == '~') {
+                c = arg == 3 ? K_DEL : arg == 1 || arg == 7 ? K_HOME
+                  : arg == 4 || arg == 8 ? K_END : 0;
+            } else if (c >= 'A' && c <= 'D') {
+                c = K_UP + (c - 'A');
+            } else if (c == 'H') {
+                c = K_HOME;
+            } else if (c == 'F') {
+                c = K_END;
+            } else {
+                continue;
+            }
+        }
+
+        switch (c) {
+        case 27:
+            esc = 1;
+            break;
+        case '\n':
+            if (was_cr) break;                  /* CR LF is one Enter */
+            __attribute__((fallthrough));
+        case '\r':
+            put(env, "\n", 1);
+            result = len;
+            goto done;
+        case 3:                                 /* ^C: give up on the line */
+            put(env, "^C\n", 3);
+            len = 0;
+            result = 0;
+            goto done;
+        case 21:                                /* ^U: start again */
+            replace(env, st, &len, &cur, "");
+            break;
+        case K_UP:
+        case K_DOWN: {
+            int want = nav + (c == K_UP ? 1 : -1);
+            if (want < 0) break;
+            if (nav == 0) {                     /* keep what was being typed */
+                for (int i = 0; i < len; i++) st->raw[i] = st->line[i];
+                st->raw[len] = '\0';
+            }
+            const char *h = want == 0 ? st->raw : hist_get(st, want);
+            if (h == NULL) break;
+            nav = want;
+            replace(env, st, &len, &cur, h);
+            break;
+        }
+        case K_RIGHT:
+            if (cur < len) put(env, &st->line[cur++], 1);
+            break;
+        case K_LEFT:
+            if (cur > 0) { back(env, 1); cur--; }
+            break;
+        case 1: case K_HOME:                    /* ^A too */
+            back(env, cur);
+            cur = 0;
+            break;
+        case 5: case K_END:                     /* ^E too */
+            put(env, &st->line[cur], len - cur);
+            cur = len;
+            break;
+        case 8: case 127:                       /* backspace */
+            if (cur == 0) break;
+            back(env, 1);
+            cur--;
+            __attribute__((fallthrough));      /* now a delete at the cursor */
+        case K_DEL:
+            if (cur >= len) break;
+            for (int i = cur; i < len - 1; i++) st->line[i] = st->line[i + 1];
+            len--;
+            put(env, &st->line[cur], len - cur);
+            blank(env, 1);
+            back(env, len - cur);
+            break;
+        default:
+            if (c < 32 || c > 126 || len >= LINE_MAX - 1) break;
+            for (int i = len; i > cur; i--) st->line[i] = st->line[i - 1];
+            st->line[cur] = (char)c;
+            len++;
+            put(env, &st->line[cur], len - cur);
+            cur++;
+            back(env, len - cur);
+            break;
+        }
+    }
+done:
+    env->setstat(RV9_STDIN, RV9_SS_RAW, &off);
+    if (result > 0) hist_add(st, st->line, result);
+    if (result >= 0) st->line[result] = '\0';
+    return result;
 }
 
 /* Are we actually executing, or inside a branch that was not taken? */
@@ -1266,7 +1509,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
            it. See src_pos. */
         int32_t line_at = st->src_pos - st->in_len;
 
-        int n = read_line(env, st, src);
+        int n = scripted ? read_line(env, st, src) : edit_line(env, st);
         if (n < 0) break;                       /* the source is finished */
 
         /*

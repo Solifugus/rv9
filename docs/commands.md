@@ -32,6 +32,14 @@ Seven things, and the whole of the syntax is in
 | `# …` | A comment, to end of line. |
 | `shell <file>` | Run a file of commands. No prompt and no banner, because nobody is watching. |
 
+**At the prompt**, the line edits: ↑ and ↓ walk back through the last thirty
+or so commands of this session (↓ past the newest gives back what you were
+typing), ← and → move within the line, Home/End or Ctrl-A/Ctrl-E jump to
+either end, Delete and Backspace remove, Ctrl-U clears the line and Ctrl-C
+abandons it. The same over SSH, on the serial console and on the panel —
+the cursor is moved with backspaces, never escape codes. Scripts read lines
+as they always did.
+
 Scripts add `set`, `$N`, `if`/`while`/`end`, `exit` and `status`. `\$` is a
 literal dollar and **the backslash is not optional** — without it the shell you
 are typing at expands `$N` before the line reaches the file.
