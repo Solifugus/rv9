@@ -203,3 +203,232 @@ kp[2k+1] = (int)(48*(l[2k+1]*el)*isy + tly)        k = 0..4
 - **Could not determine:**
   - The vprelu shift rounding (§4).
   - Why the README example output differs. It most likely comes from an older ESP-DL build: no rounding variant I tried (rhe or floor on the negative branch, scale or copy on the positive branch, half-even or half-up in the convs, s3 or p4 file) reproduces it.
+
+## Part 3: human_face_recognition (human_face_feat mfn_s8_v1)
+
+As written before the port; the RV-9 signature matched sim.py byte for byte on a camera frame. Scratch paths are not kept.
+
+
+esp-dl 9c5fc6f. Paths are relative to the checkout `dl/esp-dl/`. Library paths (`dl/…`, `vision/…`) are relative to `dl/esp-dl/esp-dl/`.
+Everything in docs/esp-dl-arithmetic.md still applies: half-to-even rounding, conv requantisation, bias at exponent in+w, weight packing, zero padding, PRelu (rhe, saturating, left shift on the positive branch), Concat, the BGR swap, and the LUT quantiser.
+Reference implementation: `scratchpad/recogsim/sim.py`, described in §7.
+
+## 1. Graph
+Model file: `models/human_face_recognition/models/p4/human_face_feat_mfn_s8_v1.espdl`. The s3 file holds different int8 weight values (e.g. `res_4_block0_conv_sep.weight`), so unlike the detector models it is not interchangeable with the p4 file.
+
+**Shapes and exponents**
+- Input: `input` [1,112,112,3], exponent **-6**.
+- Output: `embedding` [1,1,1,512], int8, exponent **-5**.
+
+**Size**
+- 103 nodes: Conv 53, PRelu 35, **Add 12**, Concat 3.
+- Weights: 1.22 MB (141 initializers).
+- README: 0.46 GFLOPs, 81.5 ms on P4 (`models/human_face_recognition/README.md`).
+
+**What is not there**
+- No per-channel exponents: every tensor has a single exponent.
+- No Flatten, Reshape, Gemm, BatchNorm, pooling, Sigmoid or Relu.
+- Every Conv is `activation: Linear` with dilation 1.
+
+**Convs**
+- **Every conv has a bias, depthwise included.** This differs from MSR, where depthwise convs have none. Bias exponent = in + w; the simulation asserts this.
+- Groups are only 1 or C (depthwise). Every channel count is a multiple of 16 except the 3-channel image input to node 0, so no remainder-lane paths are used apart from cin=3.
+- Pads are all symmetric 1 for 3x3, and 0 for 1x1 and 7x7.
+- Stride 2 occurs at nodes 0 (c3), 6, 35 and 79 (dw3).
+- Spatial sizes: 112 → 56 → 28 → 14 → 7 → 1.
+
+**Unusual structure**
+- **Split "wide" convs.** Several 1x1 expansions are stored as two convs reading the same input, each followed by its own PRelu, then a Concat on axis 3:
+  - 74/75 → 76/77 → Concat 78 (512 ch).
+  - 96/97 → 98/99 → Concat 100.
+  - The projection is split the same way: 81/82 (512→64 each) → Concat 83 (128 ch).
+  - All concats have equal exponents (-7, -6, -7).
+- **Head:**
+  - Node 101 is a **7x7 depthwise conv, pad 0, on a 7x7 input** (a "GDConv"), giving 1x1x512 at e-7, shift 5. It uses the ordinary depthwise packing [C/16][7][7][16].
+  - Node 102 is a **1x1 conv 512→512** ("fc1", BN folded), e-7 → e-5, shift 8, and produces `embedding`.
+  - Nothing follows it in the graph.
+- Residual blocks: the pattern is conv1 (expand) → PRelu → dw3 → PRelu → conv1 (project) → Add(skip).
+
+**mac_shift per conv.** All are positive, from 5 to 10. Notation: c = group conv, dw = depthwise, the digit is k, /2 = stride 2, b = bias.
+```
+0:c3/2b s7, 2:dw3b s5, 4:c1b s6, 6:dw3/2b s5, 8:c1b s8, 9:c1b s7, 11:dw3b s6, 13:c1b s8, 15:c1b s7, 17:dw3b s6,
+19:c1b s8, 21:c1b s8, 23:dw3b s6, 25:c1b s7, 27:c1b s8, 29:dw3b s6, 31:c1b s7, 33:c1b s8, 35:dw3/2b s7, 37:c1b s9,
+38:c1b s7, 40:dw3b s7, 42:c1b s10, 44:c1b s7, 46:dw3b s6, 48:c1b s9, 50:c1b s7, 52:dw3b s5, 54:c1b s9, 56:c1b s7,
+58:dw3b s6, 60:c1b s9, 62:c1b s7, 64:dw3b s6, 66:c1b s9, 68:c1b s7, 70:dw3b s6, 72:c1b s8, 74:c1b s7, 75:c1b s8,
+79:dw3/2b s5, 81:c1b s9, 82:c1b s9, 84:c1b s8, 86:dw3b s5, 88:c1b s8, 90:c1b s8, 92:dw3b s6, 94:c1b s8, 96:c1b s8,
+97:c1b s8, 101:dw7b s5, 102:c1b s8
+```
+
+**PRelu per node.** Format: neg shift / positive left shift (in → out exponent).
+- The positive branch is never a right shift: out_e ≤ in_e everywhere.
+- Every node's C is a multiple of 16, so the aligned `dl_esp32p4_s8_prelu_11c` path is taken (`dl/base/dl_base_prelu.cpp:64-70`).
+```
+1:6/0(-6→-6) 3:7/0(-5) 5:7/0(-5) 7:6/1(-5→-6) 10:7/1(-6→-7) 12:8/0(-6) 16:7/1(-6→-7) 18:7/0(-6) 22:7/1(-6→-7)
+24:7/0(-6) 28:6/1(-6→-7) 30:7/0(-6) 34:7/1(-6→-7) 36:7/0(-6) 39:8/0(-7) 41:7/1(-6→-7) 45:8/0(-7) 47:7/1(-6→-7)
+51:7/0(-7) 53:7/0(-7) 57:7/0(-7) 59:6/1(-6→-7) 63:7/0(-7) 65:6/1(-6→-7) 69:7/0(-7) 71:6/1(-6→-7) 76:8/0(-7)
+77:7/0(-7) 80:7/0(-7) 85:7/0(-7) 87:7/0(-7) 91:7/0(-7) 93:6/1(-6→-7) 98:6/0(-7) 99:6/0(-7)
+```
+
+**Memory.** The largest activation is 56x56x128 = 401 KB (outputs of nodes 4 and 5, and the input of node 6). Residual Adds keep the skip tensor (≤ 28x28x64 = 50 KB) alive across a block.
+
+## 2. Add
+**Every Add has the same exponent on both inputs and on the output**, and the input shapes are identical (no broadcasting). These are confirmed from the model:
+```
+14: 154 + 161 -> 162   -5,-5 -> -5        49: 201 + 208 -> 209   -5,-5 -> -5
+20: 162 + 169 -> 170   -5,-5 -> -5        55: 209 + 216 -> 217   -5,-5 -> -5
+26: 170 + 177 -> 178   -5,-5 -> -5        61: 217 + 224 -> 225   -5,-5 -> -5
+32: 178 + 185 -> 186   -5,-5 -> -5        67: 225 + 232 -> 233   -5,-5 -> -5
+43: 193 + 200 -> 201   -5,-5 -> -5        73: 233 + 240 -> 241   -5,-5 -> -5
+89: 254 + 261 -> 262   -6,-6 -> -6        95: 262 + 269 -> 270   -6,-6 -> -6
+```
+The arithmetic is **y = sat8(a + b)**: no shift, no rounding.
+
+**Source**
+- `dl/module/include/dl_module_add.hpp:66-79` → `base::elemwise_add` (`dl/base/dl_base_add.cpp:80-103`).
+- With PIE_V2 and both d0 % 16 == 0, it selects `dl_esp32p4_s8_add2d_11c` (`dl/base/isa/esp32p4/dl_esp32p4_s8_add2d.S:21-84`). That kernel is only `esp.vadd.s8`, which is a signed saturating add (`tools/agents/skills/esp32p4-pie-simd/references/instructions.md:352`).
+- The C fallback agrees: `tool::truncate(out, a+b)` (`dl_base_add.cpp:35-43`, `dl/tool/include/dl_tool.hpp:292-295`).
+
+**When the exponents differ.** The int8 Add path ignores them entirely in this ESP-DL version.
+- `get_elemwise_operation_args` does compute `mul_shift`, `input*_scale` and `output_rescale` (`dl/base/dl_base_elemwise.cpp:179-183`), but `elemwise_add` never selects a rescaling kernel.
+- A `dl_esp32p4_s8_rescale_add2d_11c` exists (`dl_esp32p4_s8_add2d.S:114`), but nothing in `dl_base_add.cpp` calls it.
+- So ESP-PPQ must emit Adds with equal exponents, as this model does.
+- For the port: assert that the three exponents are equal and that the shapes match.
+
+## 3. Preprocessing
+**Call chain**
+- `HumanFaceRecognizer::recognize`/`enroll` (`models/human_face_recognition/human_face_recognition.cpp:137-183`):
+  - One face: use it.
+  - Several faces: use the one with the largest `box_area() = (x2-x1)*(y2-y1)` (`vision/detect/dl_detect_define.hpp:32`; no +1). Ties go to the first in the list (`std::max_element` with `<`).
+  - Only `keypoint` is used; the box is ignored.
+- `FeatImpl::run` (`vision/recognition/dl_feat_base.cpp:41-57`) runs preprocess, then the model, then L2 postprocessing.
+- Constructor: `FeatImagePreprocessor(m_model, {127.5,127.5,127.5}, {127.5,127.5,127.5}, true)` (`human_face_recognition.cpp:82-83`). rgb_swap=true, so **the model takes BGR**, as the detector does.
+
+### 3a. Template and transform estimate
+Template (`vision/recognition/dl_feat_image_preprocessor.cpp:5-6`), held as float32. The order is the same as the detector's keypoint order:
+```
+leye (38.2946,51.6963)  lmouth (41.5493,92.3655)  nose (56.0252,71.7366)  reye (73.5318,51.5014)  rmouth (70.7299,92.2041)
+```
+
+**Roles.** In `preprocess` (`:13-29`):
+- source = template × (112/112 = 1.0f).
+- dest = detected keypoints, converted int → float (`dl_math_matrix.hpp:105-115`).
+- `M = get_similarity_transform(source, dest)`, a 2x3 matrix mapping **output (template) coordinates to image coordinates**.
+- It is passed with `inv=true` (`vision/image/dl_image_preprocessor.cpp:137-140`), so ESP-DL uses M directly as the dst→src map and does **not** invert it (`vision/image/dl_image_process.cpp:220-236`).
+
+**`get_similarity_transform`** (`dl/math/src/dl_math_matrix.cpp:197-377`) is Umeyama (similarity, reflection-checked) via a closed-form 2x2 SVD. Its precision is mixed:
+- Means, A, AAT/ATA, U, V, S and scale are `double`. The P4 has no D extension, so these run in soft-float.
+- The demeaned coordinates are stored as `float`.
+- Each A term is `float*float/num`, computed in float and then added into the double.
+- Every square root is `sqrt_newton(float)`: the argument is truncated to float and the result is float (`dl/math/include/dl_math.hpp:83-97`):
+```c
+float result = x; do { last = result; result = (last + x/last) * 0.5; } while (|result-last| > 1e-5f);
+```
+- The result matrix T is float:
+  - The 2x2 block is rounded to float first.
+  - The translation is computed as `dst_mean - scale*(T00*src_mean_x + T01*src_mean_y)` in double, using the unscaled float T.
+  - Then `T[r][c] *= scale`, double, rounded to float.
+- `sim.py:similarity_transform` reproduces this statement by statement.
+- Against a double-precision Umeyama it agrees to about 1e-6 relative. me2: M = [[3.1933823, 0.0644878, 307.85034], [-0.0644868, 3.1933820, 97.206276]].
+  - The two off-diagonals differ in the 5th digit because of the float `sqrt_newton`, so do not substitute a textbook implementation if you want exactness.
+
+### 3b. Warp: nearest neighbour in Q10 fixed point
+Map generation (`dl_image_process.cpp:854-877`, shift = 10, `dl_image_process.hpp:118`). i is an output column (x1, y1) or an output row (x2, y2), from 0 to 111:
+```c
+x1[i] = lrintf(M0*i*1024);        y1[i] = lrintf(M3*i*1024);           // per output column
+x2[r] = lrintf((M1*r + M2)*1024); y2[r] = lrintf((M4*r + M5)*1024);    // per output row
+```
+Sampling (`:559-576`, `:578-610`):
+```c
+x = (x1[c] + x2[r] + 512) >> 10;   y = (y1[c] + y2[r] + 512) >> 10;   // arithmetic shift = floor
+if ((unsigned)x < W && (unsigned)y < H) dst = cvt(src[y][x]) else dst = bg;
+```
+- Output pixel (c, r) samples source pixel (x, y). This is the integer-centre convention: no ±0.5.
+- lrintf rounds half to even, in the default FE_TONEAREST mode.
+- There is no crop area here; the whole image is the source.
+- **Border:** out-of-image samples take the background pixel. The background is RGB (0,0,0) passed through the same quantiser (`gen_bg`, `:695-753`; `bg_t` defaults `ori{} = 0`, `dl_image_process.hpp:109-116`), so all three channels are **-64**.
+- The pixel conversion is identical to the detector's (RGB888 or RGB565 → BGR, then the LUT), via `warp_nn_fn` (`vision/image/dl_image_pixel_kernel.cpp:122-131`).
+
+### 3c. Normalisation and quantisation
+Implemented as a LUT (`vision/image/dl_image_norm_quant.hpp:16-31`): `q = sat(rne(((v - 127.5f) * (1.f/127.5f)) * 64))`, with exponent -6 so inv_scale = 64.
+- The range is [-64, 64], so nothing saturates. v=0 gives -64, v=127 gives -1, v=128 gives 0, v=255 gives 64.
+- **There are no exact ties.** The float LUT equals the integer formula `q = (2*(128*v - 16320) + 255) / 510` (floor division) for all 256 values; the simulation checks this.
+- The same LUT applies to all channels, because mean and std are equal.
+
+### 3d. Where float makes exactness hard
+- **Compile flags.** esp-dl is compiled with **`-ffast-math -O3`** (`esp-dl/CMakeLists.txt:83`), so GCC may contract or reassociate the float code. Two choices matter:
+  - Whether `(M1*r + M2)` is a fused `fmadd.s`. Likely yes, since fast-math implies fp-contract=fast and the F extension has fmadd. `sim.py` defaults to fused (`fma=1`).
+  - Whether the four `/num` in the A loop become `*(1.f/num)`, through the reciprocal-math recip pass. `sim.py` defaults to division (`recip=0`).
+  - I could not determine either without the compiled binary.
+- **Measured sensitivity:**
+  - fma on or off changes 0 of 12544 pixels on me2 and 1 on musk2.
+  - recip changes M by about 1e-6 relative: 0 pixels on me2, 3 on musk2.
+  - One ULP in M02 changed 0 pixels.
+  - **The int8 network amplifies a single changed pixel visibly.** musk2–musk1 similarity is 0.8113, against 0.8136 with fma=0 and 0.8125 with recip=1.
+- **Recommendation:** port the transform in float32/double exactly as `sim.py` does, keep the warp map in Q10 integers, and settle fma/recip by dumping ESP-DL's `M` and the 112x112x3 model input on the device for one image.
+
+## 4. Postprocessing (`vision/recognition/dl_feat_postprocessor.cpp:6-30`)
+- **Dequantise.** `m_feat` is a float TensorBase with exponent 0. `assign` dequantises with `(float)q * 2^-5` (`dl/tensor/src/dl_tensor_base.cpp:39-43`, `:293-303`). This is exact.
+- **Normalise.** `norm = sqrt_newton(Σ f_i²)`, then `f_i /= norm` in float, sequentially.
+  - Σ f² is exact in float: every term is k·2⁻¹⁰ and the sum is below 2²⁴·2⁻¹⁰.
+- No other transform: no PCA, no flip-averaging, no clipping.
+- **For an integer port, keep the int8 vector plus its integer Σq²**; cosine similarity is then scale-free (§5).
+
+## 5. Matching (`vision/recognition/dl_recognition_database.cpp`)
+- **Similarity** is the plain dot product of the two L2-normalised float vectors, i.e. cosine similarity (`:234-241`).
+  - Float accumulation in order i = 0..511; fast-math may fuse it into fmadd.
+  - An integer equivalent: `Σ qa·qb / sqrt(Σqa² · Σqb²)`. It differs from ESP-DL only in float rounding, about 1e-7.
+- **Query** (`:243-267`):
+  - Keep entries with `sim > thr`, strictly greater.
+  - Sort descending (`std::sort`, which is not stable), then truncate to top_k.
+  - Defaults: `m_thr = 0.5`, `m_top_k = 1` (`human_face_recognition.cpp:123`).
+  - Returns {id, similarity}. **The id returned is the 1-based position in the in-memory list, not the stored id** (`:252-258`, where `it->id` is commented out). After a deletion the two differ.
+- **Enrolment** (`:120-168`) stores one float32[512] per enrol call. A person is just an id; enrolling the same person several times gives several independent ids, with no averaging or grouping.
+  - New id = `num_feats_total + 1`.
+- **File format** (all little-endian; `dl_recognition_define.hpp:6-10`, `database.cpp:23-42`, `:66-118`):
+```
+header: uint16 num_feats_total, uint16 num_feats_valid, uint16 feat_len (=512)      // 6 bytes
+record: uint16 id, float32 feat[512]                                                 // 2050 bytes, appended
+```
+- **Deletion** (`:170-222`) rewrites the record's id as 0 (a tombstone) and rewrites `num_feats_valid` at offset 2. Loading skips records with id 0 and checks the valid count.
+- **No face:** `recognize` returns an empty result and `enroll` returns ESP_FAIL.
+
+## 6. Other things needed for bit-exactness
+- **Image decode.** The example decodes JPEG with `dl::image::sw_decode_jpeg`, which is not PIL. Golden vectors must start from the same RGB pixels: use PPM or raw frames, not JPEG.
+- **Keypoints.** The keypoints are the detector's ints after clipping (docs §8). Any detector difference moves M.
+- **Rounding modes.**
+  - lrintf assumes the FPU's dynamic rounding mode is RNE.
+  - PIE rounding is set separately by `dl_esp32p4_cfg_round`. The conv and PRelu kernels set half-even themselves.
+- **PRelu half-even on the negative branch** is settled for MNP (docs §4) and assumed to hold here; this model has 35 PRelus, so it matters a lot.
+- **Add saturation** (§2) is assumed from the instruction description; it has not been seen on the device.
+- **Pad symmetry.** Nothing new: all pads are symmetric, and the 7x7 dw has no pad.
+- **Termination of `sqrt_newton`.** It loops while `|Δ| > 1e-5f`. For large arguments the float iteration could in principle oscillate by 1 ulp > 1e-5 and never stop. It terminated for every case tried; the simulation raises an exception if it ever would not.
+
+## 7. Reference implementation: `scratchpad/recogsim/sim.py`
+**Usage**
+- `python3 -I sim.py img.ppm x0 y0 … x4 y4 [dump=out.npz]` runs the full pipeline: transform, warp, int8 MFN, L2. It prints M, checksums of the model input, and the 512 int8 embedding values.
+- `python3 -I sim.py img.jpg detect` takes the keypoints from `facesim/sim.py`.
+- `python3 -I sim.py examples` reproduces the ESP-DL example.
+- Options: `fma=0|1`, `recip=0|1`.
+- The simulation asserts: bias exponent, positive shifts, equal Add/Concat exponents, Linear activations.
+
+**me2.ppm** (`me2_golden.npz` has the input, embedding, feat, M and kp; `me2_aligned.png` is the aligned face, scaled ×3):
+```
+kp [433,268, 449,397, 494,298, 548,259, 533,394]
+model input: sum -1060226, sumsq 42107156, pixel(0,0) BGR [-10,-12,-24]
+embedding (e-5): sum -334, sumsq 418438, first 16: -8 59 -72 35 3 6 48 25 -10 11 7 -24 -5 -15 54 -29
+```
+**ESP-DL example** (`examples/human_face_recognition`, fetched with sparse-checkout): enrol bill1, bill2, musk1; query musk2. The JPEGs are decoded with PIL and the keypoints come from the detector simulation:
+```
+bill1 kp [134,106,134,153,158,136,181,105,181,153]   bill2 [135,124,144,178,168,152,185,117,185,173]
+musk1 kp [125,137,134,189,152,160,175,132,173,186]   musk2 [110,144,113,199,131,174,159,140,162,196]
+musk2 vs id1 0.0031, id2 -0.0011, id3 0.8113  -> result id 3      bill1 vs bill2 0.6213
+```
+- The README (`examples/human_face_recognition/README.md`) says `id: 3, sim: 0.750027`.
+  - The winning id matches. The value does not: it is 0.81 here.
+  - Expected causes: a different JPEG decoder, keypoints that differ by a pixel or so, and an unspecified build (the detector README was also off).
+  - This is not a check of bit-exactness.
+
+## Could not determine
+- Whether ESP-DL's compiled code fuses `(M1*r+M2)` (fma) and whether it turns `/num` into a reciprocal multiply (§3d). Both change M by about an ulp and occasionally a sampled pixel.
+- The exact float behaviour of the double soft-float code under `-ffast-math` (reassociation). The simulation follows source order.
+- Add saturation and the whole MFN int8 path have not been checked on the device. No ESP-DL golden embedding exists in the repo; the only reference is the README similarity, 0.750027, which does not match.
