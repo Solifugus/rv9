@@ -121,7 +121,10 @@ loadable pieces:
 | `/pipe/name` | a pipe -- what one program writes, another reads |
 | `/gpio/N`, `/pwm0`, `/adc0`, `/tsens` | hardware; a pin reports edges, and the interrupt times the pulse between them |
 | `/i2c0/0x68` | a chip on the two-wire bus, through IFM; the register lives on the path so a read is one transaction |
-| `/w0` | a window you draw on by writing SVG to it |
+| `/w0` | a window you draw on by writing SVG to it, or by putting pixels in it |
+| `/au0` | the microphones and the speaker (P4) |
+| `/stt0` | speech to text: write a recording, read what was said (P4, Whistle) |
+| `/cam0` | the camera: ask for a picture, read it as JPEG or RGB565 (P4) |
 | `/pub0/NAME` | a published value with an owner and a sequence number |
 
 ### Real-time work is admitted, not started
@@ -233,17 +236,32 @@ rasteriser and the target profile.
 
 ## Building
 
-Requires ESP-IDF v6.0.3 and an ESP32-C5 board. Development uses the
-Waveshare ESP32-C5-LCD-1.47.
+Requires ESP-IDF v6.0.3. The main board is the Waveshare
+ESP32-P4-WIFI6-Touch-LCD-7B (a P4 with 32 MB of flash, 32 MB of PSRAM, a
+1024x600 touch panel, a C6 for WiFi, two microphones, a speaker and an OV5647
+camera). RV-9 started on the Waveshare ESP32-C5-LCD-1.47 and still builds
+for it; the C3 builds too. Each target has its own defaults and its own
+partition table (`sdkconfig.defaults.esp32p4`, `partitions-p4.csv`), and
+`set-target` picks them:
 
 ```sh
 . ~/esp/esp-idf/export.sh
+idf.py set-target esp32p4               # once; esp32c5 for the small board
 idf.py build                            # firmware
 ./tools/build_modules.sh                # modules -> build/modules.bin
 idf.py -p /dev/ttyACM0 flash
 ./tools/flash_modules.sh /dev/ttyACM0   # the module store
 idf.py -p /dev/ttyACM0 monitor
 ```
+
+`flash_modules.sh` reads the store's offset out of whichever partition table
+the build used -- 0x500000 on the P4, 0x190000 on the C5 -- so the same
+command is right for both. After the first time, `idf.py app-flash` writes
+only the firmware and leaves the store and the volume alone.
+
+The camera, the detectors and speech also want files on the microSD card:
+the models, which are not in the firmware or the store. The tutorial's §14
+says where they come from and how to put them there.
 
 On the P4, **unplug the board and plug it back in after flashing if you want
 the touch panel.** Flashing leaves the GT911 controller not scanning, its
@@ -283,6 +301,13 @@ want:
 - [**Roadmap**](docs/roadmap.md): phases, what is done, and what is next.
 - [**Memory**](docs/memory.md): where every kilobyte goes, measured on the
   board.
+- [**Commands**](docs/commands.md): everything you can type, checked
+  against the module store so it cannot go stale.
+- [**ESP-DL arithmetic**](docs/esp-dl-arithmetic.md): exactly what
+  Espressif's int8 detectors and face recognition compute, rounding
+  included, as `detect` reproduces it.
+- [**Voice modules**](docs/rv9-voice-modules-design.md): the proposal for
+  speech on the P4, with the measurements it rests on.
 - [**Alignment**](docs/alignment.md): notes from the
   [R9](https://github.com/Solifugus/r9) side, and where RV-9 stands against
   each one.
@@ -302,6 +327,13 @@ I²C, pulse timing measured in the interrupt handler, publication, a shell
 with pipes, redirection, scripts and conditional execution, a complete set
 of small tools, a clock taken from the network, and the real-time class with
 admission, derived priority, watchdog, failsafes and memory reserves.
+
+On the P4, the senses: recording and playing sound, speech to text
+(Whistle, on the card), a camera (`snap`, `view`), and `detect`, which finds
+people and faces and says whose faces they are. The detectors are
+Espressif's ESP-DL models, read from the card by a plain-C module that gives
+ESP-DL's answers byte for byte, with nothing of ESP-DL in the firmware. And
+`mystify`, because a window that can animate should.
 
 Verified as mechanisms but not yet against real parts: **I²C** has only
 talked to an empty bus, and the **sonic ranger** command has only been

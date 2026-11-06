@@ -26,11 +26,14 @@ about.
 
 ## 1. What you need
 
-- **An ESP32-C5 board.** Development is on a Waveshare ESP32-C5-LCD-1.47.
-  Anything with a C5 will run the kernel, processes, I/O and the shell; the
-  display, microSD and pin numbers in this document are that board's.
+- **An ESP32-P4 or ESP32-C5 board.** The main board is now the Waveshare
+  ESP32-P4-WIFI6-Touch-LCD-7B; RV-9 began on the Waveshare ESP32-C5-LCD-1.47,
+  and most of this document was written on it. Either runs the kernel,
+  processes, I/O and the shell. Sound, the camera and seeing (§14) need the
+  P4. Where pin numbers appear, they are the C5 board's.
 - **ESP-IDF v6.0.3.** Earlier versions do not have C5 support in the state
-  RV-9 expects.
+  RV-9 expects. `idf.py set-target esp32p4` (or `esp32c5`) once, before the
+  first build, picks that chip's defaults and partition table.
 - **A USB-C cable**, which is also the console.
 
 Optionally, and only for later sections: a microSD card, an LED and a
@@ -755,7 +758,160 @@ from a machine that may be using it.
 of the flash image on purpose (`.nostore`), served over HTTP and fetched. If it
 runs, a program reached the machine without anybody reflashing it.
 
-## 14. Where to look next
+## 14. Seeing and hearing
+
+This section needs the P4: its microphones, its speaker and its camera.
+
+### Typing less
+
+First, a convenience for everything below. The shell keeps the last kilobyte
+of commands. **Up** and **down** walk through them, **backspace** edits, and
+**enter** runs the line you have, on the console and over SSH alike. A line
+the same as the one before it is not kept twice.
+
+### Sound
+
+```
+rv9> rec /sd0/a.raw 5 &
+recording...
+rv9> play beep 3
+80000 frames to /sd0/a.raw; peak MIC1 27% (9120), MIC2 43% (14388)
+rv9> play /sd0/a.raw
+```
+
+`rec` records both microphones at 16 kHz into memory and writes the file
+afterwards, so a slow write cannot lose samples. Running it in the
+background with a beep beside it is how to check the microphones without
+talking at them. `listen` is speech to
+text: it beeps, records four seconds, and prints what it heard.
+
+```
+rv9> listen
+listening...
+thinking...
+turn on the light
+(4000 ms of audio: 6500 ms to recognise)
+```
+
+The words are understood by Whistle, by Cactus Compute (Apache 2.0), through
+`/stt0`. Its 17 MB model is too big for the firmware and the store, so it
+lives on the card as `/sd0/whistle.cact` (how to put it there is below).
+
+### The camera
+
+```
+rv9> snap /sd0/me.jpg
+rv9> view 20
+```
+
+`snap` takes one 800x640 picture: a JPEG, or with `-r` the raw RGB565
+pixels. `view` shows what the camera sees, about eight frames a second,
+until the screen is touched. White balance adjusts itself from frame to
+frame, so the first second or so can look green.
+
+### Seeing people and faces
+
+```
+rv9> detect people
+person 0.88 179,251 317,616
+(41 ms for the picture, 127 ms to look at it)
+rv9> detect faces
+face 0.61 347,113 639,491 eyes 433,268 548,259 nose 494,298 mouth 449,397 533,394
+(41 ms for the picture, 29 ms to look at it)
+```
+
+Each line has a score, a box in the camera's pixels, and for a face five
+points. The detectors are Espressif's ESP-DL models. `detect` reads them from
+the card and does their arithmetic in plain C, a module of 28 KB, with
+the P4's vector unit where it has one. The answers are ESP-DL's, byte for
+byte, and finding faces is a little faster than ESP-DL is.
+[esp-dl-arithmetic.md](esp-dl-arithmetic.md) records exactly what is
+computed. The face detector wants a face more or less from the front: from
+below, looking up a nose, it finds nothing, and neither does Espressif's own
+code.
+
+Whose face it is:
+
+```
+rv9> detect enroll matthew
+look at the camera, and turn your head a little
+learnt matthew, from 5 pictures
+rv9> detect who
+face matthew 0.83 347,113 639,491
+(41 ms for the picture, 29 ms to look at it, 233 ms to know it)
+rv9> detect known
+matthew
+rv9> detect forget matthew
+forgotten
+```
+
+`enroll` keeps one signature per name, 512 numbers averaged over five
+pictures, in `/sd0/faces.db`. `who` compares each face it finds against
+them and names the closest if it is close enough, or says `unknown`.
+Nothing leaves the board.
+
+### Putting the models on the card
+
+None of these models is in the repository. They are other people's work
+under their own licences, and they are big. Each one is fetched once onto
+the card.
+
+The detectors come from [esp-dl](https://github.com/espressif/esp-dl) (MIT),
+under `models/`. Take the **p4** files: the recognition model's s3 file
+holds different weights. `tools/mkpico.py` converts each one into the flat
+file `detect` reads. It changes the container, not a weight.
+
+```sh
+M=esp-dl/models
+tools/mkpico.py $M/pedestrian_detect/models/p4/pedestrian_detect_pico_s8_v1.espdl   out/pico.rv9m
+tools/mkpico.py $M/human_face_detect/models/p4/human_face_detect_msr_s8_v1.espdl    out/face1.rv9m
+tools/mkpico.py $M/human_face_detect/models/p4/human_face_detect_mnp_s8_v1.espdl    out/face2.rv9m
+tools/mkpico.py $M/human_face_recognition/models/p4/human_face_feat_mfn_s8_v1.espdl out/feat.rv9m
+```
+
+Whistle comes from Hugging Face, `Cactus-Compute/whistle`, the file
+`whistle.cact`:
+
+```sh
+python3 -c "from huggingface_hub import hf_hub_download; import shutil
+shutil.copy(hf_hub_download('Cactus-Compute/whistle','whistle.cact'), 'out/whistle.cact')"
+```
+
+Then serve the directory from the PC and fetch each file from the board,
+as in §13:
+
+```sh
+cd out && python3 -m http.server 8000
+```
+```
+rv9> fetch 192.168.1.12:8000 /pico.rv9m > /sd0/pico.rv9m
+rv9> fetch 192.168.1.12:8000 /face1.rv9m > /sd0/face1.rv9m
+rv9> fetch 192.168.1.12:8000 /face2.rv9m > /sd0/face2.rv9m
+rv9> fetch 192.168.1.12:8000 /feat.rv9m > /sd0/feat.rv9m
+rv9> fetch 192.168.1.12:8000 /whistle.cact > /sd0/whistle.cact
+```
+
+The names matter: `detect` and `/stt0` look for exactly these.
+
+### Getting a file off the board
+
+The card is RBF, not FAT, so a PC cannot read it directly. Send the file
+over the network instead. On the PC:
+
+```sh
+nc -l 192.168.1.12 9000 > me.jpg
+```
+
+and on the board:
+
+```
+rv9> copy /sd0/me.jpg /n0/192.168.1.12/9000
+```
+
+The bytes arrive exactly as they are. `dump` over the serial console looks
+easier, but log lines land in the middle of it.
+
+## 15. Where to look next
 
 | | |
 |---|---|
@@ -764,6 +920,7 @@ runs, a program reached the machine without anybody reflashing it.
 | [design.md](design.md) | **Why**, and the wrong turns. Much the longest, and the one worth reading in order. |
 | [roadmap.md](roadmap.md) | What is not done, and what is open. |
 | [memory.md](memory.md) | Where the RAM actually goes. |
+| [esp-dl-arithmetic.md](esp-dl-arithmetic.md) | What Espressif's detectors and face recognition compute, exactly, for anyone checking `detect` or porting another model. |
 | `docs/target/rv9-profile.json` | The machine-readable half, generated from the sources. A compiler targeting RV-9 reads this, not the prose. |
 | `profile` | The same question asked of *this board* — its devices, its limits, what each is built from. |
 

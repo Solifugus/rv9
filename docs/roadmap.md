@@ -1058,6 +1058,63 @@ permission model beyond ownership), `find` (`dir` piped through `match`).
 
 ---
 
+## Phase 12 — The senses  ◐ hearing and seeing done; acting on them next
+
+The P4 board has two microphones, a speaker and a camera, and an autonomous
+machine needs to hear and see. Each sense is a device. What it is used for
+lives in modules, and the big models live on the card.
+
+- **`/au0` — sound, done**, design §58. Both microphones and the speaker,
+  as one device. `rec`, `play`, and `play beep` for testing the microphones
+  without a voice.
+- **`/stt0` — speech to text, done**, design §59. Whistle (Cactus Compute,
+  Apache 2.0), checked against its own engine, with a PIE kernel. The 17 MB
+  model is read from `/sd0/whistle.cact` on first use. `listen`.
+- **`/cam0` — the camera, done**, design §61. OV5647 through CSI and the
+  ISP, a picture on request, JPEG in hardware or raw RGB565, grey-world
+  white balance. `snap`, `view`.
+- **`detect` — people and faces, done**, design §62. ESP-DL's pedestrian
+  and two-stage face detectors, read from the card by a plain-C module with
+  no ESP-DL in the firmware, bit-exact against ESP-DL on the board. Channels
+  are padded to sixteens so the vector unit runs every layer. Faces take
+  29 ms (ESP-DL 32), people 127 ms (ESP-DL 55).
+- **`detect who` — recognition, done.** ESP-DL's face signature, aligned
+  from the five points exactly as ESP-DL aligns them, matching ESP-DL's
+  reference byte for byte. `enroll`, `known`, `forget`, with names in
+  `/sd0/faces.db`. 233 ms a face (ESP-DL 82). The time goes to external
+  memory: convolutions 106 ms, depthwise 48, PReLU 45.
+- **The arithmetic, written down**: `docs/esp-dl-arithmetic.md`, enough to
+  rebuild every kernel without ESP-DL's source.
+- **`mystify`**, design §63. A demonstration that the window can animate,
+  and the reason the rasteriser is five times faster at outlines.
+
+Next, in roughly this order:
+
+- **Acting on what it sees**: follow a face, or publish where people are on
+  `/pub0`, so a control loop can use detections without running a model.
+- **Faster recognition**: keep the hot weights in internal RAM, or tile the
+  convolutions so that each weight is fetched from PSRAM once.
+- **AprilTags**, for position and range rather than presence.
+- **More screen savers** and a `saver` that rotates through them.
+
+### Less in the firmware, more on the card
+
+RV-9 will grow, and not everything it can do will run at once. The detectors
+showed that a capability can live on the card and cost nothing until it is
+used. The agreed order:
+
+1. **Commands on demand from `/sd0`**: a command not in the store is looked
+   for on the card and loaded when typed. Measure first what the store and
+   the firmware hold that is rarely used.
+2. **The self-tests out of the firmware**, into modules run at boot.
+3. **Whistle as a module**, so `/stt0` costs nothing until somebody listens.
+4. Perhaps **loadable drivers**: a device whose driver is read from the card
+   when it is first opened.
+
+After that, **system images**: a way to describe a platform and a purpose
+(this board, these devices, these commands) and build the firmware, the
+store and the card's contents for it.
+
 ## Working with two boards attached
 
 `/dev/ttyACM0` is not the C5. Enumeration order depends on which board was

@@ -220,6 +220,33 @@ Still missing:
 - **A reserve inside the reserve** for real-time work specifically. An RT
   process competes for the same available bytes as a chart.
 
+## The P4: a second kind of memory
+
+Everything above is the C5. The P4 has 32 MB of PSRAM beside its internal
+SRAM, and the senses live there. Internal memory works as described above,
+except that the floor is **48 KB** (`CONFIG_RV9_HEAP_FLOOR=49152`): with the
+C5's 12 KB, the radio was starving.
+
+A module asks for external memory as an arena, declared in its manifest
+(`heap_max`, `heap_in=external`). It is allocated at fork, charged against
+`ext_max` rather than `mem_max`, and freed however the process ends (design
+§57). The devices allocate their own memory when they are first opened.
+These figures come from the sources, not from measurement:
+
+| who | external | when |
+|---|---|---|
+| `/cam0` | 1,536,000 (one 800x640 RGB565 frame, and a JPEG buffer half its size) | while the camera is open |
+| `/stt0` | the model (16.9 MB), a 30 s recording buffer (960,000), and the encoder's workspace | from the first use until restart |
+| `detect` | 4 MB arena: the models it needs (0.4 MB for people, 0.15 MB for faces, 1.4 MB with recognition), one model's activations, and a frame (1,024,000) | while it runs |
+| `rec` | 1 MB arena, 16 s of two-channel audio | while it runs |
+| `view` | 64 KB arena, a scaled strip of the picture | while it runs |
+
+So the camera, recognition and Whistle fit together with room to spare, and
+the 32 MB is no longer the constraint. Speed is. PSRAM is far slower than
+internal RAM, and the recognition model's weights are read from it on every
+layer. That is most of why `detect who` takes 233 ms where ESP-DL takes 82
+(roadmap, Phase 12).
+
 ## What this means for a language runtime
 
 - **CPU is not the constraint.** A 50 Hz control loop executes in 1–2 µs on
