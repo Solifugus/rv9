@@ -100,6 +100,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     int  body_bytes = 0;
     bool in_body = false;
     int  match = 0;              /* how much of "\r\n\r\n" has been seen */
+    bool short_write = false;
 
     for (;;) {
         int n = env->read(p, st->buf, BUF_LEN);
@@ -124,13 +125,23 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         }
 
         if (n > start) {
-            env->write(RV9_STDOUT, st->buf + start, (uint32_t)(n - start));
-            body_bytes += n - start;
+            /* A full volume takes what fits and says so only by taking
+               less: counting what was sent rather than what was kept
+               once reported a whole body onto /r0 that held a tenth. */
+            int w = env->write(RV9_STDOUT, st->buf + start, (uint32_t)(n - start));
+            if (w > 0) body_bytes += w;
+            if (w < n - start) { short_write = true; break; }
         }
     }
 
     env->close(p);
 
+    if (short_write) {
+        m_say(env, RV9_STDERR, "fetch: out of room after ");
+        m_num(env, RV9_STDERR, body_bytes);
+        m_say(env, RV9_STDERR, " bytes; the rest is not there\n");
+        return -7;
+    }
     m_say(env, RV9_STDERR, "--- ");
     m_num(env, RV9_STDERR, body_bytes);
     m_say(env, RV9_STDERR, " bytes of body\n");

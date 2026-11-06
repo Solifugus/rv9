@@ -191,7 +191,7 @@ rasteriser out of its own — see `modules/pic/build.conf` and
 | `wifi <ssid> <password>` | Associate. Credentials are typed by whoever owns the network and are in no source file. |
 | `scan` | Visible access points. Worth having here specifically: the C5 has a 5 GHz radio and most ESP32s do not. |
 | `netstat` | State, SSID, address. |
-| `fetch <host[:port]> [path]` | An HTTP GET, with no sockets, no DNS call and no connect — it builds a path name, opens it, writes a request and reads the answer. Headers to stderr, body to stdout, so `fetch host /x.mod > /r0/x.mod` puts exactly the bytes on the volume. |
+| `fetch <host[:port]> [path]` | An HTTP GET, with no sockets, no DNS call and no connect — it builds a path name, opens it, writes a request and reads the answer. Headers to stderr, body to stdout, so `fetch host /x.mod > /r0/x.mod` puts exactly the bytes on the volume. If the volume fills, it says how much it kept and fails, rather than counting what it was sent. |
 | `passwd <password>` / `passwd show` | The login password, and the host key fingerprint. Goes to `/sshcfg`, which is the SSH driver bound so that opening it does not wait for a login. |
 | `authkey` / `authkey list` / `authkey clear` | Trust a public key, read from stdin because a key line is longer than an argument should be. No Ed25519 in mbedTLS as shipped — use ECDSA P-256 or RSA. |
 | `sshd` | A shell over SSH. |

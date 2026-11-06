@@ -1101,9 +1101,10 @@ Next, in roughly this order:
   is the first candidate to measure on the P4. Until then, `tools/say.sh`
   makes the speech on the PC with espeak-ng and has the board fetch and play
   it.
-- **`fetch` onto a full volume says nothing.** Onto the 16 KB `/r0`, it
-  kept 13,824 bytes of 138,912 and reported the whole body. A write that
-  falls short has to be an error, as it is in `rec`.
+- **`fetch` onto a full volume, fixed.** Onto the 16 KB `/r0` it kept
+  13,824 bytes of 138,912 and reported the whole body. It counted what it was
+  sent, not what was kept. It now stops at the short write, says how much is
+  there, and returns −7.
 - **More screen savers** and a `saver` that rotates through them.
 
 ### Less in the firmware, more on the card
