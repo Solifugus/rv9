@@ -7174,6 +7174,17 @@ Found on the way: `detect` needed a bigger stack once a face reached the
 second stage, and an SD card's occasional CRC error on one sector had
 failed a whole model load — the driver now tries each sector three times.
 
+**Padded channels**, after: the face detector's first stage is mostly 24,
+20, 8 and 2 channels, and the vector kernels need sixteen aligned bytes —
+so 78 of its 112 ms ran in C. The model file went to version 3: every
+tensor but the input picture keeps a channel stride rounded up to sixteen,
+and the converter pads the weights to match with zeros, so a padded channel
+contributes nothing and computes nothing but zero. Every layer then runs on
+the vector unit. Faces 112 → **34 ms** (ESP-DL: 32), people 156 → 148; both
+hashes unchanged, and the face outputs still match ESP-DL's captures byte
+for byte. The heads' padding costs 60 KB of zeros in the people model's
+file and nothing in the arena.
+
 ## 63. Fast enough to animate
 
 `mystify` — the old screen saver, a dozen outlined polygons a frame on `/w0`

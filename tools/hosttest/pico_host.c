@@ -120,7 +120,7 @@ int main(int argc, char **argv)
 
     if (face) {
         pico_face_t f[10];
-        int n = pico_faces(&p, &p2, arena, in, w, h, fmt, f, 10, NULL);
+        int n = pico_faces(&p, &p2, arena, in, w, h, fmt, f, 10, NULL, NULL);
         /* The first stage again, alone, for its hash and its candidates. */
         pico_input(&p, arena, in, w, h, fmt);
         pico_layers(&p, arena);
@@ -150,11 +150,11 @@ int main(int argc, char **argv)
                 pico_node(&p, arena, i);
                 const uint8_t *nd = p.nodes + i * 32;
                 uint32_t t = nd[16] | nd[17] << 8;
-                int th, tw, tc, te;
+                int th, tw, tc, te, ts = pico_stride(&p, t);
                 const int8_t *d = pico_tensor(&p, arena, t, &th, &tw, &tc, &te);
                 snprintf(name, sizeof(name), "%s/t%03u.bin", dump, t);
                 FILE *f = fopen(name, "wb");
-                fwrite(d, 1, (size_t)th * tw * tc, f);
+                for (int i = 0; i < th * tw; i++) fwrite(d + i * ts, 1, (size_t)tc, f);
                 fclose(f);
             }
             n = pico_post(&p, arena, w, h, b, 10);

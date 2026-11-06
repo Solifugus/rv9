@@ -23,24 +23,34 @@ The models are Espressif's (esp-dl, models/pedestrian_detect and
 models/human_face_detect, MIT). This changes their container, not one
 weight.
 
-THE FILE, version 2, all little-endian:
+THE FILE, version 3, all little-endian:
 
     header   magic "RV9M", version, tensors, nodes, input tensor,
              kind (KIND_*), input h, input w, flags (FL_BGR),
              outputs, output tensors[8], arena bytes, blob bytes  (80 bytes)
-    tensor   h, w, c (u16), exp (i16), arena offset (u32)          (12 each)
+    tensor   h, w, c, stride (u16), exp (i16), 0, arena offset (u32) (16 each)
     node     op, relu, k, stride, pad top, bottom, left, right,
              flags, shift (i8), 0, 0, in0, in1, out (u16), 0,
              w_off, b_off (NONE: no bias), aux (u32)               (32 each)
     blob     weights, biases and tables, each 16-byte aligned
 
+CHANNELS ARE PADDED TO SIXTEENS in memory: a pixel of a 24-channel tensor
+takes 32 bytes, its `stride`, and the last 8 are never read for an answer.
+That is what lets the P4's vector unit, which loads sixteen aligned bytes,
+run every layer rather than only those whose channels happen to come in
+sixteens -- the face detector's first stage is mostly 24, 20, 8 and 2. The
+weights are padded to match, with zeros, so a padded channel contributes
+nothing and computes nothing but zero. The input picture alone is not
+padded (stride 3): padding it would make it five times the size.
+
 Weights in the blob:
-    conv     [cout/16][k][k][cin][16] int8 when cout is a multiple of 16
-             (flag F_LANES: ESP-DL's own order), else [cout][k][k][cin];
-             then bias [cout] int32, if it has one
-    dwconv   [k][k][c] int8, then bias [c] int32 if any
+    conv     [cout/16 rounded up][k][k][cin stride][16] int8: sixteen
+             output channels side by side, as the vector unit multiplies
+             them -- ESP-DL's own order, padded; then bias, int32, one per
+             output channel rounded up to sixteen, if it has one
+    dwconv   [k][k][c stride] int8, then bias [c stride] int32 if any
     sigmoid  256 int8: y = table[x + 128]
-    prelu    alpha [c] int8; shift = the negative side's right shift,
+    prelu    alpha [c stride] int8; shift = the negative side's right shift,
              aux = the positive side's left shift
     gap      aux = the float32 bits of 2^(in-out) / (h*w), which ESP-DL
              multiplies by in float; the engine reproduces that exactly
@@ -225,6 +235,12 @@ def main():
         tensors.append([h, w, c, exps[name]])
         return names[name]
 
+    def stride(t):
+        return 3 if t == 0 else (tensors[t][2] + 15) & ~15
+
+    def pad16(n):
+        return (n + 15) & ~15
+
     tensor(in_name, in_h, in_w, 3)
     blob = bytearray()
 
@@ -271,25 +287,33 @@ def main():
             assert B is None or B['exp'][0] == ein + W['exp'][0]
             ho, wo = (h + pt + pb - k) // s + 1, (w + pl + pr - k) // s + 1
             nb = k * k * cin * (1 if dw else cout)
-            # A conv whose outputs come in sixteens keeps ESP-DL's order:
-            # sixteen output channels side by side is what the P4's vector
-            # unit multiplies, one input at a time. The rest are unpacked.
-            lanes = not dw and cout % 16 == 0
+            cs = stride(src[0])
             if dw:
-                wt = unpack_dw(W['raw'][:nb], k, c)
-            elif lanes:
-                wt = W['raw'][:nb]
+                plain = unpack_dw(W['raw'][:nb], k, c)          # [k][k][c]
+                wt = bytearray(k * k * cs)
+                for t in range(k * k):
+                    wt[t * cs:t * cs + c] = plain[t * c:(t + 1) * c]
             else:
-                wt = unpack_conv(W['raw'][:nb], k, cin, cout)
+                plain = unpack_conv(W['raw'][:nb], k, cin, cout)  # [co][k][k][ci]
+                groups = pad16(cout) // 16
+                wt = bytearray(groups * k * k * cs * 16)
+                for co in range(cout):
+                    for t in range(k * k):
+                        for ci in range(cin):
+                            wt[((co // 16) * k * k + t) * cs * 16 + ci * 16 + co % 16] = \
+                                plain[(co * k * k + t) * cin + ci]
+            wt = bytes(wt)
+            nbias = cs if dw else pad16(cout)
+            bias = (B['raw'][:4 * cout] + bytes(4 * (nbias - cout))) if B else None
             assert a['activation'] in ('Relu', 'Linear')
             node.update(op=OP_DW if dw else OP_CONV, k=k, stride=s,
                         pads=(pt, pb, pl, pr),
                         relu=1 if a['activation'] == 'Relu' else 0,
                         flags=(F_REM if cout % 16 else 0) |
-                              (F_LANES if lanes else 0),
+                              (0 if dw else F_LANES),
                         shift=exps[out] - W['exp'][0] - ein,
                         w_off=put(wt),
-                        b_off=put(B['raw'][:4 * cout]) if B else NONE)
+                        b_off=put(bias) if B else NONE)
             assert node['shift'] > 0
             o = tensor(out, ho, wo, cout)
         elif op == 'PRelu':
@@ -298,7 +322,7 @@ def main():
             neg = exps[out] - ein - A['exp'][0]
             assert neg > 0 and ein >= exps[out]
             node.update(op=OP_PRELU, shift=neg, aux=ein - exps[out],
-                        w_off=put(A['raw'][:c]))
+                        w_off=put(A['raw'][:c] + bytes(stride(src[0]) - c)))
             o = tensor(out, h, w, c)
         elif op == 'GlobalAveragePool':
             node['op'] = OP_GAP
@@ -360,7 +384,7 @@ def main():
         last[x] = len(nodes)
 
     def size(t):
-        return (tensors[t][0] * tensors[t][1] * tensors[t][2] + 15) & ~15
+        return (tensors[t][0] * tensors[t][1] * stride(t) + 15) & ~15
 
     offs = {}
     live = []                   # (offset, size, tensor)
@@ -377,13 +401,13 @@ def main():
     arena = max(offs[t] + size(t) for t in offs)
 
     f = bytearray(b'RV9M')
-    f += struct.pack('<9I', 2, len(tensors), len(nodes), 0, kind, in_h, in_w,
+    f += struct.pack('<9I', 3, len(tensors), len(nodes), 0, kind, in_h, in_w,
                      flags, len(outs))
     f += struct.pack('<8I', *(outs + [0] * (8 - len(outs))))
     f += struct.pack('<II', arena, len(blob))
     assert len(f) == 80
     for i, (h, w, c, e) in enumerate(tensors):
-        f += struct.pack('<HHHhI', h, w, c, e, offs[i])
+        f += struct.pack('<HHHHhHI', h, w, c, stride(i), e, 0, offs[i])
     for n in nodes:
         f += struct.pack('<BBBBBBBBBbBBHHHHIII', n['op'], n['relu'], n['k'],
                          n['stride'], *n['pads'], n['flags'], n['shift'], 0, 0,

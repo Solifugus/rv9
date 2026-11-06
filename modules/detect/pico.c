@@ -27,7 +27,7 @@ enum { OP_CONV = 1, OP_DW, OP_GAP, OP_LUT, OP_MUL, OP_UP2, OP_CAT, OP_PRELU };
 #define NO_BIAS  0xffffffffu
 
 #define HDR      80
-#define TSZ      12
+#define TSZ      16
 #define NSZ      32
 #define TOP_K    10
 
@@ -148,22 +148,27 @@ static int32_t fmul(int32_t a, uint32_t f, int trunc)
 
 /* ---- the model file ---- */
 
-typedef struct { int h, w, c, exp; uint32_t off; } tinfo_t;
+/* `c` channels, stored `s` apart: c rounded up to sixteen, so the vector
+   unit's loads are aligned -- see mkpico.py. The input picture alone has
+   s == c == 3. */
+typedef struct { int h, w, c, s, exp; uint32_t off; } tinfo_t;
 
 static tinfo_t tinfo(const pico_t *p, uint32_t t)
 {
     const uint8_t *b = p->tensors + t * TSZ;
     tinfo_t r = { (int)rd16(b), (int)rd16(b + 2), (int)rd16(b + 4),
-                  (int16_t)rd16(b + 6), rd32(b + 8) };
+                  (int)rd16(b + 6), (int16_t)rd16(b + 8), rd32(b + 12) };
     return r;
 }
+
+int pico_stride(const pico_t *p, uint32_t t) { return tinfo(p, t).s; }
 
 int pico_open(pico_t *p, const void *model, uint32_t size)
 {
     const uint8_t *m = (const uint8_t *)model;
     if (size < HDR || m[0] != 'R' || m[1] != 'V' || m[2] != '9' || m[3] != 'M')
         return -1;
-    if (rd32(m + 4) != 2) return -2;
+    if (rd32(m + 4) != 3) return -2;
     p->m = m;
     p->pie = 0;
     p->n_tensors = rd32(m + 8);
@@ -254,7 +259,7 @@ void pico_input(const pico_t *p, void *arena, const void *px, int w, int h,
 /* ---- the layers ---- */
 
 typedef struct {
-    int k, s, pt, pl, shift, relu, lanes;
+    int k, s, pt, pl, shift, relu;
     const int8_t *w;
     const uint8_t *bias;         /* NULL: none */
 } conv_t;
@@ -262,30 +267,29 @@ typedef struct {
 static void conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                  const conv_t *cv)
 {
-    int cin = ti.c, k = cv->k;
+    int cin = ti.c, cs = ti.s, k = cv->k;
     for (int oy = 0; oy < to.h; oy++) {
         for (int ox = 0; ox < to.w; ox++) {
+            int8_t *o = out + (oy * to.w + ox) * to.s;
             for (int co = 0; co < to.c; co++) {
                 int32_t acc = cv->bias ? (int32_t)rd32(cv->bias + 4 * co) : 0;
-                /* Lanes: sixteen output channels side by side, so one
-                   channel's weights are every sixteenth byte. */
-                const int8_t *f = cv->lanes
-                    ? cv->w + (co >> 4) * k * k * cin * 16 + (co & 15)
-                    : cv->w + co * k * k * cin;
-                int step = cv->lanes ? 16 : 1;
+                /* Sixteen output channels side by side, so one channel's
+                   weights are every sixteenth byte; a tap's are the input's
+                   stride of them, padding included. */
+                const int8_t *f = cv->w + (co >> 4) * k * k * cs * 16 + (co & 15);
                 for (int ky = 0; ky < k; ky++) {
                     int iy = oy * cv->s - cv->pt + ky;
                     if (iy < 0 || iy >= ti.h) continue;      /* zero padding */
                     for (int kx = 0; kx < k; kx++) {
                         int ix = ox * cv->s - cv->pl + kx;
                         if (ix < 0 || ix >= ti.w) continue;
-                        const int8_t *a = in + (iy * ti.w + ix) * cin;
-                        const int8_t *b = f + (ky * k + kx) * cin * step;
-                        for (int ci = 0; ci < cin; ci++) acc += a[ci] * b[ci * step];
+                        const int8_t *a = in + (iy * ti.w + ix) * cs;
+                        const int8_t *b = f + (ky * k + kx) * cs * 16;
+                        for (int ci = 0; ci < cin; ci++) acc += a[ci] * b[ci * 16];
                     }
                 }
                 int8_t y = sat8(rhe(acc, cv->shift));
-                *out++ = cv->relu && y < 0 ? 0 : y;
+                o[co] = cv->relu && y < 0 ? 0 : y;
             }
         }
     }
@@ -294,9 +298,10 @@ static void conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
 static void dwconv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                    const conv_t *cv)
 {
-    int c = ti.c, k = cv->k;
+    int c = ti.c, cs = ti.s, k = cv->k;
     for (int oy = 0; oy < to.h; oy++) {
         for (int ox = 0; ox < to.w; ox++) {
+            int8_t *o = out + (oy * to.w + ox) * to.s;
             for (int ch = 0; ch < c; ch++) {
                 int32_t acc = cv->bias ? (int32_t)rd32(cv->bias + 4 * ch) : 0;
                 for (int ky = 0; ky < k; ky++) {
@@ -305,12 +310,12 @@ static void dwconv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                     for (int kx = 0; kx < k; kx++) {
                         int ix = ox * cv->s - cv->pl + kx;
                         if (ix < 0 || ix >= ti.w) continue;
-                        acc += in[(iy * ti.w + ix) * c + ch] *
-                               cv->w[(ky * k + kx) * c + ch];
+                        acc += in[(iy * ti.w + ix) * cs + ch] *
+                               cv->w[(ky * k + kx) * cs + ch];
                     }
                 }
                 int8_t y = sat8(rhe(acc, cv->shift));
-                *out++ = cv->relu && y < 0 ? 0 : y;
+                o[ch] = cv->relu && y < 0 ? 0 : y;
             }
         }
     }
@@ -375,13 +380,13 @@ static inline void pie_out(int8_t *dst, int shift, int relu)
 static void pie_conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                      const conv_t *cv)
 {
-    int cin = ti.c, k = cv->k, groups = to.c / 16;
+    int cin = ti.c, cs = ti.s, k = cv->k, groups = (to.c + 15) / 16;
     pie_round_half_even();
     for (int oy = 0; oy < to.h; oy++) {
         for (int ox = 0; ox < to.w; ox++) {
             for (int g = 0; g < groups; g++) {
                 pie_bias(cv->bias ? cv->bias + g * 64 : 0);
-                const int8_t *f = cv->w + g * k * k * cin * 16;
+                const int8_t *f = cv->w + g * k * k * cs * 16;
                 for (int ky = 0; ky < k; ky++) {
                     int iy = oy * cv->s - cv->pt + ky;
                     if (iy < 0 || iy >= ti.h) continue;
@@ -389,13 +394,15 @@ static void pie_conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                         int ix = ox * cv->s - cv->pl + kx;
                         if (ix < 0 || ix >= ti.w) continue;
                         register const int8_t *a __asm__("a0") =
-                            in + (iy * ti.w + ix) * cin;
+                            in + (iy * ti.w + ix) * cs;
                         register const int8_t *b __asm__("a1") =
-                            f + (ky * k + kx) * cin * 16;
-                        if ((cin & 15) == 0) {
+                            f + (ky * k + kx) * cs * 16;
+                        if ((cs & 15) == 0) {
                             /* Sixteen inputs at once, each times a vector
-                               of sixteen output channels' weights. */
-                            for (int c = 0; c < cin; c += 16) {
+                               of sixteen output channels' weights. The
+                               padding's weights are zero, so whatever its
+                               bytes hold adds nothing. */
+                            for (int c = 0; c < cs; c += 16) {
                                 __asm__ volatile(
                                     "esp.vld.128.ip q0, %0, 16\n"
                                     VSM(0) VSM(1) VSM(2) VSM(3) VSM(4) VSM(5)
@@ -404,9 +411,8 @@ static void pie_conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                                     : "+r"(a), "+r"(b) :: "memory");
                             }
                         } else {
-                            /* Channel counts not in sixteens -- the first
-                               layer's three colours: one input, broadcast,
-                               at a time. */
+                            /* The picture's three colours, unpadded: one
+                               input, broadcast, at a time. */
                             for (int c = 0; c < cin; c++) {
                                 __asm__ volatile(
                                     "esp.vldbc.8.ip q0, %0, 1\n"
@@ -417,7 +423,7 @@ static void pie_conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                         }
                     }
                 }
-                pie_out(out + (oy * to.w + ox) * to.c + g * 16, cv->shift,
+                pie_out(out + (oy * to.w + ox) * to.s + g * 16, cv->shift,
                         cv->relu);
             }
         }
@@ -427,7 +433,7 @@ static void pie_conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
 static void pie_dwconv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                        const conv_t *cv)
 {
-    int c = ti.c, k = cv->k;
+    int c = ti.s, k = cv->k;        /* the stride: padding goes along */
     pie_round_half_even();
     for (int oy = 0; oy < to.h; oy++) {
         for (int ox = 0; ox < to.w; ox++) {
@@ -472,13 +478,13 @@ void pico_node(const pico_t *p, void *arena, uint32_t i)
     int8_t *y = A + to.off;
     int px = to.h * to.w;
 
-    conv_t cv = { n[2], n[3], n[4], n[6], shift, n[1], (n[8] & F_LANES) != 0,
+    conv_t cv = { n[2], n[3], n[4], n[6], shift, n[1],
                   (const int8_t *)w, boff == NO_BIAS ? 0 : p->blob + boff };
 
     switch (op) {
     case OP_CONV:
 #ifdef PICO_PIE
-        if (p->pie && cv.lanes) {
+        if (p->pie) {
             pie_conv(x, t0, y, to, &cv);
             break;
         }
@@ -487,7 +493,7 @@ void pico_node(const pico_t *p, void *arena, uint32_t i)
         break;
     case OP_DW:
 #ifdef PICO_PIE
-        if (p->pie && (t0.c & 15) == 0) {
+        if (p->pie && (t0.s & 15) == 0) {
             pie_dwconv(x, t0, y, to, &cv);
             break;
         }
@@ -498,13 +504,15 @@ void pico_node(const pico_t *p, void *arena, uint32_t i)
         int n_ = t0.h * t0.w;
         for (int c = 0; c < t0.c; c++) {
             int32_t sum = 0;
-            for (int j = 0; j < n_; j++) sum += x[j * t0.c + c];
+            for (int j = 0; j < n_; j++) sum += x[j * t0.s + c];
             y[c] = sat8(fmul(sum, aux, 0));
         }
         break;
     }
     case OP_LUT:
-        for (int j = 0; j < px * to.c; j++) y[j] = (int8_t)w[x[j] + 128];
+        for (int j = 0; j < px; j++)
+            for (int c = 0; c < to.c; c++)
+                y[j * to.s + c] = (int8_t)w[x[j * t0.s + c] + 128];
         break;
     case OP_PRELU:
         /* Negative: times the channel's alpha, shifted back, rounded half
@@ -512,10 +520,10 @@ void pico_node(const pico_t *p, void *arena, uint32_t i)
            up to the output's scale. ESP-DL's esp.vprelu.s8 does the
            negative side; its rounding is what the board check settles. */
         for (int j = 0; j < px; j++)
-            for (int c = 0; c < to.c; c++, x++) {
-                int v = *x;
-                *y++ = v < 0 ? sat8(rhe(v * (int8_t)w[c], shift))
-                             : sat8(v << aux);
+            for (int c = 0; c < to.c; c++) {
+                int v = x[j * t0.s + c];
+                y[j * to.s + c] = v < 0 ? sat8(rhe(v * (int8_t)w[c], shift))
+                                        : sat8(v << aux);
             }
         break;
     case OP_MUL: {
@@ -527,10 +535,10 @@ void pico_node(const pico_t *p, void *arena, uint32_t i)
             for (int xx = 0; xx < to.w; xx++)
                 for (int c = 0; c < to.c; c++) {
                     int a = x[((t0.h == 1 ? 0 : yy) * t0.w + (t0.w == 1 ? 0 : xx))
-                              * t0.c + (t0.c == 1 ? 0 : c)];
+                              * t0.s + (t0.c == 1 ? 0 : c)];
                     int bb = x1[((t1.h == 1 ? 0 : yy) * t1.w + (t1.w == 1 ? 0 : xx))
-                                * t1.c + (t1.c == 1 ? 0 : c)];
-                    *y++ = sat8(rhe(a * bb, shift));
+                                * t1.s + (t1.c == 1 ? 0 : c)];
+                    y[(yy * to.w + xx) * to.s + c] = sat8(rhe(a * bb, shift));
                 }
         break;
     }
@@ -538,14 +546,15 @@ void pico_node(const pico_t *p, void *arena, uint32_t i)
         for (int yy = 0; yy < to.h; yy++)
             for (int xx = 0; xx < to.w; xx++)
                 for (int c = 0; c < to.c; c++)
-                    *y++ = x[((yy >> 1) * t0.w + (xx >> 1)) * t0.c + c];
+                    y[(yy * to.w + xx) * to.s + c] =
+                        x[((yy >> 1) * t0.w + (xx >> 1)) * t0.s + c];
         break;
     case OP_CAT: {
         tinfo_t t1 = tinfo(p, i1);
         const int8_t *x1 = A + t1.off;
         for (int j = 0; j < px; j++) {
-            for (int c = 0; c < t0.c; c++) *y++ = x[j * t0.c + c];
-            for (int c = 0; c < t1.c; c++) *y++ = x1[j * t1.c + c];
+            for (int c = 0; c < t0.c; c++) y[j * to.s + c] = x[j * t0.s + c];
+            for (int c = 0; c < t1.c; c++) y[j * to.s + t0.c + c] = x1[j * t1.s + c];
         }
         break;
     }
@@ -674,14 +683,15 @@ int pico_post(const pico_t *p, void *arena, int w, int h, pico_box_t *out,
         const int8_t *S = pico_tensor(p, arena, p->out[2 * st], &sh, &sw, 0, &ses);
         const int8_t *B = pico_tensor(p, arena, p->out[2 * st + 1], 0, 0, 0, &bexp);
         int stride = 8 << st, off = stride / 2;
+        int ss = pico_stride(p, p->out[2 * st]), bs = pico_stride(p, p->out[2 * st + 1]);
         /* 0.7 * 0.7 in the score's own scale, rounded half to even. */
         uint32_t num = 49u << -ses, thr = num / 100, rem = num % 100;
         if (rem > 50 || (rem == 50 && (thr & 1))) thr++;
         for (int yy = 0; yy < sh; yy++) {
             for (int xx = 0; xx < sw; xx++) {
-                int q = S[yy * sw + xx];
+                int q = S[(yy * sw + xx) * ss];
                 if (q <= (int)thr) continue;
-                const int8_t *bb = B + (yy * sw + xx) * 32;
+                const int8_t *bb = B + (yy * sw + xx) * bs;
                 int64_t cx = (int64_t)(xx * stride + off) << 16;
                 int64_t cy = (int64_t)(yy * stride + off) << 16;
                 pico_face_t f;
@@ -738,12 +748,13 @@ int pico_msr_post(const pico_t *p, void *arena, int w, int h,
         const int8_t *S = pico_tensor(p, arena, p->out[2 * st], &sh, &sw, 0, 0);
         const int8_t *B = pico_tensor(p, arena, p->out[2 * st + 1], 0, 0, 0, 0);
         int stride = 8 << st;
+        int ss = pico_stride(p, p->out[2 * st]), bs = pico_stride(p, p->out[2 * st + 1]);
         for (int yy = 0; yy < sh; yy++) {
             for (int xx = 0; xx < sw; xx++) {
                 for (int a = 0; a < 2; a++) {
-                    int q = S[(yy * sw + xx) * 2 + a];
+                    int q = S[(yy * sw + xx) * ss + a];
                     if (q <= 0) continue;
-                    const int8_t *bb = B + (yy * sw + xx) * 8 + 4 * a;
+                    const int8_t *bb = B + (yy * sw + xx) * bs + 4 * a;
                     int an = anchor[st][a], cx = xx * stride + 9, cy = yy * stride + 9;
                     /* The sum before the scale is exact in float: 8 bits
                        of fraction, so it is built as an integer * 2^-8. */
@@ -811,13 +822,13 @@ static void mnp_read(const pico_t *p, void *arena, int x1, int y1, int x2,
 
 int pico_faces(const pico_t *msr, const pico_t *mnp, void *arena,
                const void *px, int w, int h, int fmt, pico_face_t *out,
-               int max, void (*between)(void))
+               int max, pico_between_t between, void *ctx)
 {
     pico_face_t cand[TOP_K], found[TOP_K];
     pico_input(msr, arena, px, w, h, fmt);
     for (uint32_t i = 0; i < msr->n_nodes; i++) {
         pico_node(msr, arena, i);
-        if (between) between();
+        if (between) between(ctx, msr, i);
     }
     int nc = pico_msr_post(msr, arena, w, h, cand, TOP_K);
 
@@ -835,7 +846,7 @@ int pico_faces(const pico_t *msr, const pico_t *mnp, void *arena,
         pico_input_rect(mnp, arena, px, w, h, fmt, x1, y1, x2, y2);
         for (uint32_t k = 0; k < mnp->n_nodes; k++) {
             pico_node(mnp, arena, k);
-            if (between) between();
+            if (between) between(ctx, mnp, k);
         }
         pico_face_t f;
         mnp_read(mnp, arena, x1, y1, x2, y2, &f);
@@ -851,12 +862,13 @@ uint32_t pico_hash(const pico_t *p, const void *arena)
 {
     uint32_t h = 2166136261u;                /* FNV-1a */
     for (uint32_t k = 0; k < p->n_out; k++) {
-        int th, tw, tc;
+        int th, tw, tc, ts = pico_stride(p, p->out[k]);
         const int8_t *d = pico_tensor(p, arena, p->out[k], &th, &tw, &tc, 0);
-        for (int i = 0; i < th * tw * tc; i++) {
-            h ^= (uint8_t)d[i];
-            h *= 16777619u;
-        }
+        for (int i = 0; i < th * tw; i++)           /* the channels, not padding */
+            for (int c = 0; c < tc; c++) {
+                h ^= (uint8_t)d[i * ts + c];
+                h *= 16777619u;
+            }
     }
     return h;
 }

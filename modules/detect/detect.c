@@ -44,7 +44,51 @@ typedef struct {
     pico_box_t  box[10];
     uint32_t    us[4];          /* -v: 1x1 conv, larger conv, depthwise, rest */
     rv9_sys_limits_t lim;
+    /* -v for faces: per stage, by kind of layer; see between(). */
+    const rv9_mod_env_t *env;
+    uint64_t    last;
+    uint32_t    fus[2][6];
 } detect_statics_t;
+
+enum { K_CONV_VEC, K_CONV_C, K_DW_VEC, K_DW_C, K_PRELU, K_OTHER };
+
+/* After each face layer: charge the time since the last one to its kind,
+   then let the rest of the system run -- outside the measurement. */
+static void between(void *ctx, const pico_t *p, uint32_t i)
+{
+    detect_statics_t *st = (detect_statics_t *)ctx;
+    uint64_t now = st->env->time_us();
+    const uint8_t *nd = p->nodes + i * 32;
+    int kind = K_OTHER;
+    if (nd[0] == 1) kind = p->pie ? K_CONV_VEC : K_CONV_C;
+    else if (nd[0] == 2) {
+        int c = pico_stride(p, (uint32_t)(nd[12] | nd[13] << 8));
+        kind = (p->pie && (c & 15) == 0) ? K_DW_VEC : K_DW_C;
+    } else if (nd[0] == 8) kind = K_PRELU;
+    st->fus[p->kind == PICO_KIND_FACE1 ? 0 : 1][kind] += (uint32_t)(now - st->last);
+    st->env->yield();
+    st->last = st->env->time_us();
+}
+
+/* A switch, not a table of pointers: a module is position independent,
+   and an array of string addresses would be absolute ones. */
+static const char *kind_name(int k)
+{
+    switch (k) {
+    case K_CONV_VEC: return "conv vector ";
+    case K_CONV_C:   return "conv C ";
+    case K_DW_VEC:   return "depthwise vector ";
+    case K_DW_C:     return "depthwise C ";
+    case K_PRELU:    return "PReLU ";
+    default:         return "rest ";
+    }
+}
+
+static void env_yield(void *ctx, const pico_t *p, uint32_t i)
+{
+    (void)p; (void)i;
+    ((detect_statics_t *)ctx)->env->yield();
+}
 
 static int read_all(const rv9_mod_env_t *env, int path, uint8_t *dst,
                     uint32_t n)
@@ -208,8 +252,10 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         uint64_t t1 = env->time_us();
         int n;
         if (faces) {
+            st->env = env;
+            st->last = env->time_us();
             n = pico_faces(&st->p, &st->p2, arena, frame, CW, CH, PICO_RGB565,
-                           st->face, 10, env->yield);
+                           st->face, 10, verbose ? between : env_yield, st);
         } else {
             pico_input(&st->p, arena, frame, CW, CH, PICO_RGB565);
             for (uint32_t k = 0; k < st->p.n_nodes; k++) {
@@ -249,7 +295,21 @@ int rv9_module_entry(const rv9_mod_env_t *env)
             m_say(env, RV9_STDOUT, "  outputs hash ");
             hex(env, pico_hash(faces ? &st->p2 : &st->p, arena));
             m_say(env, RV9_STDOUT, pie ? "; vector unit" : "; plain C");
-            if (!faces) {
+            if (faces) {
+                for (int sg = 0; sg < 2; sg++) {
+                    m_say(env, RV9_STDOUT, sg ? "\n  stage 2:" : "\n  stage 1:");
+                    for (int k = 0; k < 6; k++) {
+                        if (st->fus[sg][k] == 0) continue;
+                        m_say(env, RV9_STDOUT, " ");
+                        m_say(env, RV9_STDOUT, kind_name(k));
+                        m_num(env, RV9_STDOUT, (int32_t)(st->fus[sg][k] / 100) / 10);
+                        m_say(env, RV9_STDOUT, ".");
+                        m_num(env, RV9_STDOUT, (int32_t)(st->fus[sg][k] / 100) % 10);
+                        m_say(env, RV9_STDOUT, ",");
+                        st->fus[sg][k] = 0;
+                    }
+                }
+            } else {
                 ms(env, ": 1x1 conv ", st->us[0]);
                 ms(env, ", other conv ", st->us[1]);
                 ms(env, ", depthwise ", st->us[2]);

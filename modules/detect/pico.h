@@ -68,13 +68,19 @@ int pico_run(const pico_t *p, void *arena, const void *px, int w, int h,
              int fmt, pico_box_t *out, int max);
 
 /*
+ * Called after every layer the face detector runs, with the model and the
+ * layer's index -- for a caller that must let others run, or wants to know
+ * where the time went. `ctx` is the caller's.
+ */
+typedef void (*pico_between_t)(void *ctx, const pico_t *p, uint32_t node);
+
+/*
  * Find the faces: the first stage over the whole picture, then the second
- * on each square it proposed. `between`, if given, is called after every
- * layer -- for a caller that must let others run. At most ten.
+ * on each square it proposed. `between` may be NULL. At most ten.
  */
 int pico_faces(const pico_t *face1, const pico_t *face2, void *arena,
                const void *px, int w, int h, int fmt, pico_face_t *out,
-               int max, void (*between)(void));
+               int max, pico_between_t between, void *ctx);
 
 /* Step by step, for checking a layer at a time. */
 void pico_input(const pico_t *p, void *arena, const void *px, int w, int h,
@@ -88,9 +94,11 @@ int  pico_post(const pico_t *p, void *arena, int w, int h, pico_box_t *out,
 int  pico_msr_post(const pico_t *p, void *arena, int w, int h,
                    pico_face_t *out, int max);
 
-/* Tensor t: where it is in the arena and what shape. */
+/* Tensor t: where it is in the arena and what shape. A pixel's channels
+   are pico_stride() bytes apart, which is c rounded up to sixteen. */
 const int8_t *pico_tensor(const pico_t *p, const void *arena, uint32_t t,
                           int *h, int *w, int *c, int *exp);
+int pico_stride(const pico_t *p, uint32_t t);
 
 /* A hash of the output tensors, after a run: the same number on the board
    and on a PC means the same bytes, without moving them to show it. */
