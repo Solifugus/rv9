@@ -5,6 +5,7 @@ Turn Espressif's detectors into files `detect` can read.
     tools/mkpico.py pedestrian_detect_pico_s8_v1.espdl /tmp/pico.rv9m
     tools/mkpico.py human_face_detect_msr_s8_v1.espdl  /tmp/face1.rv9m
     tools/mkpico.py human_face_detect_mnp_s8_v1.espdl  /tmp/face2.rv9m
+    tools/mkpico.py human_face_feat_mfn_s8_v1.espdl    /tmp/feat.rv9m
 
 Which of the three a file is follows from its outputs, and is written into
 it, so the engine knows how to read the answer.
@@ -58,9 +59,10 @@ Weights in the blob:
 import struct
 import sys
 
-OP_CONV, OP_DW, OP_GAP, OP_LUT, OP_MUL, OP_UP2, OP_CAT, OP_PRELU = range(1, 9)
-KIND_PICO, KIND_MSR, KIND_MNP = 1, 2, 3
+OP_CONV, OP_DW, OP_GAP, OP_LUT, OP_MUL, OP_UP2, OP_CAT, OP_PRELU, OP_ADD = range(1, 10)
+KIND_PICO, KIND_MSR, KIND_MNP, KIND_FEAT = 1, 2, 3, 4
 FL_BGR = 1     # header flags: the model wants blue first
+FL_CENTRED = 2 # and its input as (v - 127.5) / 127.5, not v / 2
 NONE = 0xffffffff
 F_REM = 1      # flags: the conv's output channels are not a multiple of 16
 F_LANES = 2    # weights kept in ESP-DL's 16-lane order, for the vector unit
@@ -189,6 +191,7 @@ KINDS = {
     KIND_PICO: ('score0', 'bbox0', 'score1', 'bbox1', 'score2', 'bbox2'),
     KIND_MSR:  ('score0', 'box0', 'score1', 'box1'),
     KIND_MNP:  ('score', 'box', 'landmark'),
+    KIND_FEAT: ('embedding',),
 }
 
 
@@ -224,7 +227,8 @@ def main():
     # wrappers do (models/*/...cpp), and these are theirs.
     in_h, in_w, flags = {KIND_PICO: (224, 224, 0),
                          KIND_MSR: (120, 160, FL_BGR),
-                         KIND_MNP: (48, 48, FL_BGR)}[kind]
+                         KIND_MNP: (48, 48, FL_BGR),
+                         KIND_FEAT: (112, 112, FL_BGR | FL_CENTRED)}[kind]
     in_name = g.tables(4)[0].string(0)
 
     names = {}                  # tensor name -> index
@@ -348,6 +352,14 @@ def main():
             assert exps[out] == ein
             node.update(op=OP_UP2)
             o = tensor(out, 2 * h, 2 * w, c)
+        elif op == 'Add':
+            # ESP-DL's int8 Add, in this version, adds and saturates and
+            # never rescales -- so it is only right when the exponents
+            # agree, which in these models they always do.
+            t1 = tensors[src[1]]
+            assert ein == t1[3] == exps[out] and tuple(t1[:3]) == (h, w, c)
+            node.update(op=OP_ADD)
+            o = tensor(out, h, w, c)
         elif op == 'Concat':
             # Any number of inputs: chained in pairs, the last one writing
             # the real output. Exponents must agree; ESP-DL never rescales.

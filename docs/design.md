@@ -7185,6 +7185,25 @@ hashes unchanged, and the face outputs still match ESP-DL's captures byte
 for byte. The heads' padding costs 60 KB of zeros in the people model's
 file and nothing in the arena.
 
+**Who**, after: Espressif's face signature model (human_face_feat mfn, 1.2
+MB) turns a face into 512 numbers, after the face is turned, scaled and
+shifted onto a template by its five points. New to the engine: Add (in
+ESP-DL's int8 it never rescales, so the converter insists the exponents
+agree), centred input scaling, and the alignment — the closed-form
+least-squares similarity in `sf_t` float32 (with a division and a fused
+multiply-add added), then ESP-DL's Q10 nearest-neighbour warp exactly. The
+signature matches an independent numpy reference of ESP-DL byte for byte
+on a camera frame; ESP-DL itself is built `-ffast-math` and its transform
+mixes float and double, so "the same within a pixel now and then" is the
+honest claim, not bit-exactness. On Espressif's example faces: same person
+0.63 and 0.82, different people about 0.
+
+Faster on the way, for every model: PReLU and Add on the vector unit
+(ESP-DL's own instruction sequence), and the conv kernel's inner loop fused
+— `esp.vsmulas.s8.qacc.ld.incp` multiplies and loads the next weights at
+once. Faces 34 → 29 ms (ESP-DL 32), people 148 → 127, a signature 446 →
+233 (ESP-DL 82). Every output hash unchanged.
+
 ## 63. Fast enough to animate
 
 `mystify` — the old screen saver, a dozen outlined polygons a frame on `/w0`

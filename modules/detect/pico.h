@@ -22,6 +22,9 @@
 #define PICO_KIND_PEOPLE  1     /* pedestrian_detect pico */
 #define PICO_KIND_FACE1   2     /* human_face_detect msr: proposes */
 #define PICO_KIND_FACE2   3     /* human_face_detect mnp: looks closer */
+#define PICO_KIND_SIG     4     /* human_face_feat mfn: who it is */
+
+#define PICO_SIG  512           /* numbers in a face's signature */
 
 typedef struct {
     int32_t  x1, y1, x2, y2;    /* in the picture's pixels, inclusive */
@@ -41,7 +44,7 @@ typedef struct {
     const uint8_t *m;           /* the model file */
     const uint8_t *tensors, *nodes, *blob;
     uint32_t n_tensors, n_nodes, arena;
-    int      kind, in_h, in_w, bgr;
+    int      kind, in_h, in_w, bgr, centred;
     uint32_t n_out, out[8];     /* output tensors, in the kind's order */
     int pie;                    /* use the P4's vector unit: see below */
 } pico_t;
@@ -103,3 +106,23 @@ int pico_stride(const pico_t *p, uint32_t t);
 /* A hash of the output tensors, after a run: the same number on the board
    and on a PC means the same bytes, without moving them to show it. */
 uint32_t pico_hash(const pico_t *p, const void *arena);
+
+/*
+ * Who a face is: its signature, 512 int8, from the five points
+ * pico_faces found -- the face turned, scaled and shifted to where
+ * Espressif's model expects it, then the model. Two pictures of one
+ * person give similar signatures; compare them as unit vectors.
+ */
+int pico_signature(const pico_t *p, void *arena, const void *px, int w, int h,
+                   int fmt, const int32_t pt[10], int8_t sig[PICO_SIG],
+                   pico_between_t between, void *ctx);
+
+/* A signature, or a sum of several, scaled to unit length in Q15. */
+void pico_unit(const int32_t *v, int16_t out[PICO_SIG]);
+
+/* The cosine of two unit signatures, Q16: 65536 is identical, and
+   ESP-DL calls a face the same person above 0.5 (32768). */
+int32_t pico_similar(const int16_t a[PICO_SIG], const int16_t b[PICO_SIG]);
+
+/* The alignment pico_signature uses, as Q16, for checking it. */
+void pico_align(const int32_t pt[10], int32_t m_q16[6]);

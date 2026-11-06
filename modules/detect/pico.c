@@ -21,9 +21,10 @@
  */
 #include "pico.h"
 
-enum { OP_CONV = 1, OP_DW, OP_GAP, OP_LUT, OP_MUL, OP_UP2, OP_CAT, OP_PRELU };
+enum { OP_CONV = 1, OP_DW, OP_GAP, OP_LUT, OP_MUL, OP_UP2, OP_CAT, OP_PRELU, OP_ADD };
 #define F_LANES  2      /* conv weights in ESP-DL's [cout/16][k][k][cin][16] */
 #define FL_BGR   1      /* the model wants blue first */
+#define FL_CENTRED 2    /* and its input as (v - 127.5) / 127.5 */
 #define NO_BIAS  0xffffffffu
 
 #define HDR      80
@@ -117,6 +118,27 @@ static sf_t sf_add(sf_t a, sf_t b)
     return sf_round(s < 0, (uint64_t)(s < 0 ? -s : s), b.e);
 }
 
+/* a / b, rounded once. The quotient carries six bits more than it keeps
+   and a sticky bit for any remainder, which is enough to round right. */
+static sf_t sf_div(sf_t a, sf_t b)
+{
+    if (a.m == 0 || b.m == 0) { sf_t z = { 0, 0, 0 }; return z; }
+    uint64_t n = a.m << 30;
+    uint64_t q = n / b.m;
+    if (n % b.m) q |= 1;
+    return sf_round(a.neg ^ b.neg, q, a.e - b.e - 30);
+}
+
+/* a * r + c with one rounding -- fmaf, which ESP-DL's -ffast-math build
+   contracts this expression to. r is a small integer, so a * r is exact. */
+static sf_t sf_fma_int(sf_t a, int r, sf_t c)
+{
+    sf_t p = { a.neg ^ (r < 0), a.m * (uint64_t)(r < 0 ? -r : r), a.e };
+    if (p.m == 0) return c;
+    if (c.m == 0) return sf_round(p.neg, p.m, p.e);
+    return sf_add(p, c);
+}
+
 /* To an integer: toward zero (a C cast) or half to even (fcvt.w.s). */
 static int32_t sf_int_of(sf_t a, int trunc)
 {
@@ -177,6 +199,7 @@ int pico_open(pico_t *p, const void *model, uint32_t size)
     p->in_h      = (int)rd32(m + 24);
     p->in_w      = (int)rd32(m + 28);
     p->bgr       = (rd32(m + 32) & FL_BGR) != 0;
+    p->centred   = (rd32(m + 32) & FL_CENTRED) != 0;
     p->n_out     = rd32(m + 36);
     for (uint32_t i = 0; i < 8; i++) p->out[i] = rd32(m + 40 + 4 * i);
     p->arena     = rd32(m + 72);
@@ -210,6 +233,34 @@ const int8_t *pico_tensor(const pico_t *p, const void *arena, uint32_t t,
  * truncated, which is not always floor(i * w / dst) -- hence fdiv/fmul.
  * The rectangle's right and bottom are exclusive.
  */
+/*
+ * A pixel's channel to the model's int8. Either v * 2^-1, half to even --
+ * the detectors' -- or rne((v - 127.5) / 127.5 * 64) for the face
+ * signature's, which over 0..255 is exactly the floor below; there are no
+ * ties to round.
+ */
+static int8_t quant_in(const pico_t *p, uint32_t v)
+{
+    if (p->centred) return (int8_t)((2 * (128 * (int32_t)v - 16320) + 255 + 32640) / 510 - 64);
+    uint32_t q = v >> 1;
+    if ((v & 1) && (q & 1)) q++;
+    return (int8_t)(q > 127 ? 127 : q);
+}
+
+/* One pixel of the picture as red, green, blue. */
+static void pixel(const void *px, int w, int fmt, int x, int y, uint32_t rgb[3])
+{
+    if (fmt == PICO_RGB565) {
+        uint32_t v = ((const uint16_t *)px)[y * w + x];
+        rgb[0] = (v & 0xf800) >> 8;          /* zero filled, not replicated */
+        rgb[1] = (v & 0x07e0) >> 3;
+        rgb[2] = (v & 0x001f) << 3;
+    } else {
+        const uint8_t *s = (const uint8_t *)px + (y * w + x) * 3;
+        rgb[0] = s[0]; rgb[1] = s[1]; rgb[2] = s[2];
+    }
+}
+
 void pico_input_rect(const pico_t *p, void *arena, const void *px, int w, int h,
                      int fmt, int x1, int y1, int x2, int y2)
 {
@@ -229,23 +280,10 @@ void pico_input_rect(const pico_t *p, void *arena, const void *px, int w, int h,
         int sy = fmul(y, fy, 1) + y1;
         if (sy > y2 - 1) sy = y2 - 1;
         for (int x = 0; x < dw; x++) {
-            int sx = col[x];
             uint32_t rgb[3];
-            if (fmt == PICO_RGB565) {
-                uint32_t v = ((const uint16_t *)px)[sy * w + sx];
-                rgb[0] = (v & 0xf800) >> 8;      /* zero filled, not replicated */
-                rgb[1] = (v & 0x07e0) >> 3;
-                rgb[2] = (v & 0x001f) << 3;
-            } else {
-                const uint8_t *s = (const uint8_t *)px + (sy * w + sx) * 3;
-                rgb[0] = s[0]; rgb[1] = s[1]; rgb[2] = s[2];
-            }
+            pixel(px, w, fmt, col[x], sy, rgb);
             uint32_t ch[3] = { rgb[r], rgb[1], rgb[b] };
-            for (int c = 0; c < 3; c++) {        /* v * 2^-1, half to even */
-                uint32_t q = ch[c] >> 1;
-                if ((ch[c] & 1) && (q & 1)) q++;
-                *out++ = (int8_t)(q > 127 ? 127 : q);
-            }
+            for (int c = 0; c < 3; c++) *out++ = quant_in(p, ch[c]);
         }
     }
 }
@@ -375,7 +413,21 @@ static inline void pie_out(int8_t *dst, int shift, int relu)
     __asm__ volatile("esp.vst.128.ip q2, %0, 16" : "+r"(out) :: "memory");
 }
 
-#define VSM(l) "esp.vld.128.ip q1, %1, 16\n esp.vsmulas.s8.qacc q1, q0, " #l "\n"
+/* Sixteen inputs (q0), each times a row of sixteen output channels'
+   weights: ESP-DL's 11c16 pattern, two weight registers taking turns, each
+   multiply-accumulate loading the row after next as it goes -- one
+   instruction per sixteen multiply-adds instead of two. */
+#define VSMF(q, l) "esp.vsmulas.s8.qacc.ld.incp " q ", %1, " q ", q0, " #l "\n"
+#define VSM16 \
+    "esp.vld.128.ip q0, %0, 16\n" \
+    "esp.vld.128.ip q1, %1, 16\n" \
+    "esp.vld.128.ip q3, %1, 16\n" \
+    VSMF("q1", 0) VSMF("q3", 1) VSMF("q1", 2) VSMF("q3", 3) \
+    VSMF("q1", 4) VSMF("q3", 5) VSMF("q1", 6) VSMF("q3", 7) \
+    VSMF("q1", 8) VSMF("q3", 9) VSMF("q1", 10) VSMF("q3", 11) \
+    VSMF("q1", 12) VSMF("q3", 13) \
+    "esp.vsmulas.s8.qacc q1, q0, 14\n" \
+    "esp.vsmulas.s8.qacc q3, q0, 15\n"
 
 static void pie_conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                      const conv_t *cv)
@@ -403,11 +455,7 @@ static void pie_conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                                padding's weights are zero, so whatever its
                                bytes hold adds nothing. */
                             for (int c = 0; c < cs; c += 16) {
-                                __asm__ volatile(
-                                    "esp.vld.128.ip q0, %0, 16\n"
-                                    VSM(0) VSM(1) VSM(2) VSM(3) VSM(4) VSM(5)
-                                    VSM(6) VSM(7) VSM(8) VSM(9) VSM(10) VSM(11)
-                                    VSM(12) VSM(13) VSM(14) VSM(15)
+                                __asm__ volatile(VSM16
                                     : "+r"(a), "+r"(b) :: "memory");
                             }
                         } else {
@@ -426,6 +474,69 @@ static void pie_conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                 pie_out(out + (oy * to.w + ox) * to.s + g * 16, cv->shift,
                         cv->relu);
             }
+        }
+    }
+}
+
+/*
+ * PReLU, sixteen channels at a time, as ESP-DL's dl_esp32p4_s8_prelu_11c:
+ * the negative lanes by esp.vprelu (times the channel's alpha, shifted,
+ * rounded as CFG says -- half to even), the positive ones through QACC
+ * times 2^up, the two kept by masks and added. Strides are sixteens.
+ */
+static void pie_prelu(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
+                      const int8_t *alpha, int down, int up)
+{
+    uint8_t scale = (uint8_t)(1 << up);
+    pie_round_half_even();
+    {
+        register const uint8_t *sp __asm__("a0") = &scale;
+        __asm__ volatile("esp.zero.q q2\n"
+                         "esp.vldbc.8.ip q3, %0, 0\n" : "+r"(sp) :: "memory");
+    }
+    int px = to.h * to.w;
+    for (int j = 0; j < px; j++) {
+        for (int g = 0; g < ti.s; g += 16) {
+            register const int8_t *x  __asm__("a0") = in + j * ti.s + g;
+            register const int8_t *al __asm__("a1") = alpha + g;
+            register int8_t       *y  __asm__("a2") = out + j * to.s + g;
+            register int           sn __asm__("a3") = down;
+            register int           sp __asm__("a4") = 0;
+            __asm__ volatile(
+                "esp.vld.128.ip q0, %0, 16\n"
+                "esp.vld.128.ip q1, %1, 16\n"
+                "esp.vprelu.s8 q4, q0, q1, %3\n"
+                "esp.vcmp.lt.s8 q6, q0, q2\n"
+                "esp.andq q4, q4, q6\n"
+                "esp.zero.qacc\n"
+                "esp.vmulas.s8.qacc q0, q3\n"
+                "esp.srcmb.s8.qacc q5, %4, 1\n"
+                "esp.vcmp.gt.s8 q6, q0, q2\n"
+                "esp.andq q5, q5, q6\n"
+                "esp.vadd.s8 q4, q4, q5\n"
+                "esp.vst.128.ip q4, %2, 16\n"
+                : "+r"(x), "+r"(al), "+r"(y)
+                : "r"(sn), "r"(sp) : "memory");
+        }
+    }
+}
+
+/* Add, sixteen at a time: esp.vadd.s8, saturating, as ESP-DL's. */
+static void pie_add(const int8_t *a, tinfo_t ta, const int8_t *b, tinfo_t tb,
+                    int8_t *out, tinfo_t to)
+{
+    int px = to.h * to.w;
+    for (int j = 0; j < px; j++) {
+        for (int g = 0; g < to.s; g += 16) {
+            register const int8_t *x __asm__("a0") = a + j * ta.s + g;
+            register const int8_t *z __asm__("a1") = b + j * tb.s + g;
+            register int8_t       *y __asm__("a2") = out + j * to.s + g;
+            __asm__ volatile(
+                "esp.vld.128.ip q0, %0, 16\n"
+                "esp.vld.128.ip q1, %1, 16\n"
+                "esp.vadd.s8 q2, q0, q1\n"
+                "esp.vst.128.ip q2, %2, 16\n"
+                : "+r"(x), "+r"(z), "+r"(y) :: "memory");
         }
     }
 }
@@ -515,6 +626,12 @@ void pico_node(const pico_t *p, void *arena, uint32_t i)
                 y[j * to.s + c] = (int8_t)w[x[j * t0.s + c] + 128];
         break;
     case OP_PRELU:
+#ifdef PICO_PIE
+        if (p->pie && (t0.s & 15) == 0 && to.s == t0.s) {
+            pie_prelu(x, t0, y, to, (const int8_t *)w, shift, (int)aux);
+            break;
+        }
+#endif
         /* Negative: times the channel's alpha, shifted back, rounded half
            to even as the vector unit is set to round. Positive: shifted
            up to the output's scale. ESP-DL's esp.vprelu.s8 does the
@@ -549,6 +666,20 @@ void pico_node(const pico_t *p, void *arena, uint32_t i)
                     y[(yy * to.w + xx) * to.s + c] =
                         x[((yy >> 1) * t0.w + (xx >> 1)) * t0.s + c];
         break;
+    case OP_ADD: {                      /* same exponents: see mkpico.py */
+        tinfo_t t1 = tinfo(p, i1);
+        const int8_t *x1 = A + t1.off;
+#ifdef PICO_PIE
+        if (p->pie && ((t0.s | t1.s | to.s) & 15) == 0) {
+            pie_add(x, t0, x1, t1, y, to);
+            break;
+        }
+#endif
+        for (int j = 0; j < px; j++)
+            for (int c = 0; c < to.c; c++)
+                y[j * to.s + c] = sat8(x[j * t0.s + c] + x1[j * t1.s + c]);
+        break;
+    }
     case OP_CAT: {
         tinfo_t t1 = tinfo(p, i1);
         const int8_t *x1 = A + t1.off;
@@ -871,4 +1002,142 @@ uint32_t pico_hash(const pico_t *p, const void *arena)
             }
     }
     return h;
+}
+
+/* ---- who: Espressif's face signature (human_face_feat mfn) ---- */
+
+/* Where a face's five points go in the 112x112 picture the signature
+   model was trained on: left eye, left mouth, nose, right eye, right
+   mouth, as float32 -- ESP-DL's template, dl_feat_image_preprocessor.cpp. */
+static const uint32_t s_template[10] = {
+    0x42192dac, 0x424ec903, 0x4226327c, 0x42b8bb23, 0x426019ce,
+    0x428f7924, 0x42931048, 0x424e016f, 0x428d75b5, 0x42b86880,
+};
+
+/*
+ * The similarity transform -- turn, scale, shift -- taking the template's
+ * points nearest the face's, by least squares, as a 2x3 matrix from the
+ * template's coordinates to the picture's:
+ *
+ *   [ a  -b  tx ]      a = sum(s.d) / sum(s.s),  b = sum(s x d) / sum(s.s)
+ *   [ b   a  ty ]      over the points less their means
+ *
+ * the closed form of the Umeyama fit ESP-DL computes through a 2x2 SVD.
+ * Here in float32 throughout; ESP-DL mixes float, double and a float
+ * Newton square root, and the two agree to about one part in 10^7 --
+ * usually the same warp, now and then a pixel different.
+ */
+static void align(const int32_t pt[10], sf_t M[6])
+{
+    sf_t five = sf_int(5, 0), smx = sf_int(0, 0), smy = smx, dmx = smx, dmy = smx;
+    for (int i = 0; i < 5; i++) {
+        smx = sf_add(smx, sf_bits(s_template[2 * i]));
+        smy = sf_add(smy, sf_bits(s_template[2 * i + 1]));
+        dmx = sf_add(dmx, sf_int(pt[2 * i], 0));
+        dmy = sf_add(dmy, sf_int(pt[2 * i + 1], 0));
+    }
+    smx = sf_div(smx, five); smy = sf_div(smy, five);
+    dmx = sf_div(dmx, five); dmy = sf_div(dmy, five);
+
+    sf_t na = sf_int(0, 0), nb = na, den = na;
+    for (int i = 0; i < 5; i++) {
+        sf_t sx = sf_add(sf_bits(s_template[2 * i]), (sf_t){ !smx.neg, smx.m, smx.e });
+        sf_t sy = sf_add(sf_bits(s_template[2 * i + 1]), (sf_t){ !smy.neg, smy.m, smy.e });
+        sf_t dx = sf_add(sf_int(pt[2 * i], 0), (sf_t){ !dmx.neg, dmx.m, dmx.e });
+        sf_t dy = sf_add(sf_int(pt[2 * i + 1], 0), (sf_t){ !dmy.neg, dmy.m, dmy.e });
+        na  = sf_add(na, sf_add(sf_mul(sx, dx), sf_mul(sy, dy)));
+        sf_t c = sf_mul(sy, dx);
+        nb  = sf_add(nb, sf_add(sf_mul(sx, dy), (sf_t){ !c.neg, c.m, c.e }));
+        den = sf_add(den, sf_add(sf_mul(sx, sx), sf_mul(sy, sy)));
+    }
+    sf_t a = sf_div(na, den), b = sf_div(nb, den);
+    sf_t nbb = { !b.neg, b.m, b.e };
+    /* tx = dmx - (a smx - b smy), ty = dmy - (b smx + a smy) */
+    sf_t u = sf_add(sf_mul(a, smx), sf_mul(nbb, smy));
+    sf_t v = sf_add(sf_mul(b, smx), sf_mul(a, smy));
+    M[0] = a;   M[1] = nbb; M[2] = sf_add(dmx, (sf_t){ !u.neg, u.m, u.e });
+    M[3] = b;   M[4] = a;   M[5] = sf_add(dmy, (sf_t){ !v.neg, v.m, v.e });
+}
+
+void pico_align(const int32_t pt[10], int32_t m_q16[6])
+{
+    sf_t M[6];
+    align(pt, M);
+    for (int i = 0; i < 6; i++) m_q16[i] = sf_int_of(sf_mul(M[i], sf_int(65536, 0)), 0);
+}
+
+/*
+ * The face into the model's 112x112: for each output pixel, the picture's
+ * pixel M says, nearest -- ESP-DL's warp, in its Q10 fixed point. Each
+ * column's and each row's share of the position is worked out once,
+ * rounded half to even (lrintf), and a sample is their sum rounded:
+ * (x1 + x2 + 512) >> 10. Outside the picture is black.
+ */
+static void warp_input(const pico_t *p, void *arena, const void *px, int w,
+                       int h, int fmt, const sf_t M[6])
+{
+    tinfo_t ti = tinfo(p, 0);
+    int8_t *out = (int8_t *)arena + ti.off;
+    int n = ti.w;
+    int32_t x1[128], y1[128], x2[128], y2[128];
+    sf_t k = sf_int(1024, 0);
+    for (int i = 0; i < n && i < 128; i++) {
+        x1[i] = sf_int_of(sf_mul(sf_mul(M[0], sf_int(i, 0)), k), 0);
+        y1[i] = sf_int_of(sf_mul(sf_mul(M[3], sf_int(i, 0)), k), 0);
+        x2[i] = sf_int_of(sf_mul(sf_fma_int(M[1], i, M[2]), k), 0);
+        y2[i] = sf_int_of(sf_mul(sf_fma_int(M[4], i, M[5]), k), 0);
+    }
+    int8_t black = quant_in(p, 0);
+    int r = p->bgr ? 2 : 0, b = p->bgr ? 0 : 2;
+    for (int row = 0; row < ti.h; row++) {
+        for (int c = 0; c < n; c++) {
+            int x = (x1[c] + x2[row] + 512) >> 10;
+            int y = (y1[c] + y2[row] + 512) >> 10;
+            if ((unsigned)x < (unsigned)w && (unsigned)y < (unsigned)h) {
+                uint32_t rgb[3];
+                pixel(px, w, fmt, x, y, rgb);
+                *out++ = quant_in(p, rgb[r]);
+                *out++ = quant_in(p, rgb[1]);
+                *out++ = quant_in(p, rgb[b]);
+            } else {
+                *out++ = black; *out++ = black; *out++ = black;
+            }
+        }
+    }
+}
+
+int pico_signature(const pico_t *p, void *arena, const void *px, int w, int h,
+                   int fmt, const int32_t pt[10], int8_t sig[PICO_SIG],
+                   pico_between_t between, void *ctx)
+{
+    sf_t M[6];
+    align(pt, M);
+    warp_input(p, arena, px, w, h, fmt, M);
+    for (uint32_t i = 0; i < p->n_nodes; i++) {
+        pico_node(p, arena, i);
+        if (between) between(ctx, p, i);
+    }
+    int th, tw, tc;
+    const int8_t *e = pico_tensor(p, arena, p->out[0], &th, &tw, &tc, 0);
+    if (th * tw * tc != PICO_SIG) return -1;
+    for (int i = 0; i < PICO_SIG; i++) sig[i] = e[i];
+    return 0;
+}
+
+/* Unit length, in Q15: what is kept and compared. */
+void pico_unit(const int32_t *v, int16_t out[PICO_SIG])
+{
+    uint64_t ss = 0;
+    for (int i = 0; i < PICO_SIG; i++) ss += (uint64_t)((int64_t)v[i] * v[i]);
+    uint32_t n = isqrt64(ss);
+    for (int i = 0; i < PICO_SIG; i++)
+        out[i] = n ? (int16_t)(((int64_t)v[i] * 32767 + (v[i] < 0 ? -(int64_t)n / 2 : (int64_t)n / 2)) / n) : 0;
+}
+
+/* Cosine of two unit signatures: 65536 is the same face exactly. */
+int32_t pico_similar(const int16_t a[PICO_SIG], const int16_t b[PICO_SIG])
+{
+    int64_t d = 0;
+    for (int i = 0; i < PICO_SIG; i++) d += (int32_t)a[i] * b[i];
+    return (int32_t)(d >> 14);
 }
