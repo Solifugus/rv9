@@ -1095,6 +1095,15 @@ Next, in roughly this order:
 - **Faster recognition**: keep the hot weights in internal RAM, or tile the
   convolutions so that each weight is fetched from PSRAM once.
 - **AprilTags**, for position and range rather than presence.
+- **Speech out: `/tts0`**, so the machine can say what it needs, starting
+  with calling somebody to the bench. The engine must suit Apache-2.0:
+  espeak-ng and sanoTTS are GPLv3, so Flite (CMU, BSD-style), which is small,
+  is the first candidate to measure on the P4. Until then, `tools/say.sh`
+  makes the speech on the PC with espeak-ng and has the board fetch and play
+  it.
+- **`fetch` onto a full volume says nothing.** Onto the 16 KB `/r0`, it
+  kept 13,824 bytes of 138,912 and reported the whole body. A write that
+  falls short has to be an error, as it is in `rec`.
 - **More screen savers** and a `saver` that rotates through them.
 
 ### Less in the firmware, more on the card
