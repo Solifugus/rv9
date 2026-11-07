@@ -1058,7 +1058,7 @@ permission model beyond ownership), `find` (`dir` piped through `match`).
 
 ---
 
-## Phase 12 — The senses  ◐ hearing and seeing done; acting on them next
+## Phase 12 — The senses  ◐ hearing, seeing and speaking done; acting on them next
 
 The P4 board has two microphones, a speaker and a camera, and an autonomous
 machine needs to hear and see. Each sense is a device. What it is used for
@@ -1095,12 +1095,15 @@ Next, in roughly this order:
 - **Faster recognition**: keep the hot weights in internal RAM, or tile the
   convolutions so that each weight is fetched from PSRAM once.
 - **AprilTags**, for position and range rather than presence.
-- **Speech out: `/tts0`**, so the machine can say what it needs, starting
-  with calling somebody to the bench. The engine must suit Apache-2.0:
-  espeak-ng and sanoTTS are GPLv3, so Flite (CMU, BSD-style), which is small,
-  is the first candidate to measure on the P4. Until then, `tools/say.sh`
-  makes the speech on the PC with espeak-ng and has the board fetch and play
-  it.
+- **`/tts0` — speech out, done**, design §64. CMU Flite (BSD-style) with
+  the slt voice from `/sd0/slt.flitevox`, the vocoder in single precision:
+  1.7 times faster than speaking, first sound about 0.9 s after asking,
+  sentence by sentence. `say`. `tools/say.sh` has the board call somebody
+  with it.
+- **Arguments scale with the board, fixed.** They stopped at 63 characters,
+  silently. Now each process keeps its argument at its own length, the
+  ceiling is per board (`CONFIG_RV9_ARG_MAX`: P4 1023, C5 and C3 255), and
+  over it fork refuses with `RV9_PE_TOOLONG`. Design §64.
 - **`fetch` onto a full volume, fixed.** Onto the 16 KB `/r0` it kept
   13,824 bytes of 138,912 and reported the whole body. It counted what it was
   sent, not what was kept. It now stops at the short write, says how much is

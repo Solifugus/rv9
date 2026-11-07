@@ -16,6 +16,7 @@
 #include "rv9/proc.h"
 
 #include "esp_log.h"
+#include "sdkconfig.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -193,6 +194,32 @@ static void pids_survive_the_wrap(void)
     ESP_LOGI(TAG, "  (after 65535 came %u)", (unsigned)c);
 }
 
+/*
+ * The argument a program is given: as long as this board takes, and not a
+ * character more. One over is refused, not cut short -- the old limit,
+ * 63, truncated in silence, and `say` spoke the first half of a sentence.
+ */
+static void arguments_up_to_the_limit(void)
+{
+    ESP_LOGI(TAG, "--- arguments up to the board's limit (%u) ---",
+             (unsigned)CONFIG_RV9_ARG_MAX);
+
+    static char arg[CONFIG_RV9_ARG_MAX + 2];
+    memset(arg, 'x', CONFIG_RV9_ARG_MAX + 1);
+    arg[CONFIG_RV9_ARG_MAX + 1] = '\0';
+
+    rv9_pid_t pid = 0;
+    check(rv9_proc_fork(QUICK, RV9_PRIO_NORMAL, arg, &pid)
+              == RV9_PROC_ERR_TOOLONG,
+          "one character over is refused");
+
+    arg[CONFIG_RV9_ARG_MAX] = '\0';
+    int status = 0;
+    bool ok = rv9_proc_fork(QUICK, RV9_PRIO_NORMAL, arg, &pid) == RV9_PROC_OK &&
+              rv9_proc_wait(pid, &status, 2000) == RV9_PROC_OK;
+    check(ok, "the limit itself is taken");
+}
+
 bool rv9_proc_selftest(void)
 {
     s_passed = s_failed = 0;
@@ -205,6 +232,7 @@ bool rv9_proc_selftest(void)
     forking_leaves_no_trace();
     uncollected_are_kept_longer();
     pids_survive_the_wrap();
+    arguments_up_to_the_limit();
 
     if (s_failed == 0) {
         ESP_LOGI(TAG, "proc: %d/%d passed", s_passed, s_passed);

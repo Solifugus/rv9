@@ -15,7 +15,7 @@ The initial engines are candidates, not permanent API dependencies:
 | --- | --- | --- |
 | Speech-to-text (STT) | Whistle | Audio utterance → transcript |
 | Tool interpretation | Needle | Text and available tool definitions → proposed structured call |
-| Text-to-speech (TTS) | Engine selected after licensing and P4 evaluation; sanoTTS is a candidate | Text → PCM audio |
+| Text-to-speech (TTS) | **CMU Flite**, slt voice (BSD-style): chosen 2026-11-05 after sanoTTS and espeak-ng proved GPLv3; see design §64 | Text → PCM audio |
 
 Keep Conatus's reasoning outside these generic modules. A simple appliance can use tool interpretation directly; Conatus can use, replace, or bypass it.
 

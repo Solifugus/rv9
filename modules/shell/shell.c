@@ -989,6 +989,12 @@ static void say_fork_error(const rv9_mod_env_t *env, const char *name, int pid)
                parsing a message the I/O manager already wrote well. */
             m_say(env, RV9_STDOUT, ": it watches a cell that means something "
                                    "else (see the log)\n");
+        } else if (pid == -RV9_PE_TOOLONG) {
+            /* Refused, not cut short. How long is the board's to say:
+               'profile' shows arg_max. */
+            m_say(env, RV9_STDOUT, ": that is more than this board takes "
+                                   "after a name (see 'profile', arg_max); "
+                                   "a pipe or < can carry the rest\n");
         } else if (pid == -RV9_PE_BUDGET) {
             m_say(env, RV9_STDOUT, ": over the memory budget of whatever is "
                                    "starting it (see 'budgets')\n");

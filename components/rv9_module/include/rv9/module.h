@@ -608,6 +608,7 @@ typedef struct {
    refusal like NODEV, and next to it for the same reason. */
 #define RV9_PE_NOPUB        15
 #define RV9_PE_MEANING      18   /* it watches a cell that means something else */
+#define RV9_PE_TOOLONG      19   /* its argument is longer than this board takes */
 
 /* The CPU is not over-promised, but no placement of the real-time work lets
    every loop meet its deadline with this one added: response-time
@@ -1255,6 +1256,43 @@ typedef struct __attribute__((packed)) {
 _Static_assert(sizeof(rv9_stt_timing_t) == 16, "stt timing is 16 bytes");
 
 /*
+ * Text to speech: /tts0, a voice that is a device.
+ *
+ *   write    the text, as many writes as it takes, up to 1 KB
+ *   setstat  RV9_TTS_SS_DONE: that is all of it; say it
+ *   read     the speech, mono 16-bit samples at the rate RV9_TTS_GS_FORMAT
+ *            gives, as they are made
+ *
+ * Reads block until there are samples and give what there is. The first
+ * comes before the whole text has been spoken -- about a second for a
+ * sentence on the P4 -- and the voice is made faster than it plays, so a
+ * reader that passes it straight to /au0 is never left waiting. When all
+ * of it has been read, a read answers RV9_IO_ERR_INVAL: nothing more was
+ * asked. A voice that failed answers RV9_IO_ERR_IO. Closing before the end
+ * stops it.
+ *
+ * One text at a time, and one process at a time: the device has a session.
+ * The voice is read on first use, from RV9_TTS_SS_VOICE's path if one was
+ * given and /sd0/slt.flitevox if not, and stays in external memory.
+ *
+ * The engine is CMU Flite, linked into the firmware behind the driver, as
+ * Whistle is behind /stt0.
+ */
+#define RV9_TTS_SS_DONE   (RV9_SS_DRIVER_BASE + 0)  /* arg ignored */
+#define RV9_TTS_SS_VOICE  (RV9_SS_DRIVER_BASE + 1)  /* const char *path */
+#define RV9_TTS_GS_TIMING (RV9_SS_DRIVER_BASE + 2)  /* rv9_tts_timing_t */
+#define RV9_TTS_GS_FORMAT (RV9_SS_DRIVER_BASE + 3)  /* rv9_audio_format_t */
+
+typedef struct __attribute__((packed)) {
+    uint32_t load_ms;       /* reading the voice, if this one had to */
+    uint32_t first_ms;      /* from RV9_TTS_SS_DONE to the first samples */
+    uint32_t audio_ms;      /* how long the speech is */
+    uint32_t synth_ms;      /* making all of it */
+} rv9_tts_timing_t;
+
+_Static_assert(sizeof(rv9_tts_timing_t) == 16, "tts timing is 16 bytes");
+
+/*
  * The camera: /cam0, one still at a time.
  *
  *   setstat  RV9_CAM_SS_FORMAT / RV9_CAM_SS_QUALITY, if the defaults --
@@ -1450,6 +1488,7 @@ typedef struct __attribute__((packed)) {
     uint32_t rt_reserve;       /* above the floor, for real-time work only */
     uint32_t budget_default;   /* a process's budget when it declares none */
     uint32_t isa;              /* RV9_ISA_*: what this CPU has beyond a module's baseline */
+    uint32_t arg_max;          /* longest argument fork takes, in characters; 0: 63, from older firmware */
 } rv9_sys_limits_t;
 
 /*

@@ -263,7 +263,8 @@
     "NOPUB": 15,
     "UNSCHEDULABLE": 16,
     "BUDGET": 17,
-    "MEANING": 18
+    "MEANING": 18,
+    "TOOLONG": 19
   },
   "io_errors": {
     "NOTFOUND": 1,
@@ -840,6 +841,34 @@
       "direction": "set",
       "discipline": "svgwin",
       "driver_relative": 10
+    },
+    {
+      "name": "RV9_TTS_SS_DONE",
+      "value": 256,
+      "direction": "set",
+      "discipline": "tts",
+      "driver_relative": 0
+    },
+    {
+      "name": "RV9_TTS_SS_VOICE",
+      "value": 257,
+      "direction": "set",
+      "discipline": "tts",
+      "driver_relative": 1
+    },
+    {
+      "name": "RV9_TTS_GS_TIMING",
+      "value": 258,
+      "direction": "get",
+      "discipline": "tts",
+      "driver_relative": 2
+    },
+    {
+      "name": "RV9_TTS_GS_FORMAT",
+      "value": 259,
+      "direction": "get",
+      "discipline": "tts",
+      "driver_relative": 3
     }
   ],
   "rt_safety": {
@@ -1011,6 +1040,13 @@
       "write_rt": null,
       "retains": false,
       "sessions": false
+    },
+    {
+      "name": "tts",
+      "read_rt": false,
+      "write_rt": false,
+      "retains": false,
+      "sessions": true
     },
     {
       "name": "uart",

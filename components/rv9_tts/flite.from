@@ -1,0 +1,7 @@
+https://github.com/festvox/flite
+commit 6c9f20dc915b17f5619340069889db0aa007fcdc (2022-05-16)
+
+Only what /tts0 uses: include/, src/ without the audio drivers, the
+US English front end and the CMU lexicon. Unchanged; RV-9's modified
+copies of two files are in ../src/, marked, and the originals here are
+not compiled. The voice is not here: see docs/tutorial.md.

@@ -4,11 +4,10 @@
 #
 #     tools/say.sh "Come and look at the camera, please."
 #
-# A stand-in until RV-9 can speak for itself: the speech is made here, by
-# espeak-ng, turned into what `play -1` takes (16 kHz, one channel, 16-bit),
+# The board speaks it with its own voice, /tts0 and `say`: the text is
 # served over HTTP, and the board is told on its serial console to fetch it
-# to the card and play it. The card, not /r0: the RAM disk is 16 KB, and
-# four seconds of speech is 130.
+# to the card and say it. A file rather than words on the command line, so
+# that neither the shell's line nor the board's argument limit cuts it.
 #
 # Environment: PORT (/dev/ttyACM0), HOST (this PC's address on the board's
 # network, 192.168.1.12), HTTP_PORT (8077). The web server is left running
@@ -25,8 +24,7 @@ mkdir -p "$D/www"
 
 [[ $# -gt 0 ]] || { echo "usage: tools/say.sh <text>" >&2; exit 1; }
 
-espeak-ng -v en-us -s 150 --stdout "$*" |
-    ffmpeg -loglevel error -y -i - -ar 16000 -ac 1 -f s16le "$D/www/say.raw"
+printf '%s\n' "$*" > "$D/www/say.txt"
 
 if ! { [[ -f "$D/http.pid" ]] && kill -0 "$(cat "$D/http.pid")" 2>/dev/null; }; then
     # exec, so that the PID recorded is the server's and not a shell's.
@@ -36,14 +34,15 @@ if ! { [[ -f "$D/http.pid" ]] && kill -0 "$(cat "$D/http.pid")" 2>/dev/null; }; 
     sleep 1
 fi
 
-# Long enough for the speech to finish before the next line is typed.
-SECS=$(( $(stat -c %s "$D/www/say.raw") / 32000 + 3 ))
+# Long enough for the speech to finish before the next line is typed:
+# about fifteen characters a second, the voice read the first time, and some.
+SECS=$(( $(stat -c %s "$D/www/say.txt") / 15 + 8 ))
 
 [[ -n "${IDF_PATH:-}" ]] || . ~/esp/esp-idf/export.sh >/dev/null 2>&1
 
 python - "$PORT" "$SECS" \
-    "fetch $HOST:$HTTP_PORT /say.raw > /sd0/say.raw" \
-    "play -1 -v 0 /sd0/say.raw" <<'EOF'
+    "fetch $HOST:$HTTP_PORT /say.txt > /sd0/say.txt" \
+    "say -v 0 < /sd0/say.txt" <<'EOF'
 import serial, sys, time
 port, secs, cmds = sys.argv[1], float(sys.argv[2]), sys.argv[3:]
 s = serial.Serial(port, 115200, timeout=0.2)

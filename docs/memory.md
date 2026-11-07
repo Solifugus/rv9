@@ -237,6 +237,7 @@ These figures come from the sources, not from measurement:
 |---|---|---|
 | `/cam0` | 1,536,000 (one 800x640 RGB565 frame, and a JPEG buffer half its size) | while the camera is open |
 | `/stt0` | the model (16.9 MB), a 30 s recording buffer (960,000), and the encoder's workspace | from the first use until restart |
+| `/tts0` | the voice (about 4 MB, measured on a PC) and a 4 s ring of samples (131,072) | from the first use until restart |
 | `detect` | 4 MB arena: the models it needs (0.4 MB for people, 0.15 MB for faces, 1.4 MB with recognition), one model's activations, and a frame (1,024,000) | while it runs |
 | `rec` | 1 MB arena, 16 s of two-channel audio | while it runs |
 | `view` | 64 KB arena, a scaled strip of the picture | while it runs |

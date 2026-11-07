@@ -92,7 +92,9 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     num(env, "    ", "history", l->proc_history, false);
     num(env, "    ", "history_max", l->proc_history_max, false);
     num(env, "    ", "max_paths", l->max_paths, false);
-    num(env, "    ", "budget_default", l->budget_default, true);
+    num(env, "    ", "budget_default", l->budget_default, false);
+    /* 0 from a firmware older than the field, whose limit was 63. */
+    num(env, "    ", "arg_max", l->arg_max ? l->arg_max : 63, true);
     m_say(env, RV9_STDOUT, "  },\n");
 
     m_say(env, RV9_STDOUT, "  \"devices\": [\n");

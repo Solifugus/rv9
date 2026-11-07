@@ -182,13 +182,15 @@ typedef struct rv9_proc {
 
     uint64_t          started_ms;
 
-    char              arg[64];        /* what fork was given, for env->arg */
-
     /* Set by rv9_proc_chain; acted on when the module returns. */
     char              chain_to[32];
     bool              chain_pending;
 
     struct rv9_proc  *next;
+
+    /* What fork was given, for env->arg: at its own length, so the record
+       is as long as the argument and no longer. Last, being flexible. */
+    char              arg[];
 } rv9_proc_t;
 
 /*
@@ -267,6 +269,12 @@ typedef enum {
      * compiled components is caught by the machine they meet on.
      */
     RV9_PROC_ERR_MEANING,
+
+    /* Its argument is longer than this board takes (CONFIG_RV9_ARG_MAX,
+       and rv9_sys_limits_t.arg_max). Refused rather than cut short: a
+       command that runs on part of what it was told is worse than one
+       that does not run. */
+    RV9_PROC_ERR_TOOLONG,
 } rv9_proc_err_t;
 
 const char *rv9_proc_strerror(rv9_proc_err_t err);

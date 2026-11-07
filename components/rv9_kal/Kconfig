@@ -37,4 +37,21 @@ config RV9_HEAP_FLOOR
 
         Zero disables it, which is how RV-9 behaved before phase 4.
 
+config RV9_ARG_MAX
+    int "Longest argument a program may be given (characters)"
+    range 63 4095
+    default 1023 if IDF_TARGET_ESP32P4
+    default 255
+    help
+        What fork will take as a program's argument -- everything after
+        its name on the command line -- before it refuses.
+
+        Each process keeps its argument at its own length, so a short one
+        costs a short one's bytes on any board, and this is only the
+        ceiling: bigger where there is room for it, smaller where there is
+        not. 255 is the shell's own line, which is what a person can type;
+        the P4's 1023 is for programs that start programs, and is what
+        /tts0 takes as one text. An argument over the limit is refused
+        with RV9_PE_TOOLONG rather than cut short.
+
 endmenu

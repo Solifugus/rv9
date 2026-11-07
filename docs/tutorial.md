@@ -797,6 +797,20 @@ The words are understood by Whistle, by Cactus Compute (Apache 2.0), through
 `/stt0`. Its 17 MB model is too big for the firmware and the store, so it
 lives on the card as `/sd0/whistle.cact` (how to put it there is below).
 
+And speaking:
+
+```
+rv9> say Matthew, please look at the camera.
+rv9> date | say
+rv9> say -t < /sd0/note.txt
+(8705 ms of speech: the first sound after 812 ms, all of it in 5454 ms)
+```
+
+The voice is CMU Flite's slt (BSD-style licence), through `/tts0`. It speaks
+a sentence at a time, starting about a second after you ask. A line typed
+at the shell holds about 250 characters; a longer text goes in through a
+pipe or `<`.
+
 ### The camera
 
 ```
@@ -852,7 +866,7 @@ Nothing leaves the board.
 
 ### Putting the models on the card
 
-None of these models is in the repository. They are other people's work
+None of these models or voices is in the repository. They are other people's work
 under their own licences, and they are big. Each one is fetched once onto
 the card.
 
@@ -877,6 +891,16 @@ python3 -c "from huggingface_hub import hf_hub_download; import shutil
 shutil.copy(hf_hub_download('Cactus-Compute/whistle','whistle.cact'), 'out/whistle.cact')"
 ```
 
+Flite's slt voice is a `.flitevox` file. Build
+[Flite](https://github.com/festvox/flite) on the PC and have it write the
+voice out:
+
+```sh
+git clone https://github.com/festvox/flite && cd flite
+./configure --disable-shared && make     # make -j trips over its own directories
+bin/flite -voice slt -voicedump ../out/slt.flitevox -t x -o /dev/null
+```
+
 Then serve the directory from the PC and fetch each file from the board,
 as in §13:
 
@@ -889,9 +913,10 @@ rv9> fetch 192.168.1.12:8000 /face1.rv9m > /sd0/face1.rv9m
 rv9> fetch 192.168.1.12:8000 /face2.rv9m > /sd0/face2.rv9m
 rv9> fetch 192.168.1.12:8000 /feat.rv9m > /sd0/feat.rv9m
 rv9> fetch 192.168.1.12:8000 /whistle.cact > /sd0/whistle.cact
+rv9> fetch 192.168.1.12:8000 /slt.flitevox > /sd0/slt.flitevox
 ```
 
-The names matter: `detect` and `/stt0` look for exactly these.
+The names matter: `detect`, `/stt0` and `/tts0` look for exactly these.
 
 ### Getting a file off the board
 

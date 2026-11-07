@@ -28,6 +28,7 @@ _Static_assert((int)RV9_PROC_ERR_DEADLINE == RV9_PE_DEADLINE, "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_RUNAWAY  == RV9_PE_RUNAWAY,  "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_NOPUB    == RV9_PE_NOPUB,    "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_MEANING  == RV9_PE_MEANING,  "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_TOOLONG  == RV9_PE_TOOLONG,  "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_UNSCHEDULABLE == RV9_PE_UNSCHEDULABLE,
                "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_BUDGET   == RV9_PE_BUDGET,   "ABI drift");
@@ -37,6 +38,7 @@ _Static_assert(RV9_TASK_FAULT_STACK  == RV9_FAULT_STACK,  "ABI drift");
 _Static_assert(RV9_TASK_FAULT_KILLED == RV9_FAULT_KILLED, "ABI drift");
 
 #include "esp_log.h"
+#include "sdkconfig.h"
 #include "soc/soc_caps.h"
 
 static const char *TAG = "rv9-proc";
@@ -114,6 +116,7 @@ const char *rv9_proc_strerror(rv9_proc_err_t err)
     case RV9_PROC_ERR_MODULE:   return "module error";
     case RV9_PROC_ERR_TIMEOUT:  return "timed out";
     case RV9_PROC_ERR_INVAL:    return "invalid argument";
+    case RV9_PROC_ERR_TOOLONG:  return "its argument is longer than this board takes";
     case RV9_PROC_ERR_FAULT:    return "stopped by the scheduler";
     case RV9_PROC_ERR_NOSLOT:   return "no real-time slot free";
     case RV9_PROC_ERR_CONTRACT: return "its declaration contradicts itself";
@@ -1341,6 +1344,7 @@ static int proc_limits_op(void *buf, uint32_t len)
     l.max_paths                = RV9_MAX_PATHS;
     l.rt_reserve               = (uint32_t)rv9_heap_rt_reserve();
     l.budget_default           = PROC_BUDGET_DEFAULT;
+    l.arg_max                  = CONFIG_RV9_ARG_MAX;
 #if SOC_CPU_HAS_PIE
     l.isa                     |= RV9_ISA_PIE;
 #endif
@@ -1916,6 +1920,17 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
 {
     if (module_name == NULL) return RV9_PROC_ERR_INVAL;
 
+    /* Before anything is linked or charged: the cheapest refusal there is.
+       The record keeps the argument at its own length (below), so this is
+       a ceiling per board, not a size every process pays for. */
+    size_t arg_len = (arg != NULL) ? strlen(arg) : 0;
+    if (arg_len > CONFIG_RV9_ARG_MAX) {
+        ESP_LOGE(TAG, "fork '%s': a %u-character argument; this board takes "
+                      "%u", module_name, (unsigned)arg_len,
+                 (unsigned)CONFIG_RV9_ARG_MAX);
+        return RV9_PROC_ERR_TOOLONG;
+    }
+
     rv9_mod_entry_t *mod = NULL;
     rv9_mod_err_t merr = rv9_mod_link(module_name, &mod);
     if (merr != RV9_MOD_OK) {
@@ -2000,7 +2015,8 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
     }
 
     /* Its footprint, and what it may hold with everything it starts. */
-    uint32_t footprint = (uint32_t)(stack + h->static_size + PROC_OVERHEAD)
+    uint32_t footprint = (uint32_t)(stack + h->static_size + PROC_OVERHEAD
+                                    + arg_len + 1)
                        + (external ? 0 : heap_max);
     uint32_t ext_footprint = external ? heap_max : 0;
     uint32_t budget = PROC_BUDGET_DEFAULT;
@@ -2089,7 +2105,7 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
         }
     }
 
-    rv9_proc_t *p = rv9_calloc(1, sizeof(*p));
+    rv9_proc_t *p = rv9_calloc(1, sizeof(*p) + arg_len + 1);
     if (p == NULL) {
         refuse_fork(pid, &charge);
         rv9_mod_unlink(mod);
@@ -2156,7 +2172,7 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
     p->n_ancestors        = charge.n;
     memcpy(p->ancestors, charge.ancestors, sizeof(p->ancestors));
     strncpy(p->name, module_name, sizeof(p->name) - 1);
-    if (arg != NULL) strncpy(p->arg, arg, sizeof(p->arg) - 1);
+    if (arg_len > 0) memcpy(p->arg, arg, arg_len);   /* calloc'd: ends in 0 */
 
     p->next = s_procs;
     s_procs = p;

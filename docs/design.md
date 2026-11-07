@@ -7232,6 +7232,115 @@ everything drawn on the window gained:
   element's attributes once per 8-row band — the cost of keeping the
   document as the display list. Fine for a screen saver.
 
+## 64. A voice of its own
+
+The board can hear (§59) and see (§61, §62). Speaking was the missing sense,
+and the first use for it was the most practical: calling somebody to the
+bench — "please look at the camera" — when the somebody is working on
+something else and would rather hear than read. `/tts0` and `say` are that.
+
+### Choosing the engine
+
+The voice proposal (`docs/rv9-voice-modules-design.md`) named sanoTTS as a
+candidate, pending its licence. It is GPLv3, and so is espeak-ng, the
+obvious alternative; RV-9 is Apache-2.0, and an engine linked into its
+firmware cannot be GPL. **CMU Flite** is BSD-style throughout — the few
+files from NAIST and Nagoya carry the same terms, and its only GPL code is
+in the build helpers, not in what runs. It is small, plain C, and has four
+English voices. Built on the PC first and played through the board's
+speaker, the user picked **slt**, the clearest, of kal, kal16, slt, rms and
+awb. slt is a clustergen voice: statistical parameters run through an MLSA
+vocoder, rather than recorded diphones glued together.
+
+### Five times slower than speech, then a sixth of the time
+
+A benchmark app (outside the repository, as Whistle's and ESP-DL's were)
+ran Flite alone on the P4 with slt built in. It took **14.1 s to say a
+2.7 s sentence** — 0.18 times real time. Timed by stage: parameter
+generation (`mlpg`) 376 ms, the vocoder (`mlsa`) **13,235 ms**, everything
+else 513 ms.
+
+The vocoder is per-sample arithmetic in `double`, and the P4's FPU is
+single precision: every operation was a libgcc routine. Flite already knows
+— its own `cst_mlsa.c` defines `double` as `float` for Windows CE, "to make
+CG voices fast enough on my phone". RV-9's copy (`components/rv9_tts/src/
+flite_mlsa.c`, marked) does the same, with two corrections:
+
+- **The voice's mixed-excitation filters are `double` in `cst_cg.h`**, and
+  the CE hack reads them through a `float` pointer. They are copied to
+  float once per sentence instead.
+- **Only the vocoder.** Making all of Flite single precision was tried
+  first and failed: parameter generation multiplies some fifty variances
+  into a determinant, which underflows a float (`#error: det <= 0.0`).
+  It is 3% of the time and keeps its doubles.
+
+The vocoder went from 13,235 ms to 603 ms. **1.5 s for the 2.7 s sentence**,
+1.7 times faster than speaking it. On the PC the single-precision wave is
+within one unit of the double one (90 dB SNR) — inaudible.
+
+To check the P4 against the PC, the noise both make had to be the same:
+Flite's unvoiced excitation used `rand()`, which is newlib's on one and
+glibc's on the other. RV-9's copy has its own generator, restarted for each
+sentence, so the same text gives the same wave anywhere. The P4's samples
+are then within one unit of the PC's (96 dB), and `say -o` on the board is
+byte for byte the benchmark's.
+
+### Behind a device
+
+`/tts0` is built like `/stt0`: the engine in a host task below every RV-9
+thread, the caller's read waiting without stopping anyone. Three things
+differ.
+
+- **Streaming.** Flite hands over each sentence's samples as the vocoder
+  makes them. They go into a 4 s ring, the reader takes them as they come,
+  and when the ring is full the engine waits — it is faster than the
+  speaker, so a reader feeding `/au0` sets the pace. But
+  `flite_text_to_speech` makes a whole text one utterance, so the first
+  sample of a three-sentence text came after 2.5 s. Flite only breaks at
+  sentences when it reads a token stream, so `/tts0` gives it one; the
+  first sound now comes after about 0.9 s whatever the length, and Flite
+  pauses between sentences as a reader would.
+- **Memory.** Under RV-9 `malloc` is internal memory, which everything else
+  needs, and Flite makes thousands of small objects a sentence. Its
+  allocator hook (`CST_USER_MALLOC`) sends all of it to PSRAM. The voice
+  holds about 4 MB once loaded (measured on a PC, where pointers are twice
+  the size, so less here). Speaking a text keeps about 31 KB the first time
+  and some 60 bytes each time after: a hundred texts on the PC grew it by
+  18 KB, slowing. Not chased; noted.
+- **Errors.** Flite fails by `longjmp` to `cst_errjmp`, or by `exit()` if
+  nobody set it — a reboot here. Every call into it sets it, so a failure is
+  a failed text. What Flite held for that text is lost.
+
+The voice is a `.flitevox` file on the card, read once into PSRAM and
+handed to Flite's loader through `fmemopen`: RV-9's volumes are not in the C
+library's file system, and the file layer's `cst_fopen` is the one other
+function RV-9 changes (`flite_file.c`, marked). Flite copies what it loads,
+so the file's 2.5 MB is freed again.
+
+| `say`, slt on the P4 | |
+|---|---|
+| a 2.7 s sentence | first sound 0.85–0.92 s, all of it 1.5–1.7 s |
+| three sentences, 8.7 s | first sound 0.8–1.0 s, all of it 5.5 s |
+| reading the voice, first use | 1.8 s |
+| loudness | slt peaks 3.5–5 dB below full scale; `say` adds 3 dB (saturating), so the loudest sentence peaks at −0.5 dBFS, unclipped |
+| firmware | +0.6 MB (Flite's engine, English and the CMU lexicon) |
+
+### Found on the way
+
+- **A program's arguments stopped at 63 characters, silently.**
+  `rv9_proc_t` kept `arg[64]`, and fork copied what fitted: `echo` lost the
+  end of a long line just as `say` did. Raising it in place would have cost
+  every process record, kept ones included, which matters on the C5. So the
+  record now ends in the argument at its own length — a short command costs
+  less than before on every board — and the limit became a per-board
+  ceiling, `CONFIG_RV9_ARG_MAX`: 1023 on the P4, 255 on the C5 and C3,
+  which is the shell's own line. More capacity, more room; less, less.
+  Over the ceiling, fork refuses with `RV9_PE_TOOLONG` instead of cutting
+  the line short, and `profile` says what this board takes (`arg_max`).
+  The boot suite forks at the limit and one over it.
+- **`fetch` onto a full volume** reported the whole body; fixed, see the
+  roadmap.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has
