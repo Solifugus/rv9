@@ -7389,7 +7389,9 @@ plain C, and none moved.
 | the first layer's patch gathered for the vector unit | 163 | 114 | 0 |
 | 3x3 depthwise: ESP-DL's nine-tap sequence, weights by group | 147 | 120 | 0 |
 | 1x1 conv: ESP-DL's 11c16, with the hardware loop | 130 | 110 | 0 |
-| add: one flat run with the hardware loop | **127** | **108** | 0 |
+| add: one flat run with the hardware loop | 127 | 108 | 0 |
+| 5x5 depthwise, the same sequence generated for 25 taps | 127 | 91 | 0 |
+| the first layer's interior patches copied without tests | **127** | **91** | 0 |
 
 - **The cache.** ESP-DL's benchmark ran with a 256 KB L2 cache and
   128-byte lines; RV-9 had ESP-IDF's defaults, 128 KB and 64. The line
@@ -7436,16 +7438,26 @@ vector instructions rather than the instructions:
 - **Add**, with all three strides equal as they are here, is one run of
   bytes, and the hardware loop goes straight down it.
 
+The people detector's depthwise layers are mostly 5x5 (23 of 29), which
+the 3x3 sequence did not cover. The rule it follows — inputs alternating
+between two registers, weights between two others, every multiply loading
+the next tap's weights and every input loaded two taps ahead — is written
+as a generator, which reproduces `pie_dw33` exactly and produces the 25-tap
+`pie_dw55`: depthwise 39 ms to 25. Running each tap of an ordinary 3x3
+conv through the 1x1 kernel's hardware loop was tried and gained nothing;
+that time is the people detector's first layer, gathering patches from
+the picture, and copying interior patches without bounds tests took it
+from 17 ms to 14.
+
 | detect, on the P4 | RV-9 now | ESP-DL |
 |---|---|---|
 | faces | 22 ms | 32 |
-| people | 108 | 55 |
+| people | 91 | 55 |
 | who, per face | 127 | 87 |
 
-Faces are faster than ESP-DL's. Recognition is within 1.5 times. What is
-left there is mostly the depthwise edges and the per-group bias and store,
-and in the people detector its 5x5 depthwise layers, which have no fast
-path yet.
+Faces are faster than ESP-DL's. Recognition is within 1.5 times, people
+1.7. What is left is mostly depthwise edge pixels, the per-group bias and
+store, and in the first layers, reading the picture.
 
 ## 9. Migration to a native kernel
 

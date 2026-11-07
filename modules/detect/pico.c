@@ -510,11 +510,20 @@ static void pie_conv_patch(const int8_t *in, tinfo_t ti, int8_t *out,
 {
     int k = cv->k, groups = (to.c + 15) / 16;
     int8_t patch[32] __attribute__((aligned(16)));
+    for (int q = 0; q < 32; q++) patch[q] = 0;   /* past k*k*3 stays zero */
     pie_round_half_even();
     for (int oy = 0; oy < to.h; oy++) {
         for (int ox = 0; ox < to.w; ox++) {
             int n = 0;
-            for (int ky = 0; ky < k; ky++) {
+            int iy0 = oy * cv->s - cv->pt, ix0 = ox * cv->s - cv->pl;
+            if (k == 3 && iy0 >= 0 && iy0 + 2 < ti.h && ix0 >= 0 && ix0 + 2 < ti.w) {
+                /* Inside the picture: three rows of nine bytes, no tests. */
+                const int8_t *r = in + (iy0 * ti.w + ix0) * 3;
+                for (int ky = 0; ky < 3; ky++, r += ti.w * 3) {
+                    for (int q = 0; q < 9; q++) patch[n + q] = r[q];
+                    n += 9;
+                }
+            } else for (int ky = 0; ky < k; ky++) {
                 int iy = oy * cv->s - cv->pt + ky;
                 for (int kx = 0; kx < k; kx++) {
                     int ix = ox * cv->s - cv->pl + kx;
@@ -527,7 +536,6 @@ static void pie_conv_patch(const int8_t *in, tinfo_t ti, int8_t *out,
                     n += 3;
                 }
             }
-            while (n < 32) patch[n++] = 0;
             for (int g = 0; g < groups; g++) {
                 pie_bias(cv->bias ? cv->bias + g * 64 : 0);
                 register const int8_t *a __asm__("a0") = patch;
@@ -768,21 +776,87 @@ static inline void pie_dw33(const int8_t *x, const int8_t *w, int dx, int dy)
         : "+r"(a), "+r"(b) : "r"(sx), "r"(sy) : "memory");
 }
 
+/* The same for 5x5, the people detector's: twenty-five taps, generated
+   by the rule pie_dw33 follows (and checked to give pie_dw33 for 3x3). */
+static inline void pie_dw55(const int8_t *x, const int8_t *w, int dx, int dy)
+{
+    register const int8_t *a  __asm__("a0") = x;
+    register const int8_t *b  __asm__("a1") = w;
+    register int           sx __asm__("a2") = dx;
+    register int           sy __asm__("a3") = dy;
+    __asm__ volatile(
+        "esp.vld.128.xp q0, %0, %2\n"
+        "esp.vld.128.ip q1, %1, 16\n"
+        "esp.vld.128.xp q2, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %3\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %3\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %3\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %3\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.ip q0, %0, 0\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vmulas.s8.qacc q0, q1\n"
+        : "+r"(a), "+r"(b) : "r"(sx), "r"(sy) : "memory");
+}
+
 static void pie_dwconv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                        const conv_t *cv)
 {
     int c = ti.s, k = cv->k;        /* the stride: padding goes along */
-    int fast = cv->lanes && k == 3;
+    int fast = cv->lanes && (k == 3 || k == 5);
     pie_round_half_even();
     for (int oy = 0; oy < to.h; oy++) {
         int iy0 = oy * cv->s - cv->pt;
         for (int ox = 0; ox < to.w; ox++) {
             int ix0 = ox * cv->s - cv->pl;
-            if (fast && iy0 >= 0 && iy0 + 2 < ti.h && ix0 >= 0 && ix0 + 2 < ti.w) {
+            if (fast && iy0 >= 0 && iy0 + k - 1 < ti.h && ix0 >= 0 &&
+                ix0 + k - 1 < ti.w) {
                 const int8_t *x = in + (iy0 * ti.w + ix0) * c;
+                int dy = (ti.w - (k - 1)) * c;
                 for (int g = 0; g < c; g += 16) {
                     pie_bias(cv->bias ? cv->bias + g * 4 : 0);
-                    pie_dw33(x + g, cv->w + g * 9, c, (ti.w - 2) * c);
+                    if (k == 3) pie_dw33(x + g, cv->w + g * 9, c, dy);
+                    else        pie_dw55(x + g, cv->w + g * 25, c, dy);
                     pie_store(out + (oy * to.w + ox) * c + g, cv, g);
                 }
                 continue;

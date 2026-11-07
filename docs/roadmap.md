@@ -1077,7 +1077,7 @@ lives in modules, and the big models live on the card.
   and two-stage face detectors, read from the card by a plain-C module with
   no ESP-DL in the firmware, bit-exact against ESP-DL on the board. Channels
   are padded to sixteens so the vector unit runs every layer. Faces take
-  22 ms (ESP-DL 32), people 108 ms (ESP-DL 55).
+  22 ms (ESP-DL 32), people 91 ms (ESP-DL 55).
 - **`detect who` — recognition, done.** ESP-DL's face signature, aligned
   from the five points exactly as ESP-DL aligns them, matching ESP-DL's
   reference byte for byte. `enroll`, `known`, `forget`, with names in
@@ -1094,9 +1094,8 @@ Next, in roughly this order:
 - **Acting on what it sees — the cell done**, design §65: `detect -p`
   publishes `/pub0/SEEN`, and `welcome` greets the people it knows by
   name. Next: following a face, once there is something to turn.
-- **Faster still**: depthwise edge pixels, the per-group bias and store,
-  and a fast path for the people detector's 5x5 depthwise layers
-  (design §66).
+- **Faster still**, if wanted: depthwise edge pixels, the per-group bias
+  and store, and reading the picture in the first layers (design §66).
 - **AprilTags**, for position and range rather than presence.
 - **`/tts0` — speech out, done**, design §64. CMU Flite (BSD-style) with
   the slt voice from `/sd0/slt.flitevox`, the vocoder in single precision:
