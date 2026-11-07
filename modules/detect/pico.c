@@ -308,6 +308,8 @@ typedef struct {
     const int8_t *alpha;         /* a PReLU folded in (F_PRELU); NULL: none */
     int pdown, pup;              /* its shifts, as OP_PRELU's */
     int patch;                   /* F_PATCH */
+    int lanes;                   /* F_LANES: a depthwise conv's weights are
+                                    [c/16][k][k][16], not [k][k][c] */
 } conv_t;
 
 /* One value through a PReLU, exactly as OP_PRELU does it below. */
@@ -368,8 +370,10 @@ static void dwconv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                     for (int kx = 0; kx < k; kx++) {
                         int ix = ox * cv->s - cv->pl + kx;
                         if (ix < 0 || ix >= ti.w) continue;
+                        int t = ky * k + kx;
                         acc += in[(iy * ti.w + ix) * cs + ch] *
-                               cv->w[(ky * k + kx) * cs + ch];
+                               cv->w[cv->lanes ? ((ch >> 4) * k * k + t) * 16 + (ch & 15)
+                                               : t * cs + ch];
                     }
                 }
                 o[ch] = act(cv, sat8(rhe(acc, cv->shift)), ch);
@@ -535,12 +539,73 @@ static void pie_conv_patch(const int8_t *in, tinfo_t ti, int8_t *out,
     }
 }
 
+/*
+ * A 1x1 conv, stride 1, no padding: every output pixel is its input pixel
+ * times the weights, and the weights, [g][cin][16], run on from one group
+ * of sixteen outputs to the next. ESP-DL's dl_esp32p4_s8_conv2d_11c16,
+ * instruction for instruction: the hardware loop (esp.lp.setup) over all
+ * but the last sixteen inputs, each multiply-add loading the weight row
+ * after next, and the block's last one loading the next sixteen inputs.
+ * `*w` is left at the next group's weights.
+ */
+static inline void pie_c11(const int8_t *x, const int8_t **w, int cdiv1)
+{
+    register const int8_t *a __asm__("a0") = x;
+    register const int8_t *b __asm__("a1") = *w;
+    register int           n __asm__("a2") = cdiv1;
+#define VSL(q, l) "esp.vsmulas.s8.qacc.ld.incp " q ", %1, " q ", q0, " #l "\n"
+    __asm__ volatile(
+        "esp.vld.128.ip q0, %0, 16\n"
+        "esp.vld.128.ip q1, %1, 16\n"
+        "esp.vld.128.ip q3, %1, 16\n"
+        "beqz %2, 1f\n"
+        "esp.lp.setup 0, %2, 0f\n"
+        VSL("q1", 0) VSL("q3", 1) VSL("q1", 2) VSL("q3", 3)
+        VSL("q1", 4) VSL("q3", 5) VSL("q1", 6) VSL("q3", 7)
+        VSL("q1", 8) VSL("q3", 9) VSL("q1", 10) VSL("q3", 11)
+        VSL("q1", 12) VSL("q3", 13) VSL("q1", 14)
+        "esp.vsmulas.s8.qacc.ld.incp q0, %0, q3, q0, 15\n"
+        "0: esp.vld.128.ip q3, %1, 16\n"
+        "1:\n"
+        VSL("q1", 0) VSL("q3", 1) VSL("q1", 2) VSL("q3", 3)
+        VSL("q1", 4) VSL("q3", 5) VSL("q1", 6) VSL("q3", 7)
+        VSL("q1", 8) VSL("q3", 9) VSL("q1", 10) VSL("q3", 11)
+        VSL("q1", 12) VSL("q3", 13)
+        "esp.vsmulas.s8.qacc q1, q0, 14\n"
+        "esp.vsmulas.s8.qacc q3, q0, 15\n"
+        : "+r"(a), "+r"(b), "+r"(n) :: "memory");
+#undef VSL
+    *w = b;
+}
+
+static void pie_conv11(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
+                       const conv_t *cv)
+{
+    int cs = ti.s, groups = (to.c + 15) / 16, cdiv1 = cs / 16 - 1;
+    int px = to.h * to.w;
+    pie_round_half_even();
+    for (int j = 0; j < px; j++) {
+        const int8_t *x = in + j * cs, *w = cv->w;
+        int8_t *o = out + j * to.s;
+        for (int g = 0; g < groups; g++) {
+            pie_bias(cv->bias ? cv->bias + g * 64 : 0);
+            pie_c11(x, &w, cdiv1);
+            pie_store(o + g * 16, cv, g * 16);
+        }
+    }
+}
+
 static void pie_conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                      const conv_t *cv)
 {
     int cin = ti.c, cs = ti.s, k = cv->k, groups = (to.c + 15) / 16;
     if (cv->patch && cs == 3 && k * k * 3 <= 32) {
         pie_conv_patch(in, ti, out, to, cv);
+        return;
+    }
+    if (k == 1 && cv->s == 1 && cv->pt == 0 && cv->pl == 0 &&
+        (cs & 15) == 0 && ti.h == to.h && ti.w == to.w) {
+        pie_conv11(in, ti, out, to, cv);
         return;
     }
     pie_round_half_even();
@@ -630,11 +695,27 @@ static void pie_prelu(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
     }
 }
 
-/* Add, sixteen at a time: esp.vadd.s8, saturating, as ESP-DL's. */
+/* Add, sixteen at a time: esp.vadd.s8, saturating, as ESP-DL's. When the
+   three strides agree -- in these models they always do -- the tensors are
+   one run of bytes each, and the hardware loop goes straight down them. */
 static void pie_add(const int8_t *a, tinfo_t ta, const int8_t *b, tinfo_t tb,
                     int8_t *out, tinfo_t to)
 {
     int px = to.h * to.w;
+    if (ta.s == to.s && tb.s == to.s && px * to.s >= 16) {
+        register const int8_t *x __asm__("a0") = a;
+        register const int8_t *z __asm__("a1") = b;
+        register int8_t       *y __asm__("a2") = out;
+        register int           n __asm__("a3") = px * to.s / 16;
+        __asm__ volatile(
+            "esp.lp.setup 0, %3, 0f\n"
+            "esp.vld.128.ip q0, %0, 16\n"
+            "esp.vld.128.ip q1, %1, 16\n"
+            "esp.vadd.s8 q2, q0, q1\n"
+            "0: esp.vst.128.ip q2, %2, 16\n"
+            : "+r"(x), "+r"(z), "+r"(y), "+r"(n) :: "memory");
+        return;
+    }
     for (int j = 0; j < px; j++) {
         for (int g = 0; g < to.s; g += 16) {
             register const int8_t *x __asm__("a0") = a + j * ta.s + g;
@@ -650,13 +731,62 @@ static void pie_add(const int8_t *a, tinfo_t ta, const int8_t *b, tinfo_t tb,
     }
 }
 
+/*
+ * A 3x3 depthwise conv's sixteen channels at a pixel whose nine taps are
+ * all inside the picture: ESP-DL's dl_esp32p4_s8_depthwise_conv2d_33s1
+ * sequence, each multiply-add loading the next tap's weights as it goes
+ * and each input loaded two instructions before it is used. `x` is the
+ * top-left tap; `dx` steps a pixel right, `dy` from a row's third tap to
+ * the next row's first. The weights are this group's nine rows (F_LANES).
+ */
+static inline void pie_dw33(const int8_t *x, const int8_t *w, int dx, int dy)
+{
+    register const int8_t *a  __asm__("a0") = x;
+    register const int8_t *b  __asm__("a1") = w;
+    register int           sx __asm__("a2") = dx;
+    register int           sy __asm__("a3") = dy;
+    __asm__ volatile(
+        "esp.vld.128.xp q0, %0, %2\n"
+        "esp.vld.128.ip q1, %1, 16\n"
+        "esp.vld.128.xp q2, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %3\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %3\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.xp q0, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vld.128.xp q2, %0, %2\n"
+        "esp.vmulas.s8.qacc.ld.ip q3, %1, 16, q0, q1\n"
+        "esp.vld.128.ip q0, %0, 0\n"
+        "esp.vmulas.s8.qacc.ld.ip q1, %1, 16, q2, q3\n"
+        "esp.vmulas.s8.qacc q0, q1\n"
+        : "+r"(a), "+r"(b) : "r"(sx), "r"(sy) : "memory");
+}
+
 static void pie_dwconv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                        const conv_t *cv)
 {
     int c = ti.s, k = cv->k;        /* the stride: padding goes along */
+    int fast = cv->lanes && k == 3;
     pie_round_half_even();
     for (int oy = 0; oy < to.h; oy++) {
+        int iy0 = oy * cv->s - cv->pt;
         for (int ox = 0; ox < to.w; ox++) {
+            int ix0 = ox * cv->s - cv->pl;
+            if (fast && iy0 >= 0 && iy0 + 2 < ti.h && ix0 >= 0 && ix0 + 2 < ti.w) {
+                const int8_t *x = in + (iy0 * ti.w + ix0) * c;
+                for (int g = 0; g < c; g += 16) {
+                    pie_bias(cv->bias ? cv->bias + g * 4 : 0);
+                    pie_dw33(x + g, cv->w + g * 9, c, (ti.w - 2) * c);
+                    pie_store(out + (oy * to.w + ox) * c + g, cv, g);
+                }
+                continue;
+            }
             for (int g = 0; g < c; g += 16) {
                 pie_bias(cv->bias ? cv->bias + g * 4 : 0);
                 for (int ky = 0; ky < k; ky++) {
@@ -667,8 +797,9 @@ static void pie_dwconv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                         if (ix < 0 || ix >= ti.w) continue;
                         register const int8_t *a __asm__("a0") =
                             in + (iy * ti.w + ix) * c + g;
-                        register const int8_t *b __asm__("a1") =
-                            cv->w + (ky * k + kx) * c + g;
+                        register const int8_t *b __asm__("a1") = cv->lanes
+                            ? cv->w + (g * k * k + (ky * k + kx) * 16)
+                            : cv->w + (ky * k + kx) * c + g;
                         __asm__ volatile(
                             "esp.vld.128.ip q0, %0, 16\n"
                             "esp.vld.128.ip q1, %1, 16\n"
@@ -701,7 +832,8 @@ void pico_node(const pico_t *p, void *arena, uint32_t i)
     conv_t cv = { n[2], n[3], n[4], n[6], shift, n[1],
                   (const int8_t *)w, boff == NO_BIAS ? 0 : p->blob + boff,
                   (n[8] & F_PRELU) ? (const int8_t *)p->blob + aux : 0,
-                  (int8_t)n[10], n[11], (n[8] & F_PATCH) != 0 };
+                  (int8_t)n[10], n[11], (n[8] & F_PATCH) != 0,
+                  (n[8] & F_LANES) != 0 };
 
     switch (op) {
     case OP_CONV:

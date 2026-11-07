@@ -50,7 +50,8 @@ Weights in the blob:
              output channels side by side, as the vector unit multiplies
              them -- ESP-DL's own order, padded; then bias, int32, one per
              output channel rounded up to sixteen, if it has one
-    dwconv   [k][k][c stride] int8, then bias [c stride] int32 if any
+    dwconv   [c stride/16][k][k][16] int8 (F_LANES; [k][k][c stride] in
+             version 3 files), then bias [c stride] int32 if any
     sigmoid  256 int8: y = table[x + 128]
     prelu    alpha [c stride] int8; shift = the negative side's right shift,
              aux = the positive side's left shift
@@ -66,7 +67,9 @@ FL_BGR = 1     # header flags: the model wants blue first
 FL_CENTRED = 2 # and its input as (v - 127.5) / 127.5, not v / 2
 NONE = 0xffffffff
 F_REM = 1      # flags: the conv's output channels are not a multiple of 16
-F_LANES = 2    # weights kept in ESP-DL's 16-lane order, for the vector unit
+F_LANES = 2    # weights kept in ESP-DL's 16-lane order, for the vector unit:
+               # a conv's [cout/16][k][k][cin][16], a depthwise conv's
+               # [c/16][k][k][16] (version 3 files kept depthwise [k][k][c])
 F_PRELU = 4    # the PReLU after this conv is done in it: aux its alphas,
                # byte 10 its shift down, 11 its shift up
 F_PATCH = 8    # a conv over the picture itself (three channels, k*k*3 <= 32):
@@ -299,10 +302,14 @@ def main():
             nb = k * k * cin * (1 if dw else cout)
             cs = stride(src[0])
             if dw:
+                # [c/16][k][k][16]: a group's taps side by side, so the
+                # vector unit walks one group's weights sixteen bytes at a
+                # time, as ESP-DL lays them out (F_LANES).
                 plain = unpack_dw(W['raw'][:nb], k, c)          # [k][k][c]
                 wt = bytearray(k * k * cs)
                 for t in range(k * k):
-                    wt[t * cs:t * cs + c] = plain[t * c:(t + 1) * c]
+                    for ch in range(c):
+                        wt[((ch // 16) * k * k + t) * 16 + ch % 16] = plain[t * c + ch]
             else:
                 plain = unpack_conv(W['raw'][:nb], k, cin, cout)  # [co][k][k][ci]
                 groups = pad16(cout) // 16
@@ -322,8 +329,7 @@ def main():
             node.update(op=OP_DW if dw else OP_CONV, k=k, stride=s,
                         pads=(pt, pb, pl, pr),
                         relu=1 if a['activation'] == 'Relu' else 0,
-                        flags=(F_REM if cout % 16 else 0) |
-                              (0 if dw else F_LANES) |
+                        flags=(F_REM if cout % 16 else 0) | F_LANES |
                               (F_PATCH if patch else 0),
                         shift=exps[out] - W['exp'][0] - ein,
                         w_off=put(wt),

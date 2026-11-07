@@ -7386,7 +7386,10 @@ plain C, and none moved.
 | L2 cache lines 128 bytes, not 64 | 196 | 119 | 0 |
 | (L2 cache 256 KB, not 128 — measured, not kept) | (167) | (110) | (−128 KB) |
 | PReLU folded into the layer before it | 170 | 119 | 0 |
-| the first layer's patch gathered for the vector unit | **163** | **114** | 0 |
+| the first layer's patch gathered for the vector unit | 163 | 114 | 0 |
+| 3x3 depthwise: ESP-DL's nine-tap sequence, weights by group | 147 | 120 | 0 |
+| 1x1 conv: ESP-DL's 11c16, with the hardware loop | 130 | 110 | 0 |
+| add: one flat run with the hardware loop | **127** | **108** | 0 |
 
 - **The cache.** ESP-DL's benchmark ran with a 256 KB L2 cache and
   128-byte lines; RV-9 had ESP-IDF's defaults, 128 KB and 64. The line
@@ -7407,12 +7410,42 @@ plain C, and none moved.
   layer's weights (`F_PATCH`) and the engine takes the path only then.
   18 ms became 11.
 
-What is left is not memory. The large 1x1 convolutions have their weights
-in the L1 cache and still take about three cycles per sixteen
-multiply-adds; at one, as ESP-DL appears to manage, recognition would be
-near ESP-DL's figure. The overhead is the loop around the vector
-instructions — bias loads, bounds tests for a 1x1 kernel that cannot fail
-them, a store per group — and that is where to look next.
+Then a second round, with a better instrument. A benchmark of ESP-DL's
+own recognition model (outside the repository, `feat-bench`, beside the
+earlier ones) printed `profile_module`: ESP-DL's time for every layer, to
+set beside ours. 87 ms in all. The first layer now matched (11.0 against
+11.3); the depthwise layers were three to four times slower than ESP-DL's,
+and the 1x1s about 1.6 times. Both had the same cause, the code around the
+vector instructions rather than the instructions:
+
+- **Depthwise 3x3.** Ours issued each tap as its own load, load and
+  multiply, with a bounds test, and the nine weight rows a whole channel
+  stride apart. ESP-DL lays a group's nine rows side by side and runs the
+  nine taps as one sequence in which every multiply loads the next row
+  and every input is loaded two instructions ahead. `mkpico.py` now writes
+  depthwise weights `[c/16][k][k][16]` (`F_LANES`, which version 3 files
+  lack and so keep the old path), and pixels whose taps are all inside the
+  picture take that sequence. Edge pixels keep the tap-by-tap path:
+  copying their taps into a padded buffer to use the fast one was tried
+  and was slower.
+- **1x1.** ESP-DL's `11c16` uses the P4's zero-overhead hardware loop
+  (`esp.lp.setup`, the `xesploop` extension) over the input channels, has
+  the last multiply of each block load the next inputs, and lets one
+  weight pointer run straight through every output group. `pie_conv11` is
+  that, instruction for instruction.
+- **Add**, with all three strides equal as they are here, is one run of
+  bytes, and the hardware loop goes straight down it.
+
+| detect, on the P4 | RV-9 now | ESP-DL |
+|---|---|---|
+| faces | 22 ms | 32 |
+| people | 108 | 55 |
+| who, per face | 127 | 87 |
+
+Faces are faster than ESP-DL's. Recognition is within 1.5 times. What is
+left there is mostly the depthwise edges and the per-group bias and store,
+and in the people detector its 5x5 depthwise layers, which have no fast
+path yet.
 
 ## 9. Migration to a native kernel
 
