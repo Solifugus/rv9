@@ -24,14 +24,15 @@ The models are Espressif's (esp-dl, models/pedestrian_detect and
 models/human_face_detect, MIT). This changes their container, not one
 weight.
 
-THE FILE, version 3, all little-endian:
+THE FILE, version 4, all little-endian (3 is the same without F_PRELU):
 
     header   magic "RV9M", version, tensors, nodes, input tensor,
              kind (KIND_*), input h, input w, flags (FL_BGR),
              outputs, output tensors[8], arena bytes, blob bytes  (80 bytes)
     tensor   h, w, c, stride (u16), exp (i16), 0, arena offset (u32) (16 each)
     node     op, relu, k, stride, pad top, bottom, left, right,
-             flags, shift (i8), 0, 0, in0, in1, out (u16), 0,
+             flags, shift (i8), PReLU shift down (i8) and up, in0,
+             in1, out (u16), 0,
              w_off, b_off (NONE: no bias), aux (u32)               (32 each)
     blob     weights, biases and tables, each 16-byte aligned
 
@@ -66,6 +67,11 @@ FL_CENTRED = 2 # and its input as (v - 127.5) / 127.5, not v / 2
 NONE = 0xffffffff
 F_REM = 1      # flags: the conv's output channels are not a multiple of 16
 F_LANES = 2    # weights kept in ESP-DL's 16-lane order, for the vector unit
+F_PRELU = 4    # the PReLU after this conv is done in it: aux its alphas,
+               # byte 10 its shift down, 11 its shift up
+F_PATCH = 8    # a conv over the picture itself (three channels, k*k*3 <= 32):
+               # its weights are followed by 128 zero bytes, so the vector
+               # unit may read a whole patch's rows and a little past them
 
 
 class T:
@@ -306,6 +312,9 @@ def main():
                         for ci in range(cin):
                             wt[((co // 16) * k * k + t) * cs * 16 + ci * 16 + co % 16] = \
                                 plain[(co * k * k + t) * cin + ci]
+            patch = not dw and cs == 3 and k * k * 3 <= 32
+            if patch:
+                wt += bytes(128)
             wt = bytes(wt)
             nbias = cs if dw else pad16(cout)
             bias = (B['raw'][:4 * cout] + bytes(4 * (nbias - cout))) if B else None
@@ -314,7 +323,8 @@ def main():
                         pads=(pt, pb, pl, pr),
                         relu=1 if a['activation'] == 'Relu' else 0,
                         flags=(F_REM if cout % 16 else 0) |
-                              (0 if dw else F_LANES),
+                              (0 if dw else F_LANES) |
+                              (F_PATCH if patch else 0),
                         shift=exps[out] - W['exp'][0] - ein,
                         w_off=put(wt),
                         b_off=put(bias) if B else NONE)
@@ -383,6 +393,29 @@ def main():
 
     outs = [names[x] for x in KINDS[kind]]
 
+    # A PReLU straight after a conv, on a tensor nothing else reads, is done
+    # inside the conv as it stores: the same arithmetic on the same int8
+    # values, without writing the tensor out to external memory and reading
+    # it back. In the recognition model that was a sixth of the time.
+    reads = {}
+    for n in nodes:
+        for x in (n['in0'], n['in1']):
+            if x != 0xffff:
+                reads[x] = reads.get(x, 0) + 1
+    made = {n['out']: n for n in nodes}
+    fused = []
+    for n in nodes:
+        src = made.get(n['in0'])
+        if (n['op'] == OP_PRELU and src is not None and
+                src['op'] in (OP_CONV, OP_DW) and not src['relu'] and
+                not src['flags'] & F_PRELU and reads[n['in0']] == 1 and
+                n['in0'] not in outs):
+            src.update(flags=src['flags'] | F_PRELU, aux=n['w_off'],
+                       p_down=n['shift'], p_up=n['aux'], out=n['out'])
+            made[n['out']] = src
+            fused.append(n)
+    nodes = [n for n in nodes if not any(n is f for f in fused)]
+
     # The arena: each tensor lives from the node that writes it to the last
     # node that reads it, and outputs to the end. First fit, by address.
     last = {i: i for i in range(len(tensors))}
@@ -413,16 +446,18 @@ def main():
     arena = max(offs[t] + size(t) for t in offs)
 
     f = bytearray(b'RV9M')
-    f += struct.pack('<9I', 3, len(tensors), len(nodes), 0, kind, in_h, in_w,
+    f += struct.pack('<9I', 4, len(tensors), len(nodes), 0, kind, in_h, in_w,
                      flags, len(outs))
     f += struct.pack('<8I', *(outs + [0] * (8 - len(outs))))
     f += struct.pack('<II', arena, len(blob))
     assert len(f) == 80
     for i, (h, w, c, e) in enumerate(tensors):
-        f += struct.pack('<HHHHhHI', h, w, c, stride(i), e, 0, offs[i])
+        # A tensor a fused PReLU made unnecessary has no place: 0, unread.
+        f += struct.pack('<HHHHhHI', h, w, c, stride(i), e, 0, offs.get(i, 0))
     for n in nodes:
-        f += struct.pack('<BBBBBBBBBbBBHHHHIII', n['op'], n['relu'], n['k'],
-                         n['stride'], *n['pads'], n['flags'], n['shift'], 0, 0,
+        f += struct.pack('<BBBBBBBBBbbBHHHHIII', n['op'], n['relu'], n['k'],
+                         n['stride'], *n['pads'], n['flags'], n['shift'],
+                         n.get('p_down', 0), n.get('p_up', 0),
                          n['in0'], n['in1'], n['out'], 0,
                          n['w_off'], n['b_off'], n['aux'])
     while len(f) % 16:

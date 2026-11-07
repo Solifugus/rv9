@@ -23,6 +23,10 @@
 
 enum { OP_CONV = 1, OP_DW, OP_GAP, OP_LUT, OP_MUL, OP_UP2, OP_CAT, OP_PRELU, OP_ADD };
 #define F_LANES  2      /* conv weights in ESP-DL's [cout/16][k][k][cin][16] */
+#define F_PRELU  4      /* and the PReLU after it done here, as it stores:
+                           aux its alphas, byte 10 its shift down, 11 up */
+#define F_PATCH  8      /* three channels in, k*k*3 <= 32, and 128 zero
+                           bytes after the weights: see pie_conv */
 #define FL_BGR   1      /* the model wants blue first */
 #define FL_CENTRED 2    /* and its input as (v - 127.5) / 127.5 */
 #define NO_BIAS  0xffffffffu
@@ -190,7 +194,8 @@ int pico_open(pico_t *p, const void *model, uint32_t size)
     const uint8_t *m = (const uint8_t *)model;
     if (size < HDR || m[0] != 'R' || m[1] != 'V' || m[2] != '9' || m[3] != 'M')
         return -1;
-    if (rd32(m + 4) != 3) return -2;
+    /* 4 is 3 with F_PRELU; the engine reads both. */
+    if (rd32(m + 4) != 3 && rd32(m + 4) != 4) return -2;
     p->m = m;
     p->pie = 0;
     p->n_tensors = rd32(m + 8);
@@ -300,7 +305,23 @@ typedef struct {
     int k, s, pt, pl, shift, relu;
     const int8_t *w;
     const uint8_t *bias;         /* NULL: none */
+    const int8_t *alpha;         /* a PReLU folded in (F_PRELU); NULL: none */
+    int pdown, pup;              /* its shifts, as OP_PRELU's */
+    int patch;                   /* F_PATCH */
 } conv_t;
+
+/* One value through a PReLU, exactly as OP_PRELU does it below. */
+static int8_t prelu1(int v, int a, int down, int up)
+{
+    return v < 0 ? sat8(rhe(v * a, down)) : sat8(v << up);
+}
+
+/* What a layer stores: its own Relu, or the PReLU folded into it. */
+static int8_t act(const conv_t *cv, int8_t y, int ch)
+{
+    if (cv->alpha) return prelu1(y, cv->alpha[ch], cv->pdown, cv->pup);
+    return cv->relu && y < 0 ? 0 : y;
+}
 
 static void conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                  const conv_t *cv)
@@ -326,8 +347,7 @@ static void conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                         for (int ci = 0; ci < cin; ci++) acc += a[ci] * b[ci * 16];
                     }
                 }
-                int8_t y = sat8(rhe(acc, cv->shift));
-                o[co] = cv->relu && y < 0 ? 0 : y;
+                o[co] = act(cv, sat8(rhe(acc, cv->shift)), co);
             }
         }
     }
@@ -352,8 +372,7 @@ static void dwconv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                                cv->w[(ky * k + kx) * cs + ch];
                     }
                 }
-                int8_t y = sat8(rhe(acc, cv->shift));
-                o[ch] = cv->relu && y < 0 ? 0 : y;
+                o[ch] = act(cv, sat8(rhe(acc, cv->shift)), ch);
             }
         }
     }
@@ -413,6 +432,47 @@ static inline void pie_out(int8_t *dst, int shift, int relu)
     __asm__ volatile("esp.vst.128.ip q2, %0, 16" : "+r"(out) :: "memory");
 }
 
+/*
+ * The same, then the PReLU that followed the layer, on the sixteen values
+ * before they are stored rather than on the whole tensor after: the
+ * tensor's round trip through external memory was most of what PReLU
+ * cost. The instructions are pie_prelu's, below, in the same order.
+ */
+static inline void pie_out_prelu(int8_t *dst, int shift, const int8_t *alpha,
+                                 int down, int up)
+{
+    uint8_t scale = (uint8_t)(1 << up);
+    register int8_t        *out __asm__("a0") = dst;
+    register const int8_t  *al  __asm__("a1") = alpha;
+    register const uint8_t *sc  __asm__("a5") = &scale;
+    register int            sh  __asm__("a2") = shift;
+    register int            sn  __asm__("a3") = down;
+    register int            sp  __asm__("a4") = 0;
+    __asm__ volatile(
+        "esp.srcmb.s8.qacc q0, %3, 1\n"
+        "esp.zero.q q2\n"
+        "esp.vldbc.8.ip q3, %2, 0\n"
+        "esp.vld.128.ip q1, %1, 16\n"
+        "esp.vprelu.s8 q4, q0, q1, %4\n"
+        "esp.vcmp.lt.s8 q6, q0, q2\n"
+        "esp.andq q4, q4, q6\n"
+        "esp.zero.qacc\n"
+        "esp.vmulas.s8.qacc q0, q3\n"
+        "esp.srcmb.s8.qacc q5, %5, 1\n"
+        "esp.vcmp.gt.s8 q6, q0, q2\n"
+        "esp.andq q5, q5, q6\n"
+        "esp.vadd.s8 q4, q4, q5\n"
+        "esp.vst.128.ip q4, %0, 16\n"
+        : "+r"(out), "+r"(al), "+r"(sc)
+        : "r"(sh), "r"(sn), "r"(sp) : "memory");
+}
+
+static inline void pie_store(int8_t *dst, const conv_t *cv, int ch)
+{
+    if (cv->alpha) pie_out_prelu(dst, cv->shift, cv->alpha + ch, cv->pdown, cv->pup);
+    else pie_out(dst, cv->shift, cv->relu);
+}
+
 /* Sixteen inputs (q0), each times a row of sixteen output channels'
    weights: ESP-DL's 11c16 pattern, two weight registers taking turns, each
    multiply-accumulate loading the row after next as it goes -- one
@@ -429,10 +489,60 @@ static inline void pie_out(int8_t *dst, int shift, int relu)
     "esp.vsmulas.s8.qacc q1, q0, 14\n" \
     "esp.vsmulas.s8.qacc q3, q0, 15\n"
 
+/*
+ * The first layer, over the picture: three channels a pixel, so the path
+ * below would multiply one byte at a time, 27 times for a 3x3 patch, and
+ * it was the slowest layer in the recognition model (18 ms). Instead the
+ * patch is gathered once a pixel into 32 aligned bytes -- three runs of
+ * nine, as the picture is stored, the edges zero -- and each group of
+ * sixteen outputs is two VSM16s. The weights are already in that order,
+ * [ky][kx][c][16], so the patch's lane i meets weight row i. Lanes 27..31
+ * are zero, and the rows VSM16 reads for them, and two ahead, are the next
+ * group's or the 128 zero bytes the converter put after the last: they
+ * add nothing. The sums are the same integers in another order.
+ */
+static void pie_conv_patch(const int8_t *in, tinfo_t ti, int8_t *out,
+                           tinfo_t to, const conv_t *cv)
+{
+    int k = cv->k, groups = (to.c + 15) / 16;
+    int8_t patch[32] __attribute__((aligned(16)));
+    pie_round_half_even();
+    for (int oy = 0; oy < to.h; oy++) {
+        for (int ox = 0; ox < to.w; ox++) {
+            int n = 0;
+            for (int ky = 0; ky < k; ky++) {
+                int iy = oy * cv->s - cv->pt + ky;
+                for (int kx = 0; kx < k; kx++) {
+                    int ix = ox * cv->s - cv->pl + kx;
+                    if (iy < 0 || iy >= ti.h || ix < 0 || ix >= ti.w) {
+                        patch[n] = patch[n + 1] = patch[n + 2] = 0;
+                    } else {
+                        const int8_t *a = in + (iy * ti.w + ix) * 3;
+                        patch[n] = a[0]; patch[n + 1] = a[1]; patch[n + 2] = a[2];
+                    }
+                    n += 3;
+                }
+            }
+            while (n < 32) patch[n++] = 0;
+            for (int g = 0; g < groups; g++) {
+                pie_bias(cv->bias ? cv->bias + g * 64 : 0);
+                register const int8_t *a __asm__("a0") = patch;
+                register const int8_t *b __asm__("a1") = cv->w + g * k * k * 3 * 16;
+                __asm__ volatile(VSM16 VSM16 : "+r"(a), "+r"(b) :: "memory");
+                pie_store(out + (oy * to.w + ox) * to.s + g * 16, cv, g * 16);
+            }
+        }
+    }
+}
+
 static void pie_conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                      const conv_t *cv)
 {
     int cin = ti.c, cs = ti.s, k = cv->k, groups = (to.c + 15) / 16;
+    if (cv->patch && cs == 3 && k * k * 3 <= 32) {
+        pie_conv_patch(in, ti, out, to, cv);
+        return;
+    }
     pie_round_half_even();
     for (int oy = 0; oy < to.h; oy++) {
         for (int ox = 0; ox < to.w; ox++) {
@@ -471,8 +581,7 @@ static void pie_conv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                         }
                     }
                 }
-                pie_out(out + (oy * to.w + ox) * to.s + g * 16, cv->shift,
-                        cv->relu);
+                pie_store(out + (oy * to.w + ox) * to.s + g * 16, cv, g * 16);
             }
         }
     }
@@ -567,7 +676,7 @@ static void pie_dwconv(const int8_t *in, tinfo_t ti, int8_t *out, tinfo_t to,
                             : "+r"(a), "+r"(b) :: "memory");
                     }
                 }
-                pie_out(out + (oy * to.w + ox) * c + g, cv->shift, cv->relu);
+                pie_store(out + (oy * to.w + ox) * c + g, cv, g);
             }
         }
     }
@@ -590,7 +699,9 @@ void pico_node(const pico_t *p, void *arena, uint32_t i)
     int px = to.h * to.w;
 
     conv_t cv = { n[2], n[3], n[4], n[6], shift, n[1],
-                  (const int8_t *)w, boff == NO_BIAS ? 0 : p->blob + boff };
+                  (const int8_t *)w, boff == NO_BIAS ? 0 : p->blob + boff,
+                  (n[8] & F_PRELU) ? (const int8_t *)p->blob + aux : 0,
+                  (int8_t)n[10], n[11], (n[8] & F_PATCH) != 0 };
 
     switch (op) {
     case OP_CONV:

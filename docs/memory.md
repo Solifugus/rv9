@@ -243,10 +243,11 @@ These figures come from the sources, not from measurement:
 | `view` | 64 KB arena, a scaled strip of the picture | while it runs |
 
 So the camera, recognition and Whistle fit together with room to spare, and
-the 32 MB is no longer the constraint. Speed is. PSRAM is far slower than
-internal RAM, and the recognition model's weights are read from it on every
-layer. That is most of why `detect who` takes 233 ms where ESP-DL takes 82
-(roadmap, Phase 12).
+the 32 MB is no longer the constraint. Speed is, and the cache in front of
+PSRAM matters: 128-byte L2 lines instead of ESP-IDF's default 64 took
+recognition from 233 ms to 196 for nothing, and a 256 KB cache instead of
+128 KB would take it to 167 but costs 128 KB of internal RAM, so it is not
+done (design §66).
 
 ## What this means for a language runtime
 

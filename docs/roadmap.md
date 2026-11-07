@@ -1077,12 +1077,13 @@ lives in modules, and the big models live on the card.
   and two-stage face detectors, read from the card by a plain-C module with
   no ESP-DL in the firmware, bit-exact against ESP-DL on the board. Channels
   are padded to sixteens so the vector unit runs every layer. Faces take
-  29 ms (ESP-DL 32), people 127 ms (ESP-DL 55).
+  28 ms (ESP-DL 32), people 114 ms (ESP-DL 55).
 - **`detect who` — recognition, done.** ESP-DL's face signature, aligned
   from the five points exactly as ESP-DL aligns them, matching ESP-DL's
   reference byte for byte. `enroll`, `known`, `forget`, with names in
-  `/sd0/faces.db`. 233 ms a face (ESP-DL 82). The time goes to external
-  memory: convolutions 106 ms, depthwise 48, PReLU 45.
+  `/sd0/faces.db`. 163 ms a face (ESP-DL 82), from 233: 128-byte cache
+  lines, PReLU folded into the layer before it, and the first layer's
+  patch gathered for the vector unit (design §66).
 - **The arithmetic, written down**: `docs/esp-dl-arithmetic.md`, enough to
   rebuild every kernel without ESP-DL's source.
 - **`mystify`**, design §63. A demonstration that the window can animate,
@@ -1093,8 +1094,9 @@ Next, in roughly this order:
 - **Acting on what it sees — the cell done**, design §65: `detect -p`
   publishes `/pub0/SEEN`, and `welcome` greets the people it knows by
   name. Next: following a face, once there is something to turn.
-- **Faster recognition**: keep the hot weights in internal RAM, or tile the
-  convolutions so that each weight is fetched from PSRAM once.
+- **Faster recognition, still**: the convolutions run at about three cycles
+  per sixteen multiply-adds where ESP-DL manages one; the loop around the
+  vector instructions, not memory, is the next place to look (design §66).
 - **AprilTags**, for position and range rather than presence.
 - **`/tts0` — speech out, done**, design §64. CMU Flite (BSD-style) with
   the slt voice from `/sd0/slt.flitevox`, the vocoder in single precision:

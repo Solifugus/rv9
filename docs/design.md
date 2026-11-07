@@ -7371,6 +7371,49 @@ Two pictures running, not one, because one is a quarter of a second of
 evidence and a greeting cannot be taken back. A stranger (`-u`) waits for
 three, and is greeted at most once a minute.
 
+## 66. Recognition, faster
+
+`detect who` took 233 ms a face where ESP-DL takes 82, and the people
+detector 128 where ESP-DL takes 55. The face detector, the same engine on
+smaller layers, already matched ESP-DL, which pointed at memory before
+arithmetic. Every change below was checked by the output hashes —
+1efb72c7 people, b0f8223e faces, f7a6c436 who — on the vector unit and in
+plain C, and none moved.
+
+| | who | people | internal RAM |
+|---|---|---|---|
+| as it was | 233 ms | 128 | |
+| L2 cache lines 128 bytes, not 64 | 196 | 119 | 0 |
+| (L2 cache 256 KB, not 128 — measured, not kept) | (167) | (110) | (−128 KB) |
+| PReLU folded into the layer before it | 170 | 119 | 0 |
+| the first layer's patch gathered for the vector unit | **163** | **114** | 0 |
+
+- **The cache.** ESP-DL's benchmark ran with a 256 KB L2 cache and
+  128-byte lines; RV-9 had ESP-IDF's defaults, 128 KB and 64. The line
+  size costs nothing and is kept. The size is carved out of internal RAM —
+  free heap went from 346 KB to 215 — and that is too much for 15 %.
+- **PReLU** was a pass of its own: every one read a whole tensor back from
+  PSRAM and wrote it out again, 32 ms in all. `mkpico.py` now folds a
+  PReLU into the conv or depthwise conv before it when nothing else reads
+  that tensor (`F_PRELU`; file version 4), and the kernels apply it to the
+  sixteen values they are about to store — the same instructions as the
+  separate pass, in the same order. 36 of the model's 104 nodes went.
+- **The first layer** sees the picture: three channels, so the vector path
+  multiplied one byte at a time, 27 times a group, 18 ms. A 3x3x3 patch is
+  already three runs of nine bytes in the picture and its weights are
+  already in that order, so it is gathered into 32 aligned bytes and each
+  group is two of the 16-wide multiply-add blocks. The blocks read their
+  weight rows two ahead, so the converter puts 128 zero bytes after such a
+  layer's weights (`F_PATCH`) and the engine takes the path only then.
+  18 ms became 11.
+
+What is left is not memory. The large 1x1 convolutions have their weights
+in the L1 cache and still take about three cycles per sixteen
+multiply-adds; at one, as ESP-DL appears to manage, recognition would be
+near ESP-DL's figure. The overhead is the loop around the vector
+instructions — bias loads, bounds tests for a 1x1 kernel that cannot fail
+them, a store per group — and that is where to look next.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

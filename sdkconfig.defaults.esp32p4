@@ -245,6 +245,14 @@ CONFIG_SPIRAM_USE_CAPS_ALLOC=y
 CONFIG_SPIRAM_SPEED_200M=n
 CONFIG_SPIRAM_SPEED_250M=y
 
+# The L2 cache in front of PSRAM: 128 KB, ESP-IDF's default, but 128-byte
+# lines rather than 64. Face recognition streams a megabyte of weights and
+# activations through it and went from 233 ms to 196 for nothing; nothing
+# else measured moved. 256 KB would take it to 167 and costs 128 KB of
+# internal RAM, which is the scarcer thing (design section 66).
+CONFIG_CACHE_L2_CACHE_128KB=y
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
+
 # The radio, which is not on this chip.
 #
 # THERE ARE TWO MECHANISMS HERE AND THEY ARE MUTUALLY EXCLUSIVE. Getting

@@ -828,7 +828,7 @@ frame, so the first second or so can look green.
 ```
 rv9> detect people
 person 0.88 179,251 317,616
-(41 ms for the picture, 127 ms to look at it)
+(41 ms for the picture, 114 ms to look at it)
 rv9> detect faces
 face 0.61 347,113 639,491 eyes 433,268 548,259 nose 494,298 mouth 449,397 533,394
 (41 ms for the picture, 29 ms to look at it)
@@ -852,7 +852,7 @@ look at the camera, and turn your head a little
 learnt matthew, from 5 pictures
 rv9> detect who
 face matthew 0.83 347,113 639,491
-(41 ms for the picture, 29 ms to look at it, 233 ms to know it)
+(41 ms for the picture, 29 ms to look at it, 163 ms to know it)
 rv9> detect known
 matthew
 rv9> detect forget matthew
