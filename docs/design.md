@@ -7634,8 +7634,10 @@ and `ext_largest`), which is how that was found.
 The 52 KB stack is the engine's: 43,972 bytes at its deepest, in the
 decoder, whose functions keep arrays of 512 floats and one of 4,608. That is
 more than the 32 KB a shell's budget covers for everything it starts, so the
-console shell now declares 96 KB. A session over SSH is still held to
-`sshd`'s 40 KB, because budgets nest: `listen` is the console's.
+console shell now declares 96 KB. A session over SSH is held to `sshd`'s
+budget as well, because budgets nest, and `sshd` went from 40 KB to 128 KB
+so that `listen` runs over SSH too. Its sessions together may now take
+somewhat under half of the 280 KB programs have at idle.
 
 **What it found: a thread could resume in the past.** The first version
 crashed after a few hundred of its sleeps, at a different place each
@@ -7666,8 +7668,7 @@ all the same text; ten seconds after `say`; `listen -c` killed while
 listening, its memory back to the byte; every self-test suite passing; and
 `detect`'s output hashes unchanged.
 
-Not done: `listen` over SSH, which wants `sshd`'s budget raised or sessions
-budgeted apart. Flite, at 711 KB, is now the largest thing in the firmware
+Flite, at 711 KB, is now the largest thing in the firmware
 that a program could carry instead, and `/tts0` still keeps its voice from
 first use to restart. Giving that back when nobody is speaking would also
 let `listen` have 16 seconds again.

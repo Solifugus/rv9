@@ -1460,8 +1460,8 @@ stack, its statics and its descriptor — nearly all of it at fork, because
 modules cannot allocate — and so are its eight nearest ancestors. Exceeding
 `mem_max`, or the 32,768-byte default, gives `RV9_PE_BUDGET`. §14 has the
 numbers and why the accounting is an array. The console shell declares
-96 KB, for `listen` (52 KB of stack); a session over SSH is still held to
-`sshd`'s 40 KB, so `listen` is the console's.
+96 KB, for `listen` (52 KB of stack), and `sshd` 128 KB for all its
+sessions together, so `listen` runs over SSH too.
 
 The two are independent. The floor answers *is there memory on this
 machine*; the budget answers *may this family of processes have it*. A fork
