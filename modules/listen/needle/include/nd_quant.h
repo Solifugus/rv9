@@ -147,7 +147,13 @@ static inline uint32_t nd_cq_lut_floats(uint32_t in_pad)
  * (the ESP32 build hands half the rows to the second core) and every matvec
  * picks it up. */
 typedef void (*nd_row_fn)(void *ctx, uint32_t r0, uint32_t r1);
+#ifdef RV9_MODULE
+/* RV-9: a function, not a variable. A module has no writable globals, and
+ * this is where the engine stops to let the rest of the machine run. */
+void nd_parallel_rows(nd_row_fn fn, void *ctx, uint32_t nrows);
+#else
 extern void (*nd_parallel_rows)(nd_row_fn fn, void *ctx, uint32_t nrows);
+#endif
 
 /* Build the pair table from an already-prepared activation. */
 void nd_cq_lut_build(const nd_cact *c, const float *xh, uint32_t in_pad,
@@ -185,7 +191,11 @@ void nd_cq_gemm_prepared(const nd_cact *c, const nd_tensor *t, const void *blob,
  * vector unit (16 multiply-adds per instruction); elsewhere a C loop computes
  * the same integers, so the host build checks what the board does. Set to 0
  * for the float path (tools/check_whistle.py's tight NumPy comparison). */
+#ifdef RV9_MODULE
+#define nd_cq_int8 1    /* RV-9: a module has no writable globals */
+#else
 extern int nd_cq_int8;
+#endif
 
 /* An activation batch ready for the int8 path: T rows of the Hadamard-domain
  * activation as int8, one scale per 128-wide group. Prepare it once and run

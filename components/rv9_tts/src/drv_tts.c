@@ -7,11 +7,11 @@
  *
  * WHERE THE WORK HAPPENS
  *
- * As for /stt0: in a host task of its own, below all of RV-9's, so that a
+ * In a host task of its own, below all of RV-9's, so that a
  * second of arithmetic per sentence stops nobody. The caller's read says
  * "not yet" until there are samples, which SCF turns into a sleep.
  *
- * Unlike /stt0 the answer is not one line at the end. Flite speaks a text
+ * Unlike a recogniser's, the answer is not one line at the end. Flite speaks a text
  * a sentence at a time and hands over each sentence's samples as the
  * vocoder makes them (its "streaming" callback), so they go into a ring
  * here and the reader takes them as they arrive: the first sound comes
@@ -34,7 +34,7 @@
  * made with cst_errjmp set, and a failure is a failed text, not a reboot.
  * What it had allocated for that text is lost: Flite keeps no list.
  *
- * Handing over is as for /stt0, by `state`: the caller moves it IDLE ->
+ * Handing over is by one word, `state`: the caller moves it IDLE ->
  * QUEUED, the engine QUEUED -> RUNNING -> DONE or FAILED, the caller back
  * to IDLE once it has read the end. The ring has one writer, the engine,
  * and one reader, the caller, each owning its own index.

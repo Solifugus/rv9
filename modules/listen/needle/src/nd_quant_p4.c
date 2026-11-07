@@ -19,6 +19,11 @@ static void *nd_quant_alloc(size_t n)
 }
 #define ND_QUANT_ALLOC(n) nd_quant_alloc(n)
 #define ND_QUANT_FREE(p)  heap_caps_free(p)
+#elif defined(RV9_MODULE)
+/* RV-9, as a module: the module's arena, which is all a module has. See
+ * modules/listen/nd_mod.h. */
+#define ND_QUANT_ALLOC(n) nd_malloc(n)
+#define ND_QUANT_FREE(p)  nd_free(p)
 #else
 #define ND_QUANT_ALLOC(n) malloc(n)
 #define ND_QUANT_FREE(p)  free(p)
@@ -298,6 +303,7 @@ static ND_HOT float dot_group_lut2(const uint8_t *q, const float *T, uint32_t g)
     return (s0 + s1) + (s2 + s3);
 }
 
+#ifndef RV9_MODULE
 /* Default splitter: run everything on the calling thread. */
 static void rows_serial(nd_row_fn fn, void *ctx, uint32_t nrows)
 {
@@ -305,6 +311,7 @@ static void rows_serial(nd_row_fn fn, void *ctx, uint32_t nrows)
 }
 
 void (*nd_parallel_rows)(nd_row_fn fn, void *ctx, uint32_t nrows) = rows_serial;
+#endif
 
 typedef struct {
     const nd_tensor *t;
@@ -498,7 +505,9 @@ void nd_cq_gemm_prepared(const nd_cact *c, const nd_tensor *t, const void *blob,
 
 /* ------------------------------------------------------------ int8 path */
 
+#ifndef RV9_MODULE
 int nd_cq_int8 = 1;
+#endif
 
 /* sum(a[i] * b[i]) over 128 int8s; both 16-byte aligned. */
 static ND_HOT int32_t dot128_s8(const int8_t *a, const int8_t *b)
@@ -526,7 +535,7 @@ static ND_HOT int32_t dot128_s8(const int8_t *a, const int8_t *b)
         "rur.accx_0 %0\n"           /* |sum| <= 128*127*127: fits 32 bits */
         : "=r"(r), "+r"(a), "+r"(b) :: "memory");
     return r;
-#elif defined(ESP_PLATFORM) && defined(CONFIG_IDF_TARGET_ESP32P4)
+#elif (defined(ESP_PLATFORM) || defined(RV9_MODULE)) && defined(CONFIG_IDF_TARGET_ESP32P4)
     /* The P4's PIE does what the S3's does here, under other names: 16
      * signed int8 multiply-adds per esp.vmulas into a wide accumulator.
      * Its address operands must be x8-x15, hence the pinned registers.

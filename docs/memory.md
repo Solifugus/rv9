@@ -236,13 +236,13 @@ These figures come from the sources, not from measurement:
 | who | external | when |
 |---|---|---|
 | `/cam0` | 1,536,000 (one 800x640 RGB565 frame, and a JPEG buffer half its size) | while the camera is open |
-| `/stt0` | the model (16.9 MB), a 30 s recording buffer (960,000), and the encoder's workspace | from the first use until restart |
 | `/tts0` | the voice (about 4 MB, measured on a PC) and a 4 s ring of samples (131,072) | from the first use until restart |
 | `detect` | 4 MB arena: the models it needs (0.4 MB for people, 0.15 MB for faces, 1.4 MB with recognition), one model's activations, and a frame (1,024,000) | while it runs |
 | `rec` | 1 MB arena, 16 s of two-channel audio | while it runs |
+| `listen` | 24 MB arena: the model (16.9 MB), up to 10 s of audio, and the engine's work -- 20.9 MB at most for 2.6 s of speech, 23.3 MB for 10 (measured) | while it runs |
 | `view` | 64 KB arena, a scaled strip of the picture | while it runs |
 
-So the camera, recognition and Whistle fit together with room to spare, and
+So the camera, recognition and Whistle fit together, and
 the 32 MB is no longer the constraint. Speed is, and the cache in front of
 PSRAM matters: 128-byte L2 lines instead of ESP-IDF's default 64 took
 recognition from 233 ms to 196 for nothing, and a 256 KB cache instead of

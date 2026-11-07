@@ -6894,7 +6894,8 @@ Open:
 vendored in `components/rv9_stt/needle` (Apache-2.0, `whistle.from` says from
 where) with the P4 PIE dot product from Phase 0. It is linked into the
 firmware rather than being a module: the proposal's prototype arrangement,
-and the one a first measurement wanted.
+and the one a first measurement wanted. (Since §69 it is a module, and
+`/stt0` is gone.)
 
 - **No new system call.** A program recognises speech with `open`, `write`,
   `setstat` and `read`, as it would talk to anything else. `listen` is forty
@@ -7562,6 +7563,114 @@ forks, and a fork before then is refused and logged rather than run.
 
 Measured, P4, same card and store: prompt at 31.5 s with the suites
 (10 suites, 0 failures, as before), 4.2 s without.
+
+## 69. Whistle as a module
+
+`/stt0` (§59) was Whistle's engine linked into the firmware behind a
+device. It cost 37 KB of firmware, and after the first `listen` it held
+the 17 MB model, a 30-second buffer and a 48 KB engine stack in internal
+memory until the board restarted. Now the engine is the `listen` module:
+the model, the audio and the engine's work are its arena, and all of it is
+given back when it ends.
+
+| | `/stt0` in the firmware | `listen` as a module |
+|---|---|---|
+| firmware | 37 KB | none |
+| held while nobody listens | the model and buffers (about 18 MB external), the engine's 48 KB stack | nothing |
+| held while it listens | the same | a 24 MB arena, a 52 KB stack, 7.5 KB of statics |
+| reading the model | once per boot, 4.9 s | at every start, 5.1 s, before the beep |
+| "Flash the light blue far too sanctified." (2.6 s clip) | 6.6 s | 7.9 s, the same text |
+
+`listen -c` keeps one running, beep after beep, to pay for the model once;
+it stops at the end of an utterance when it is killed.
+
+**What a vendored engine needs to be a module.** A module links against
+nothing, so `modules/listen/ndrt.c` is the C library Whistle calls:
+`memcpy` and friends, `expf`, `logf`, `sinf`, `cosf` and `powf` by range
+reduction and a short polynomial, and `sqrtf`, `fabsf` and `lrintf` as
+single FPU instructions. The engine is compiled as written, forced to
+include `nd_mod.h`, which renames `malloc` and the rest onto an allocator
+over the arena. A module has no writable globals either, and the engine had
+four: two permutation tables, a profiling array and a function pointer for
+splitting rows across cores. They became fields of a context that the
+engine finds through **s11**, a register `-ffixed-s11` keeps the compiler
+off. s11 is callee-saved, so the firmware keeps it across every system call
+and RV-9's switch keeps it per thread. The engine's own sources changed only
+inside `#ifdef RV9_MODULE`.
+
+The engine needs the FPU, which modules had never used: they are built for
+RV32IMAC. `listen` is built with F in its `-march` and the soft-float ABI,
+so nothing float crosses into the firmware, and asks for both units before
+it touches a float. `rv9_sys_limits_t.isa` gained `RV9_ISA_FPU` beside
+`RV9_ISA_PIE`. The engine's only doubles computed its FFT tables at load;
+those are float now, and the transcripts are identical. `build.conf`
+gained `sources`, for files in a subdirectory, and a module is compiled from
+its own directory so that its `cflags` can name them.
+
+**Taking turns.** RV-9 switches threads only when one asks for something,
+and a sentence is seconds of arithmetic that asks for nothing. The firmware
+engine had a host task below everything; a module is an RV-9 thread. So
+every matrix product, which goes through one function, does its rows eight
+at a time and sleeps a millisecond whenever 20 ms have passed. A sleep
+rather than a yield, so that the network stack and the host's own tasks
+get the processor as well as RV-9's threads. The attention and the log-mel
+front end, which are not matrix products, offer a turn per frame. Measured,
+the longest the engine goes without one is 29 ms for 2.6 seconds of speech
+and 107 ms for 10. The turns cost about 0.3 s a sentence.
+
+**Memory.** The engine asked for internal memory for the scratch that every
+row of a layer reads; measured, that was 3% of a sentence for 96 KB of the
+chip's internal RAM, so the module has none. It also copied the decoder's
+output head into PSRAM, which is how weights mapped from flash are made
+fast. These weights are in PSRAM already, so that was 2.1 MB for nothing.
+What is left grows about 430 KB a second over a 20 MB base: 20.9 MB at most
+for 2.6 seconds, 23.3 MB for 10, 26.6 MB for 16. The arena is 24 MB and
+`listen` takes at most 10 seconds, because after `/tts0` has loaded its
+voice the largest external block left is 25 MB, and a recogniser that
+cannot start after the board has spoken is no use. `free` now reports
+external memory and its largest block (`rv9_sys_mem_t` gained `ext_free`
+and `ext_largest`), which is how that was found.
+
+The 52 KB stack is the engine's: 43,972 bytes at its deepest, in the
+decoder, whose functions keep arrays of 512 floats and one of 4,608. That is
+more than the 32 KB a shell's budget covers for everything it starts, so the
+console shell now declares 96 KB. A session over SSH is still held to
+`sshd`'s 40 KB, because budgets nest: `listen` is the console's.
+
+**What it found: a thread could resume in the past.** The first version
+crashed after a few hundred of its sleeps, at a different place each
+time, with registers full of floats or with s11 gone. With a yield instead
+of a sleep it did not. The kernel had a path that switched from a thread to
+itself. A thread that sleeps one tick goes through `reschedule()`, which
+wakes sleepers before it picks the next thread. If the tick arrived in
+between, the sleeper was ready again and was picked. The early return for
+"still the best choice" only covered a thread still marked running, so this
+one fell through to `rv9_ctx_switch(&prev->sp, next->sp)` with prev and
+next the same thread. `next->sp` had been read before the save, so the
+switch saved the thread's registers and then restored the frame it had left
+at its *previous* switch. The thread carried on from an earlier sleep.
+
+A loop that always sleeps in the same place hardly notices: it repeats an
+iteration. That is why 5,000 sleeps in a test loop passed, deep in a stack
+or not. The engine sleeps from hundreds of places and resumed in the wrong
+one. The fix is the early return, for any state. The debugging that found
+it is worth recording. Register values pointed at the FPU's lazy save, and
+then at a coprocessor owner left dangling by a deleted task; a hook on task
+deletion cleared the second. Comparing the stack above the sleeper before
+and after each sleep showed it unchanged. What finally caught it was
+checking, in the kernel, the s11 saved in the frame about to be restored:
+the log said the previous thread was the same one.
+
+After the fix: five runs of the 2.6-second clip, each with about 300 sleeps,
+all the same text; ten seconds after `say`; `listen -c` killed while
+listening, its memory back to the byte; every self-test suite passing; and
+`detect`'s output hashes unchanged.
+
+Not done: `listen` over SSH, which wants `sshd`'s budget raised or sessions
+budgeted apart. Flite, at 711 KB, is now the largest thing in the firmware
+that a program could carry instead, and `/tts0` still keeps its voice from
+first use to restart. Giving that back when nobody is speaking would also
+let `listen` have 16 seconds again.
 
 ## 9. Migration to a native kernel
 

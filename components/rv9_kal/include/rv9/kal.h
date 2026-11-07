@@ -781,6 +781,9 @@ void *rv9_alloc_large(size_t size);
 /* External memory still free, and zero on a board with none. */
 size_t rv9_heap_large_free(void);
 
+/* Its largest single block: what decides whether an arena can be had. */
+size_t rv9_heap_large_largest(void);
+
 /*
  * A process's arena: zeroed, aligned to 16 bytes, and from exactly where
  * it was asked for. External means PSRAM or NULL -- no fallback, because

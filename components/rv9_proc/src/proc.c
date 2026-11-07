@@ -1348,6 +1348,9 @@ static int proc_limits_op(void *buf, uint32_t len)
 #if SOC_CPU_HAS_PIE
     l.isa                     |= RV9_ISA_PIE;
 #endif
+#if SOC_CPU_HAS_FPU
+    l.isa                     |= RV9_ISA_FPU;
+#endif
 
     memcpy(buf, &l, len < sizeof(l) ? len : sizeof(l));
     return 1;

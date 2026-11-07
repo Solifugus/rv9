@@ -10,4 +10,4 @@ endif()
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS "."
                        REQUIRES rv9_kal rv9_module rv9_proc rv9_io rv9_kernel
-                                rv9_ssh rv9_stt rv9_tts esp_hw_support spi_flash esp_timer)
+                                rv9_ssh rv9_tts esp_hw_support spi_flash esp_timer)

@@ -1222,38 +1222,11 @@ typedef struct __attribute__((packed)) {
 _Static_assert(sizeof(rv9_audio_format_t) == 8, "audio format is 8 bytes");
 
 /*
- * Speech to text: /stt0, a recogniser that is a device.
- *
- *   write    16 kHz mono 16-bit samples, as many writes as it takes
- *   setstat  RV9_STT_SS_DONE: that was the utterance; recognise it
- *   read     the text, one line ending in a newline, once it is ready
- *
- * The read blocks until the text is there -- seconds, not milliseconds:
- * about twice the length of the speech on the P4 -- while every other
- * process carries on, because the work is done below RV-9's own threads
- * and only when none of them wants the processor. A read with nothing
- * asked of it is RV9_IO_ERR_INVAL rather than a wait for ever.
- *
- * One utterance at a time, and one process at a time: the device has a
- * session, so a second opener is refused until the first closes. The model
- * is read on first use, from RV9_STT_SS_MODEL's path if one was given and
- * /sd0/whistle.cact if not, and stays in external memory after that.
- *
- * This is the proposal's prototype arrangement: the engine is linked into
- * the firmware, behind a driver, rather than being a module of its own.
+ * Speech to text is not a device any more: Whistle's engine is in the
+ * `listen` module, which reads the model into its own arena and gives
+ * everything back when it ends (design section 69). /stt0 and its
+ * RV9_STT_* codes were here from section 59 until then.
  */
-#define RV9_STT_SS_DONE   (RV9_SS_DRIVER_BASE + 0)  /* arg ignored */
-#define RV9_STT_SS_MODEL  (RV9_SS_DRIVER_BASE + 1)  /* const char *path */
-#define RV9_STT_GS_TIMING (RV9_SS_DRIVER_BASE + 2)  /* rv9_stt_timing_t */
-
-typedef struct __attribute__((packed)) {
-    uint32_t load_ms;       /* reading the model, if this one had to */
-    uint32_t audio_ms;      /* how long the last utterance was */
-    uint32_t encode_ms;     /* listening to it */
-    uint32_t decode_ms;     /* writing it down */
-} rv9_stt_timing_t;
-
-_Static_assert(sizeof(rv9_stt_timing_t) == 16, "stt timing is 16 bytes");
 
 /*
  * Text to speech: /tts0, a voice that is a device.
@@ -1276,7 +1249,7 @@ _Static_assert(sizeof(rv9_stt_timing_t) == 16, "stt timing is 16 bytes");
  * given and /sd0/slt.flitevox if not, and stays in external memory.
  *
  * The engine is CMU Flite, linked into the firmware behind the driver, as
- * Whistle is behind /stt0.
+ * Whistle was behind /stt0 before it became a module.
  */
 #define RV9_TTS_SS_DONE   (RV9_SS_DRIVER_BASE + 0)  /* arg ignored */
 #define RV9_TTS_SS_VOICE  (RV9_SS_DRIVER_BASE + 1)  /* const char *path */
@@ -1310,7 +1283,7 @@ _Static_assert(sizeof(rv9_tts_timing_t) == 16, "tts timing is 16 bytes");
  * The first picture after opening waits about half a second more than the
  * others: the sensor is started on first use and its exposure has to find
  * the light. It stops, and gives back the memory it held, when the last
- * path closes. The work is done below RV-9's own threads, as /stt0's is,
+ * path closes. The work is done below RV-9's own threads, as /tts0's is,
  * so the rest of the board carries on while a picture is taken.
  *
  * RGB565 pixels are little-endian, top row first, which is what the
@@ -1502,6 +1475,8 @@ typedef struct __attribute__((packed)) {
  * reads 0, which is the right answer for it to give.
  */
 #define RV9_ISA_PIE   (1u << 0)   /* Espressif's vector unit (esp.* opcodes) */
+#define RV9_ISA_FPU   (1u << 1)   /* single-precision floating point (F): its
+                                     registers are saved at a switch */
 
 /*
  * Who owns what.
@@ -1609,6 +1584,14 @@ typedef struct __attribute__((packed)) {
      * older record still works: see RV9_SYS_MEM_MIN.
      */
     uint32_t heap_largest;
+
+    /*
+     * External memory, which is only ever an arena: what is free of it,
+     * and the largest block, which is whether a program declaring one
+     * can start. Zero on a board with none. Appended, as above.
+     */
+    uint32_t ext_free;
+    uint32_t ext_largest;
 } rv9_sys_mem_t;
 
 /* What a caller must ask for at minimum, and the boundary that must not

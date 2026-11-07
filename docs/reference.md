@@ -264,9 +264,8 @@ the firmware.
 | `/adc0/N` | `pio` | `adc` | Analogue in. |
 | `/tsens` | `pio` | `tsens` | The die's own temperature. |
 | `/au0` | `scf` | `audio` | Two microphones in, the speaker out, on one duplex bus: 16 kHz frames of two 16-bit little-endian samples both ways — MIC1 and MIC2 in, the left played out. Ask `RV9_AU_GS_FORMAT` rather than assuming it. Reads block until a frame arrives and never split one; writes return when everything is queued. The hardware and the speaker's amplifier run from the first read or write until the last close, and two processes may share it. P4 only: the codecs are found on the bus or the device does not attach. |
-| `/stt0` | `scf` | `stt` | Speech to text: Whistle behind a device. Write 16 kHz mono 16-bit samples, setstat `RV9_STT_SS_DONE`, read one line of text. The read takes about twice the length of the speech and blocks only the reader: the engine runs below every RV-9 thread, on time nobody else wants. A session device: one process at a time. The model is read on first use from `/sd0/whistle.cact` (or `RV9_STT_SS_MODEL`) and stays in external memory. P4 only. **The prototype arrangement** — the engine is linked into the firmware, not a module. |
-| `/tts0` | `scf` | `tts` | Text to speech: CMU Flite behind a device. Write up to 1 KB of text, setstat `RV9_TTS_SS_DONE`, read mono 16-bit samples as they are made, a sentence at a time: the first after about a second, and all of them faster than they play. When all of it has been read a read answers `RV9_IO_ERR_INVAL`, and `RV9_IO_ERR_IO` if the voice failed; closing early stops it. The engine runs below every RV-9 thread, as `/stt0`'s does. A session device. The voice is read on first use from `/sd0/slt.flitevox` (or `RV9_TTS_SS_VOICE`) and stays in external memory, about 4 MB. P4 only. Linked into the firmware, as Whistle is. |
-| `/cam0` | `scf` | `camera` | The OV5647 camera, one still at a time: 800x640, the sensor's whole view scaled down. Read it and the first read takes a picture and waits for it; `RV9_CAM_GS_FRAME` then says how many bytes it is, and a read after the last byte takes the next. A JPEG at quality 80 unless `RV9_CAM_SS_FORMAT` or `RV9_CAM_SS_QUALITY` said otherwise; `RV9_CAM_FMT_RGB565` is the pixels, little-endian, top row first. The work is done below RV-9's threads, as `/stt0`'s is. The sensor starts on the first picture — about 70 ms, then half a second for its exposure — and stops, giving back its 1.5 MB of external memory, at the last close. A session device. P4 only. `RV9_CAM_FMT_JPEG` and `RV9_CAM_FMT_RGB565` are the formats. |
+| `/tts0` | `scf` | `tts` | Text to speech: CMU Flite behind a device. Write up to 1 KB of text, setstat `RV9_TTS_SS_DONE`, read mono 16-bit samples as they are made, a sentence at a time: the first after about a second, and all of them faster than they play. When all of it has been read a read answers `RV9_IO_ERR_INVAL`, and `RV9_IO_ERR_IO` if the voice failed; closing early stops it. The engine runs below every RV-9 thread. A session device. The voice is read on first use from `/sd0/slt.flitevox` (or `RV9_TTS_SS_VOICE`) and stays in external memory, about 4 MB. P4 only. Linked into the firmware; Whistle, which was too, is now the `listen` module (design §69). |
+| `/cam0` | `scf` | `camera` | The OV5647 camera, one still at a time: 800x640, the sensor's whole view scaled down. Read it and the first read takes a picture and waits for it; `RV9_CAM_GS_FRAME` then says how many bytes it is, and a read after the last byte takes the next. A JPEG at quality 80 unless `RV9_CAM_SS_FORMAT` or `RV9_CAM_SS_QUALITY` said otherwise; `RV9_CAM_FMT_RGB565` is the pixels, little-endian, top row first. The work is done below RV-9's threads, as `/tts0`'s is. The sensor starts on the first picture — about 70 ms, then half a second for its exposure — and stops, giving back its 1.5 MB of external memory, at the last close. A session device. P4 only. `RV9_CAM_FMT_JPEG` and `RV9_CAM_FMT_RGB565` are the formats. |
 | `/touch` | `scf` | `touch` | The touch panel, as a stream of 12-byte events. Reads block; records are never split. The queue is emptied on first open, so a program gets fingers from now rather than a backlog. Only where there is one. **Flashing the P4 leaves the controller not scanning; an ordinary reset does not. Its reset line is not wired, so take the board's power away.** The driver says so when it sees it. |
 | `/i2c0/ADDR` | `ifm` | `i2c` | The two-wire bus. The pins are the board's; the only option is kHz (100). Shared with the touch controller. A register number above `0xff` is sent as two bytes, high first. |
 | `/n0/…` | `nfm` | `net` | TCP, out and in. |
@@ -728,12 +727,12 @@ returns how many there are, so a caller can size a buffer before asking.
 The convention that matters: **you pass the length you know about.** A record
 may grow a field on the end in a later ABI, and an older module asking with
 an older `sizeof` gets the prefix it understands rather than a refusal. This
-is why `rv9_sys_mem_t` could gain `heap_largest` without breaking anything,
+is why `rv9_sys_mem_t` could gain `heap_largest`, and then `ext_free` and `ext_largest`, without breaking anything,
 and why `RV9_SYS_MEM_MIN` exists to mark the part that may never move.
 
 | code | records | what you get |
 |---|---|---|
-| `RV9_SYS_MEM` | one `rv9_sys_mem_t` | Free, available, what is left for programs, the floors, the low-water mark, the largest free block. What `free` prints. |
+| `RV9_SYS_MEM` | one `rv9_sys_mem_t` | Free, available, what is left for programs, the floors, the low-water mark, the largest free block; and external memory free and its largest block, which is whether a program declaring an external arena will start. What `free` prints. |
 | `RV9_SYS_MODULES` | one `rv9_sys_module_t` each | The store: name, type, revision, size, live links. What `mdir` prints. |
 | `RV9_SYS_PROCS` | one `rv9_sys_proc_t` each | Live processes and remembered dead ones: pid, parent, name, state, priorities, **status and fault separately**. What `procs` prints. |
 | `RV9_SYS_RT` | one record | The real-time slots: what is admitted, at what period and deadline, and the load. |
@@ -911,9 +910,6 @@ Relative to `RV9_SS_DRIVER_BASE`, and meaningful only on that driver's paths.
 | `RV9_AU_GS_FORMAT` | +0 | `rv9_audio_format_t`: rate, channels, bits, and how many of the channels a microphone fills and a speaker plays. |
 | `RV9_AU_SS_VOLUME` | +1 | `int32_t` dB, −95 to +32. The speaker. |
 | `RV9_AU_SS_GAIN` | +2 | `uint32_t` dB, 0 to 37. Both microphones; 30 when nobody has said. |
-| `RV9_STT_SS_DONE` | +0 | That was the utterance; recognise it. At least a tenth of a second, or `RV9_IO_ERR_INVAL`. |
-| `RV9_STT_SS_MODEL` | +1 | `const char *` path to the model, before first use. One model per boot. |
-| `RV9_STT_GS_TIMING` | +2 | `rv9_stt_timing_t`: how long the last utterance was, how long it took to encode and decode, and how long reading the model took if that run had to. |
 | `RV9_TTS_SS_DONE` | +0 | That is all of the text; say it. `RV9_IO_ERR_INVAL` if none was written. |
 | `RV9_TTS_SS_VOICE` | +1 | `const char *` path to a Flite voice file, before first use. One voice per boot. |
 | `RV9_TTS_GS_TIMING` | +2 | `rv9_tts_timing_t`: how long reading the voice took if this text had to, how long from `RV9_TTS_SS_DONE` to the first samples, how long the speech is, and how long making all of it took. |
@@ -1463,7 +1459,9 @@ A separate mechanism, and a separate refusal. A process is charged for its
 stack, its statics and its descriptor — nearly all of it at fork, because
 modules cannot allocate — and so are its eight nearest ancestors. Exceeding
 `mem_max`, or the 32,768-byte default, gives `RV9_PE_BUDGET`. §14 has the
-numbers and why the accounting is an array.
+numbers and why the accounting is an array. The console shell declares
+96 KB, for `listen` (52 KB of stack); a session over SSH is still held to
+`sshd`'s 40 KB, so `listen` is the console's.
 
 The two are independent. The floor answers *is there memory on this
 machine*; the budget answers *may this family of processes have it*. A fork
@@ -1648,7 +1646,7 @@ same quantity.
 | `budget_default` | 32768 | Bytes a process and everything it starts may hold when its manifest says nothing. Sized so a shell can hold its largest ordinary command — `ed`, 17 KB with its statics — with room left. Say `mem_max` to want more. |
 | `budget_ancestors` | 8 | How far up a charge is carried, so a fork bomb is paid for by whoever started it. |
 | `arg_max` | board | Characters of argument fork takes — everything after the program's name. `CONFIG_RV9_ARG_MAX`: **1023 on the P4, 255 on the C5 and C3**, where 255 is the shell's own line. Each process keeps its argument at its own length, so this is a ceiling, not a cost: a longer one is refused with `RV9_PE_TOOLONG`. `rv9_sys_limits_t.arg_max`; reads 0 from firmware older than the field, whose limit was 63, cut short in silence. |
-| `isa` | board | `rv9_sys_limits_t.isa`, from `sysinfo(RV9_SYS_LIMITS)`: instructions beyond the RV32IMAC every module may assume. `RV9_ISA_PIE` is the P4's vector unit. Modules are built once for every board, so one that carries such opcodes asks first; an instruction the CPU lacks is a fault, not a slow path. Reads 0 from firmware older than the field. |
+| `isa` | board | `rv9_sys_limits_t.isa`, from `sysinfo(RV9_SYS_LIMITS)`: instructions beyond the RV32IMAC every module may assume. `RV9_ISA_PIE` is the P4's vector unit and `RV9_ISA_FPU` its single-precision FPU, whose registers RV-9's switch saves: `listen` asks for both. Modules are built once for every board, so one that carries such opcodes asks first; an instruction the CPU lacks is a fault, not a slow path. Reads 0 from firmware older than the field. |
 
 ### Real time
 

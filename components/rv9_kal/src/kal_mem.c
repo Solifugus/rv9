@@ -316,6 +316,11 @@ size_t rv9_heap_large_free(void)
     return heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 }
 
+size_t rv9_heap_large_largest(void)
+{
+    return heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+}
+
 /* Zeroed here rather than trusted to be: the block last belonged to some
    other process, and a model's weights or a key are not to be inherited. */
 void *rv9_alloc_arena(size_t size, bool external)

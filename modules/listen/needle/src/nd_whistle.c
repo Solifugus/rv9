@@ -7,7 +7,9 @@
 #include "nd_ledcmd.h"     /* nd_utf8_lower */
 #include "nd_quant.h"
 
+#ifndef RV9_MODULE      /* RV-9: a module has no writable globals */
 uint64_t nd_wprof[ND_WP_COUNT];
+#endif
 
 #ifdef ND_PROFILE
 #ifdef ESP_PLATFORM
@@ -22,6 +24,14 @@ uint64_t nd_wprof[ND_WP_COUNT];
 #else
 #define ND_T0(v) ((void)0)
 #define ND_T1(v, slot) ((void)0)
+#endif
+
+#ifdef RV9_MODULE
+/* RV-9: where a long stretch of arithmetic offers the machine a turn; the
+ * matrix products already do, in nd_parallel_rows. See listen/ndrt.c. */
+#define ND_BREATHE() nd_breathe()
+#else
+#define ND_BREATHE() ((void)0)
 #endif
 
 #define EPS          1e-6f
@@ -53,7 +63,14 @@ enum { H_A_PRE, H_A_POST, H_A_RES, H_B_PRE, H_B_POST, H_B_RES, H_PHI_PRE,
 enum { G_TABLES, G_KEY, G_VALUE, G_TAPS };
 enum { S_W, S_DW1, S_PW1, S_DW2, S_PW2, S_OUT };
 
+#ifdef RV9_MODULE
+/* RV-9: a module has no writable globals, so these are the module's, in
+ * its statics, found through the register that holds its context. */
+#define s_perm1 (nd_ctx_reg->perm1)
+#define s_perm2 (nd_ctx_reg->perm2)
+#else
 static int32_t s_perm1[512], s_perm2[512];
+#endif
 
 /* ------------------------------------------------------------------ utils */
 
@@ -560,6 +577,7 @@ void nd_whistle_logmel(const nd_whistle *w, const float *x, uint32_t n, float *o
                 s += pw[k] * fb[k * mels + b];
             out[(size_t)t * mels + b] = logf(s + LOG_EPS);
         }
+        ND_BREATHE();
     }
 
     /* Normalise each mel channel over the clip (sample std, ddof=1). */
@@ -770,6 +788,7 @@ static void enc_attention(nd_whistle *w, uint32_t L, const float *xn, uint32_t T
                 for (e = 0; e < vd; e++)
                     oh[e] += sc[s] * vs[e];
             }
+            ND_BREATHE();
         }
     ND_T1(ta, ND_WP_ATTN);
     }

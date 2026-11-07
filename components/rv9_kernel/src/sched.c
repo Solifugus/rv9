@@ -497,8 +497,26 @@ static void reschedule(void)
         return;
     }
 
+    /*
+     * Still the best choice -- including a thread that has just slept or
+     * waited and is already ready again, which happens whenever the tick
+     * it was waiting for arrives before wake_sleepers above looks.
+     *
+     * That case used to fall through to a switch from the thread to
+     * itself. The incoming stack pointer is read before the outgoing one
+     * is saved, so the switch saved the thread's registers and then
+     * restored the frame it had left at its *previous* switch: the thread
+     * resumed in the past. A loop that sleeps in one place barely notices
+     * -- it repeats an iteration -- and that is how it went unseen. A
+     * program that sleeps from many places resumes in the wrong one, and
+     * Whistle as a module found it within a few hundred sleeps.
+     */
     if (next == prev) {
-        if (prev->state == RV9K_RUNNING) return;   /* still the best choice */
+        if (prev->state != RV9K_RUNNING) {
+            prev->state        = RV9K_RUNNING;
+            prev->entered_tick = now();
+        }
+        return;
     }
 
     if (prev) {

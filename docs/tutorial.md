@@ -813,19 +813,24 @@ rv9> play /sd0/a.raw
 afterwards, so a slow write cannot lose samples. Running it in the
 background with a beep beside it is how to check the microphones without
 talking at them. `listen` is speech to
-text: it beeps, records four seconds, and prints what it heard.
+text: it reads the model, beeps, records four seconds, and prints what it
+heard.
 
 ```
 rv9> listen
+reading the model...
 listening...
 thinking...
 turn on the light
-(4000 ms of audio: 6500 ms to recognise)
+(4000 ms of audio: 8468 ms to recognise; reading the model took 5071 ms)
 ```
 
-The words are understood by Whistle, by Cactus Compute (Apache 2.0), through
-`/stt0`. Its 17 MB model is too big for the firmware and the store, so it
-lives on the card as `/sd0/whistle.cact` (how to put it there is below).
+The words are understood by Whistle, by Cactus Compute (Apache 2.0), whose
+engine is the `listen` module itself: nothing of it is in the firmware, and
+the 24 MB it works in is given back when it ends. Its 17 MB model lives on
+the card as `/sd0/whistle.cact` (how to put it there is below), and is read
+at every start -- five seconds, before the beep. `listen -c &` keeps one
+running and listening, beep after beep, until you `kill` it.
 
 And speaking:
 
@@ -957,7 +962,7 @@ rv9> fetch 192.168.1.12:8000 /whistle.cact > /sd0/whistle.cact
 rv9> fetch 192.168.1.12:8000 /slt.flitevox > /sd0/slt.flitevox
 ```
 
-The names matter: `detect`, `/stt0` and `/tts0` look for exactly these.
+The names matter: `detect`, `listen` and `/tts0` look for exactly these.
 
 ### Getting a file off the board
 

@@ -123,7 +123,6 @@ loadable pieces:
 | `/i2c0/0x68` | a chip on the two-wire bus, through IFM; the register lives on the path so a read is one transaction |
 | `/w0` | a window you draw on by writing SVG to it, or by putting pixels in it |
 | `/au0` | the microphones and the speaker (P4) |
-| `/stt0` | speech to text: write a recording, read what was said (P4, Whistle) |
 | `/tts0` | text to speech: write text, read the voice as it is made (P4, Flite) |
 | `/cam0` | the camera: ask for a picture, read it as JPEG or RGB565 (P4) |
 | `/pub0/NAME` | a published value with an owner and a sequence number |
@@ -335,7 +334,7 @@ of small tools, a clock taken from the network, and the real-time class with
 admission, derived priority, watchdog, failsafes and memory reserves.
 
 On the P4, the senses: recording and playing sound, speech to text
-(Whistle, on the card), speech of its own (`say`, CMU Flite), a camera (`snap`, `view`), and `detect`, which finds
+(`listen`: Whistle's engine as a module, its model on the card), speech of its own (`say`, CMU Flite), a camera (`snap`, `view`), and `detect`, which finds
 people and faces and says whose faces they are. The detectors are
 Espressif's ESP-DL models, read from the card by a plain-C module that gives
 ESP-DL's answers byte for byte, with nothing of ESP-DL in the firmware. And

@@ -15,6 +15,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     if (env == NULL || env->abi_version < 5) return -1;
 
     rv9_sys_mem_t m;
+    for (uint32_t i = 0; i < sizeof(m); i++) ((uint8_t *)&m)[i] = 0;
     if (env->sysinfo(RV9_SYS_MEM, &m, sizeof(m)) < 1) return -2;
 
     m_say(env, RV9_STDOUT, "heap free      ");
@@ -46,6 +47,15 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     m_num(env, RV9_STDOUT, (int32_t)m.heap_low_since_up);
     m_say(env, RV9_STDOUT, "\nexecutable     ");
     m_num(env, RV9_STDOUT, (int32_t)m.heap_exec_free);
+    /* Only arenas live out there, so its largest block is the question:
+       whether a program that declares one will start. Left out on a board
+       that has none, and by a firmware too old to say. */
+    if (m.ext_free) {
+        m_say(env, RV9_STDOUT, "\nexternal       ");
+        m_num(env, RV9_STDOUT, (int32_t)m.ext_free);
+        m_say(env, RV9_STDOUT, "\n  largest block ");
+        m_num(env, RV9_STDOUT, (int32_t)m.ext_largest);
+    }
     m_say(env, RV9_STDOUT, "\nmodules        ");
     m_num(env, RV9_STDOUT, (int32_t)m.module_count);
     m_say(env, RV9_STDOUT, "\nprocesses      ");

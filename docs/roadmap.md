@@ -1069,7 +1069,8 @@ lives in modules, and the big models live on the card.
   without a voice.
 - **`/stt0` — speech to text, done**, design §59. Whistle (Cactus Compute,
   Apache 2.0), checked against its own engine, with a PIE kernel. The 17 MB
-  model is read from `/sd0/whistle.cact` on first use. `listen`.
+  model is read from `/sd0/whistle.cact` on first use. `listen`. Since §69
+  the engine is the `listen` module and `/stt0` is gone.
 - **`/cam0` — the camera, done**, design §61. OV5647 through CSI and the
   ISP, a picture on request, JPEG in hardware or raw RGB565, grey-world
   white balance. `snap`, `view`.
@@ -1127,7 +1128,9 @@ used. The agreed order:
    `/f0/selftest` asks (`once` or `always`), and `CONFIG_RV9_SELFTEST`
    leaves them out of the firmware. Prompt in 4 s, not 31. Not modules: they
    test from inside, where the module ABI does not reach.
-3. **Whistle as a module**, so `/stt0` costs nothing until somebody listens.
+3. **Whistle as a module — done**, design §69: the engine is `listen`, in
+   its own arena, and gives all of it back when it ends. On the way: a
+   scheduler bug that made a thread resume in the past.
 4. Perhaps **loadable drivers**: a device whose driver is read from the card
    when it is first opened.
 

@@ -125,14 +125,19 @@ for dir in "$ROOT"/modules/*/; do
     cflags=""           # more compiler flags, e.g. an -march with an
                         # extension. Such a module carries those opcodes
                         # to every board and must ask RV9_ISA_* first.
+    sources=""          # more .c files, relative to the module's directory:
+                        # a vendored engine kept in a subdirectory of its own.
 
     [[ -f "$dir/build.conf" ]] && source "$dir/build.conf"
 
     MODFLAGS=("${CFLAGS[@]}")
     [[ -n "$opt" ]] && MODFLAGS+=("-$opt")
     [[ -n "$cflags" ]] && read -ra extra <<< "$cflags" && MODFLAGS+=("${extra[@]}")
+    for f in $sources; do srcs+=("$dir$f"); done
 
-    "$CC" "${MODFLAGS[@]}" "${LDFLAGS[@]}" -o "$OUT/$name.elf" "${srcs[@]}"
+    # From the module's own directory, so that its cflags and sources can
+    # name its files relatively.
+    (cd "$dir" && "$CC" "${MODFLAGS[@]}" "${LDFLAGS[@]}" -o "$OUT/$name.elf" "${srcs[@]}")
     "$OBJCOPY" -O binary "$OUT/$name.elf" "$OUT/$name.bin"
 
     # Prove position independence instead of assuming it.
@@ -142,8 +147,8 @@ for dir in "$ROOT"/modules/*/; do
     # linked; anything holding an absolute address differs. This catches the
     # constructs that quietly break the loader -- pointer tables built from
     # a switch over string literals being the one that actually bit us.
-    "$CC" "${MODFLAGS[@]}" "${LDFLAGS[@]}" "${PROBE_BASE[@]}" \
-        -o "$OUT/$name.probe.elf" "${srcs[@]}"
+    (cd "$dir" && "$CC" "${MODFLAGS[@]}" "${LDFLAGS[@]}" "${PROBE_BASE[@]}" \
+        -o "$OUT/$name.probe.elf" "${srcs[@]}")
     "$OBJCOPY" -O binary "$OUT/$name.probe.elf" "$OUT/$name.probe.bin"
 
     if ! cmp -s "$OUT/$name.bin" "$OUT/$name.probe.bin"; then

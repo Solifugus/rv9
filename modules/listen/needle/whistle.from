@@ -4,20 +4,30 @@
 # (needle/LICENSE). Vendored for the reason modules/whisker.from gives: an
 # include path into another working tree breaks every clean checkout.
 #
-# Byte-for-byte copies of engine/include/*.h and engine/src/*.c, except
-# nd_quant.c, which is replaced by nd_quant_p4.c: the same file with a P4 PIE
-# path for the 128-element int8 dot product (esp.vmulas.s8.xacc), measured in
+# Copies of engine/include/*.h and engine/src/*.c, except nd_quant.c, which
+# is replaced by nd_quant_p4.c: the same file with a P4 PIE path for the
+# 128-element int8 dot product (esp.vmulas.s8.xacc), measured in
 # docs/rv9-voice-modules-design.md §12 at 3.3x the portable C. Upstream has
 # such a path for the S3 only. And ND_QUANT_ALLOC falls back to PSRAM when
 # internal memory is refused: three of its callers did not check, and under
 # RV-9 the first sentence found the internal heap too short and crashed.
+#
+# Since design section 69 the engine is the `listen` module, and these live
+# in modules/listen/needle (they were components/rv9_stt/needle). A module
+# has no writable globals, so nd_quant.h, nd_quant_p4.c and nd_whistle.c
+# differ from upstream inside #ifdef RV9_MODULE: nd_parallel_rows is a
+# function, nd_cq_int8 a constant, s_perm1/s_perm2 live in the module's
+# context, and nd_whistle.c offers the machine a turn (ND_BREATHE) in its
+# attention and log-mel loops. Built without RV9_MODULE they are upstream's
+# code. Only nd_whistle, nd_quant_p4, nd_tokenizer, nd_cact and nd_ledcmd are
+# compiled (modules/listen/build.conf).
 #
 # The model is not here and never will be: 17 MB, fetched to /sd0.
 # Hugging Face Cactus-Compute/whistle, whistle.cact, 16,919,407 bytes.
 #
 # To see whether this copy is current, if you have the upstream:
 #
-#     diff -r components/rv9_stt/needle/include ~/development/esp32/whistle-esp32/engine/include
+#     diff -r modules/listen/needle/include ~/development/esp32/whistle-esp32/engine/include
 
 upstream  = https://github.com/andrisgauracs/whistle-esp32 (engine/)
 commit    = 383e008

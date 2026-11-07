@@ -26,14 +26,14 @@
  *
  * WHERE THE WORK HAPPENS
  *
- * As in /stt0, not in the caller. Starting the sensor is a hundred and
+ * Not in the caller. Starting the sensor is a hundred and
  * fifty bus writes and then half a second for its exposure to settle;
  * a frame is twenty milliseconds of waiting and a JPEG another few tens.
  * Every RV-9 thread shares one host task, so all of that is done in a
  * host task of the driver's own, below RV-9's (rv9_task_create_background),
  * and a read says "not yet" until it is finished.
  *
- * Handing over is by one word, `state`, as in drv_stt.c: the caller moves
+ * Handing over is by one word, `state`, as in drv_tts.c: the caller moves
  * it IDLE -> QUEUED, the worker QUEUED -> RUNNING -> DONE or FAILED, and
  * the caller DONE -> IDLE when the last byte has been read. The worker
  * also owns everything to do with the hardware -- starting it, and
