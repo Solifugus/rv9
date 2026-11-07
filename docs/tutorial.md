@@ -864,6 +864,17 @@ pictures, in `/sd0/faces.db`. `who` compares each face it finds against
 them and names the closest if it is close enough, or says `unknown`.
 Nothing leaves the board.
 
+To have it greet you when you sit down:
+
+```
+rv9> detect who -p &
+rv9> welcome &
+```
+
+`detect -p` publishes each answer to `/pub0/SEEN` instead of printing it
+(`watch SEEN` shows the words), and `welcome` reads the cell and says hello
+to anyone it knows, once every ten minutes.
+
 ### Putting the models on the card
 
 None of these models or voices is in the repository. They are other people's work

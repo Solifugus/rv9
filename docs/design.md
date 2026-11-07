@@ -7341,6 +7341,36 @@ so the file's 2.5 MB is freed again.
 - **`fetch` onto a full volume** reported the whole body; fixed, see the
   roadmap.
 
+## 65. Acting on what it sees
+
+A detector that only prints is a demonstration. The roadmap's next step was
+for the board to act on what it sees, and the board has no motor yet — the
+C3s that will drive them are still waiting on their wiring. So the general
+part came first: `detect -p` publishes each picture's answer to
+`/pub0/SEEN`, and anything that wants to act reads sixteen words from a
+cell instead of running a model.
+
+The value is what an actor needs and no more: how many, where the main one
+is, how sure, and with `who` how alike and whose name. The *main* one is
+the largest face — the nearest, usually the one addressing the machine —
+and the surest person. Only that face is recognised, a quarter of a second,
+where printing every face's name costs that per face. The stamp is when the
+picture was read, as §10 asks: an answer is about 0.26 s old when it
+arrives, and a steering loop needs to know it.
+
+`welcome` is the first reader. It watches the cell and, when a known face
+is the main one in two pictures running, has `say` greet them by name —
+once, and not again for ten minutes. It was tried on a saved picture of a
+face in `faces.db`, then on the user, who was greeted by name on sitting
+down. The voice stayed smooth with `detect who -p` busy beside it: the
+engine below RV-9's threads still gets enough of the processor. It never
+opens the camera; a program that turned towards a face
+would read the same words, and that is the point of the cell.
+
+Two pictures running, not one, because one is a quarter of a second of
+evidence and a greeting cannot be taken back. A stranger (`-u`) waits for
+three, and is greeted at most once a minute.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

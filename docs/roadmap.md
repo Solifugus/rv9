@@ -1090,8 +1090,9 @@ lives in modules, and the big models live on the card.
 
 Next, in roughly this order:
 
-- **Acting on what it sees**: follow a face, or publish where people are on
-  `/pub0`, so a control loop can use detections without running a model.
+- **Acting on what it sees — the cell done**, design §65: `detect -p`
+  publishes `/pub0/SEEN`, and `welcome` greets the people it knows by
+  name. Next: following a face, once there is something to turn.
 - **Faster recognition**: keep the hot weights in internal RAM, or tile the
   convolutions so that each weight is fetched from PSRAM once.
 - **AprilTags**, for position and range rather than presence.

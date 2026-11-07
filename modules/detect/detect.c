@@ -72,7 +72,30 @@ typedef struct {
     const rv9_mod_env_t *env;
     uint64_t    last;
     uint32_t    fus[3][7];      /* stage 1, stage 2, signature */
+    /* -p: what goes to /pub0/SEEN, a head and sixteen words. */
+    rv9_pub_t   head;
+    int32_t     seen[16];
 } detect_statics_t;
+
+/*
+ * /pub0/SEEN, with -p: what the camera saw in the latest picture, for a
+ * program that wants to act on it without running a model.
+ *
+ *   0      what was looked for: 1 people, 2 faces
+ *   1      how many were found
+ *   2..5   the most prominent -- the largest face, the surest person:
+ *          x1, y1, x2, y2 in the camera's 800x640 pixels, inclusive
+ *   6      its score, 0..1000
+ *   7      with `who`, its likeness to the closest known face, -1000..1000,
+ *          and -1 when nobody is known or it was not asked
+ *   8..15  with `who`, that person's name if the likeness is over 500
+ *          (ESP-DL's line), NUL-padded; otherwise all zero
+ *
+ * Stamped with when the picture was read, not when the answer was ready:
+ * a recognised face is about a quarter of a second old by then.
+ */
+#define SEEN_PEOPLE 1
+#define SEEN_FACES  2
 
 enum { K_CONV_VEC, K_CONV_C, K_DW_VEC, K_DW_C, K_PRELU, K_ADD, K_OTHER, K_KINDS };
 
@@ -253,6 +276,28 @@ static int largest(const pico_face_t *f, int n)
     return best;
 }
 
+/* The closest of the known faces to this one: its index, or -1. */
+static int recognise(detect_statics_t *st, void *arena, const uint16_t *frame,
+                     const pico_face_t *f, const person_t *db, int npeople,
+                     int16_t *unit, int32_t *likeness, pico_between_t between)
+{
+    int8_t sig[PICO_SIG];
+    st->last = st->env->time_us();
+    pico_signature(&st->p3, arena, frame, CW, CH, PICO_RGB565, f->pt, sig,
+                   between, st);
+    int32_t v[PICO_SIG];
+    for (int k = 0; k < PICO_SIG; k++) v[k] = sig[k];
+    pico_unit(v, unit);
+    int best = -1;
+    int32_t bs = -65536;
+    for (int k = 0; k < npeople; k++) {
+        int32_t sm = pico_similar(unit, db[k].sig);
+        if (sm > bs) { bs = sm; best = k; }
+    }
+    *likeness = bs;
+    return best;
+}
+
 static void q16(const rv9_mod_env_t *env, int32_t v)
 {
     if (v < 0) { m_say(env, RV9_STDOUT, "-"); v = -v; }
@@ -286,14 +331,18 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     if (verbose) rest = m_word(rest, st->word, sizeof(st->word));
     int plain = m_eq(st->word, "-c");
     if (plain) rest = m_word(rest, st->word, sizeof(st->word));
+    int publish = m_eq(st->word, "-p");
+    if (publish) rest = m_word(rest, st->word, sizeof(st->word));
     int from_file = m_eq(st->word, "-f");
     if (from_file) {
         rest = m_word(rest, st->file, sizeof(st->file));
         m_word(rest, st->word, sizeof(st->word));
     }
-    uint32_t count = st->word[0] ? m_num_parse(st->word, 0) : enroll ? 5 : 1;
-    if (count == 0 || (from_file && !st->file[0])) {
-        m_say(env, RV9_STDERR, "usage: detect [faces|people|who] [-v] [-c] [-f <file>] [count]\n"
+    /* -p with no count: until stopped. */
+    uint32_t count = st->word[0] ? m_num_parse(st->word, 0)
+                   : publish ? 0xFFFFFFFFu : enroll ? 5 : 1;
+    if (count == 0 || (from_file && !st->file[0]) || (publish && (enroll || known || forget))) {
+        m_say(env, RV9_STDERR, "usage: detect [faces|people|who] [-v] [-c] [-p] [-f <file>] [count]\n"
                                "       detect enroll <name> [count] | known | forget <name>\n");
         return 1;
     }
@@ -386,8 +435,19 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         env->setstat(src, RV9_CAM_SS_FORMAT, &fmt);
     }
 
+    int pub = -1;
+    if (publish) {
+        pub = env->open("/pub0/SEEN", RV9_MODE_WRITE);
+        if (pub < 0) {
+            m_say(env, RV9_STDERR, "detect: /pub0/SEEN: cannot open\n");
+            env->close(src);
+            return 3;
+        }
+    }
+
     int rc = 0;
     for (uint32_t i = 0; i < count; i++) {
+        if (publish && (env->signals_take() & RV9_SIG_STOP)) break;
         uint64_t t0 = env->time_us();
         if (st->file[0] && i > 0) env->seek(src, 0, RV9_SEEK_SET);
         if (read_all(env, src, (uint8_t *)frame, FRAME) < 0) {
@@ -438,22 +498,48 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         }
         uint64_t t2 = env->time_us();
 
+        if (publish) {
+            /* Quietly, and only the most prominent is recognised: that is
+               a quarter of a second, and a picture with three faces
+               would otherwise be three of them. */
+            int32_t *v = st->seen;
+            for (int k = 0; k < 16; k++) v[k] = 0;
+            v[0] = faces ? SEEN_FACES : SEEN_PEOPLE;
+            v[1] = n;
+            v[7] = -1;
+            if (n > 0) {
+                const pico_box_t *b = faces ? &st->face[largest(st->face, n)].box
+                                            : &st->box[0];
+                v[2] = b->x1; v[3] = b->y1; v[4] = b->x2; v[5] = b->y2;
+                v[6] = (int32_t)((b->score * 1000u) >> 16);
+                if (who && npeople > 0) {
+                    st->env = env;
+                    int32_t bs;
+                    int best = recognise(st, arena, frame,
+                                         &st->face[largest(st->face, n)], db,
+                                         npeople, unit, &bs, env_yield);
+                    v[7] = bs * 1000 / 65536;
+                    if (best >= 0 && bs > 32768) {
+                        char *name = (char *)&v[8];
+                        for (int k = 0; k < NAME - 1 && db[best].name[k]; k++)
+                            name[k] = db[best].name[k];
+                    }
+                }
+            }
+            st->head.seq = 0;
+            st->head.len = sizeof(st->seen);
+            st->head.stamp_us = t1;
+            env->write(pub, &st->head, sizeof(st->head) + sizeof(st->seen));
+            continue;
+        }
+
         for (int j = 0; j < n; j++) {
             if (who) {
                 const pico_face_t *f = &st->face[j];
-                int8_t sig[PICO_SIG];
-                st->last = env->time_us();
-                pico_signature(&st->p3, arena, frame, CW, CH, PICO_RGB565,
-                               f->pt, sig, verbose ? between : env_yield, st);
-                int32_t v[PICO_SIG];
-                for (int k = 0; k < PICO_SIG; k++) v[k] = sig[k];
-                pico_unit(v, unit);
-                int best = -1;
-                int32_t bs = -65536;
-                for (int k = 0; k < npeople; k++) {
-                    int32_t sm = pico_similar(unit, db[k].sig);
-                    if (sm > bs) { bs = sm; best = k; }
-                }
+                st->env = env;
+                int32_t bs;
+                int best = recognise(st, arena, frame, f, db, npeople, unit,
+                                     &bs, verbose ? between : env_yield);
                 m_say(env, RV9_STDOUT, "face ");
                 m_say(env, RV9_STDOUT, best >= 0 && bs > 32768 ? db[best].name : "unknown");
                 m_say(env, RV9_STDOUT, " ");
@@ -512,6 +598,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         }
     }
     env->close(src);
+    if (pub >= 0) env->close(pub);
 
     if (enroll && rc == 0) {
         if (used == 0) {

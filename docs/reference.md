@@ -1189,6 +1189,14 @@ narrows to 32 bits before dividing — a module has no 64-bit division (§5) —
 and anything older than about 71 minutes is reported as the ceiling rather
 than wrapped into a small and plausible lie.
 
+### Cells the shipped programs publish
+
+| cell | by | value |
+|---|---|---|
+| `CONTROL` | `control` | the demonstration loop's state |
+| `DISTANCE:mm` | `sonar` | a range, millimetres |
+| `SEEN` | `detect -p` | what the camera saw in the latest picture, sixteen `int32`: 0 what was looked for (1 people, 2 faces); 1 how many; 2–5 the most prominent — the largest face, the surest person — as x1, y1, x2, y2 in the camera's 800x640 pixels; 6 its score, 0–1000; 7 with `who`, its likeness to the closest known face, −1000–1000, or −1 when not asked or nobody is known; 8–15 with `who`, that person's name, NUL-padded, when the likeness is over 500. Stamped when the picture was read, so a recognised face is about a quarter of a second old when it arrives. `welcome` reads it. |
+
 ## 11. The real-time class
 
 A real-time process is one RV-9 has **agreed** to run. The agreement is made
