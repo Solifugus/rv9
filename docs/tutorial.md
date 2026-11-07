@@ -827,7 +827,9 @@ turn on the light
 
 The words are understood by Whistle, by Cactus Compute (Apache 2.0), whose
 engine is the `listen` module itself: nothing of it is in the firmware, and
-the 24 MB it works in is given back when it ends. Its 17 MB model lives on
+the 27.5 MB it works in is given back when it ends. `say` gives its voice
+back too, three seconds after it has finished, so `listen` straight after
+`say` waits that long for room. Its 17 MB model lives on
 the card as `/sd0/whistle.cact` (how to put it there is below), and is read
 at every start -- five seconds, before the beep. `listen -c &` keeps one
 running and listening, beep after beep, until you `kill` it.

@@ -1130,7 +1130,8 @@ used. The agreed order:
    test from inside, where the module ABI does not reach.
 3. **Whistle as a module — done**, design §69: the engine is `listen`, in
    its own arena, and gives all of it back when it ends. On the way: a
-   scheduler bug that made a thread resume in the past.
+   scheduler bug that made a thread resume in the past. And `/tts0` gives
+   its voice back three seconds after the last close (§70).
 4. Perhaps **loadable drivers**: a device whose driver is read from the card
    when it is first opened.
 

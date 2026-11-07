@@ -7672,6 +7672,42 @@ that a program could carry instead, and `/tts0` still keeps its voice from
 first use to restart. Giving that back when nobody is speaking would also
 let `listen` have 16 seconds again.
 
+## 70. The voice, given back
+
+`/tts0` read its voice on first use and kept it until restart. That was 3.1
+MB of external memory, a 128 KB ring and the engine task's 16 KB of
+internal stack, and it cost `listen` more than its size. Flite's thousands
+of objects sit in the middle of external memory, so after one `say` the
+largest block left was 25 MB of the 32, and `listen` was held to 10
+seconds of speech.
+
+Now the engine gives everything back when nobody has had the device open
+for three seconds. It unloads the voice with Flite's own `delete_voice`,
+which frees its database, and then frees the ring and ends its task. The
+next open starts it again. Measured:
+
+| | |
+|---|---|
+| external memory, before the first `say` and after the voice is given back | 32,318,356 bytes both times |
+| largest external block, the same | 31,981,568 |
+| internal memory over five say-and-wait cycles | flat, within 8 bytes |
+| first sound, voice already loaded | 0.3 s |
+| first sound, voice read again | 1.9 s (1.6 s of reading) |
+
+The three seconds are for a script that says several things in a row, so
+that only its first line reads the voice. `listen` is back to 16 seconds,
+in a 27.5 MB arena, and fits in the largest block once the voice is gone.
+Within three seconds of a `say` it does not fit yet, and the fork says so.
+
+Two details. The languages Flite reads a voice into are a list that every
+load would have added to again, so they are set up once a boot. And an open
+that arrives while the engine is giving things back waits for it to finish,
+which takes tens of milliseconds. A lock that works from both the RV-9
+thread and the engine's host task keeps that straight; it is never held
+across the unload itself. Twenty `say`s timed to arrive just as the
+three seconds ran out all spoke, some reading the voice again and some
+finding it still there.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

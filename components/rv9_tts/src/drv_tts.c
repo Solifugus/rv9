@@ -22,10 +22,18 @@
  *
  * WHAT IT HOLDS
  *
- * The voice, about 4 MB of external memory once loaded (design section
- * 64), from first use until the board restarts. Everything Flite allocates comes from external
- * memory (CST_USER_MALLOC, below): it makes thousands of small objects per
- * sentence, and the internal heap is everybody's.
+ * While anybody is speaking, and for IDLE_MS after: the voice, about 3 MB
+ * of external memory once loaded (design section 64), a 128 KB ring and
+ * the engine task's 16 KB stack. Then the engine unloads the voice, frees
+ * the ring and ends, and the next open starts it all again. Reading the
+ * voice costs 1.6 s at the next `say`; holding it cost `listen` six
+ * seconds of speech, because Flite's objects sit in the middle of external
+ * memory and the largest block left was 25 MB of 32 (design section 70).
+ * The grace is for a script saying several things in a row.
+ *
+ * Everything Flite allocates comes from external memory (CST_USER_MALLOC,
+ * below): it makes thousands of small objects per sentence, and the
+ * internal heap is everybody's.
  *
  * FLITE'S ERRORS
  *
@@ -66,6 +74,7 @@ static const char *TAG = "rv9-tts";
 #define ENGINE_STACK  (16 * 1024)       /* Flite measured 1.5 KB at its peak */
 
 #define DEFAULT_VOICE "/sd0/slt.flitevox"
+#define IDLE_MS       3000              /* after the last close, then give it back */
 
 enum { ST_IDLE, ST_QUEUED, ST_RUNNING, ST_DONE, ST_FAILED };
 
@@ -81,7 +90,13 @@ typedef struct {
     volatile uint32_t put, get;     /* free-running; the engine owns put */
 
     char             voice[48];
-    bool             loaded, engine_started;
+    bool             loaded;
+
+    /* Under `lock`: whether the engine task and the ring exist, whether a
+       path is open, and whether the engine is giving everything back. */
+    rv9_lock_t       lock;
+    bool             engine_started, in_use, ending;
+    int64_t          closed_at;
     cst_voice       *v;
     uint32_t         rate;
 
@@ -208,9 +223,15 @@ static bool load_voice(tts_t *s)
     jmp_buf jb;
     cst_errjmp = &jb;
     if (setjmp(jb) == 0) {
-        flite_init();
-        flite_add_lang("eng", usenglish_init, cmulex_init);
-        flite_add_lang("usenglish", usenglish_init, cmulex_init);
+        /* Once a boot: the languages are a list, and they would be on it
+           twice the second time a voice was read. */
+        static bool flite_up;
+        if (!flite_up) {
+            flite_init();
+            flite_add_lang("eng", usenglish_init, cmulex_init);
+            flite_add_lang("usenglish", usenglish_init, cmulex_init);
+            flite_up = true;
+        }
         rv9_flite_memfile(s->voice, blob, (size_t)size);
         s->v = flite_voice_load(s->voice);
     } else {
@@ -276,6 +297,32 @@ static bool speak(tts_t *s)
     return ok || s->stop;
 }
 
+static void unload_voice(tts_t *s)
+{
+    if (!s->loaded) return;
+    jmp_buf jb;
+    cst_errjmp = &jb;
+    if (setjmp(jb) == 0) delete_voice(s->v);  /* its database and features */
+    cst_errjmp = NULL;
+    s->v = NULL;
+    s->loaded = false;
+    say_memory("voice given back");
+}
+
+/* Nobody has had it open for IDLE_MS, and nothing is waiting to be said. */
+static bool time_to_go(tts_t *s)
+{
+    bool go = false;
+    rv9_lock_acquire(s->lock);
+    if (!s->in_use && s->state != ST_QUEUED && s->state != ST_RUNNING &&
+        esp_timer_get_time() - s->closed_at >= (int64_t)IDLE_MS * 1000) {
+        s->ending = true;               /* an open now waits for the end */
+        go = true;
+    }
+    rv9_lock_release(s->lock);
+    return go;
+}
+
 static void engine_task(void *arg)
 {
     tts_t *s = (tts_t *)arg;
@@ -285,9 +332,24 @@ static void engine_task(void *arg)
             s->timing.load_ms = 0;
             bool ok = (s->loaded || load_voice(s)) && speak(s);
             s->state = ok ? ST_DONE : ST_FAILED;
+        } else if (time_to_go(s)) {
+            break;
         }
         rv9_task_delay_ms(20);
     }
+
+    /* Flite is this task's alone, so the voice goes here; the ring is the
+       reader's too, and nobody reads with no path open. */
+    unload_voice(s);
+    rv9_lock_acquire(s->lock);
+    heap_caps_free(s->ring);
+    s->ring = NULL;
+    s->put = s->get = 0;
+    s->state = ST_IDLE;
+    s->engine_started = false;
+    s->ending = false;
+    rv9_lock_release(s->lock);
+    rv9_task_delete(NULL);
 }
 
 /* ---- the caller's side ---- */
@@ -308,6 +370,10 @@ static rv9_io_err_t tts_init(rv9_dev_t *dev)
     }
     tts_t *s = rv9_calloc(1, sizeof(*s));
     if (s == NULL) return RV9_IO_ERR_NOMEM;
+    if (rv9_lock_create(&s->lock) != RV9_OK) {
+        rv9_free(s);
+        return RV9_IO_ERR_NOMEM;
+    }
     s->dev = dev;
     s->rate = 16000;
     strncpy(s->voice, DEFAULT_VOICE, sizeof(s->voice) - 1);
@@ -316,27 +382,40 @@ static rv9_io_err_t tts_init(rv9_dev_t *dev)
     return RV9_IO_OK;
 }
 
-/* The first open pays for what a voice needs; nothing before that. */
+/* An open pays for what a voice needs, if the engine has given it back. */
 static rv9_io_err_t tts_open(rv9_dev_t *dev, uint32_t mode)
 {
     (void)mode;
     tts_t *s = (tts_t *)dev->drv_state;
     if (s == NULL) return RV9_IO_ERR_IO;
 
-    if (s->ring == NULL) {
+    rv9_lock_acquire(s->lock);
+    while (s->ending) {                 /* tens of milliseconds, not held */
+        rv9_lock_release(s->lock);
+        rv9_task_delay_ms(10);
+        rv9_lock_acquire(s->lock);
+    }
+    rv9_io_err_t err = RV9_IO_OK;
+    if (!s->engine_started) {
         s->ring = heap_caps_malloc(RING_SAMPLES * sizeof(int16_t),
                                    MALLOC_CAP_SPIRAM);
-        if (s->ring == NULL) return RV9_IO_ERR_NOMEM;
-    }
-    if (!s->engine_started) {
-        if (rv9_task_create_background(engine_task, "rv9-tts", ENGINE_STACK,
-                                       s) != RV9_OK) {
-            return RV9_IO_ERR_NOMEM;
+        if (s->ring == NULL) {
+            err = RV9_IO_ERR_NOMEM;
+        } else if (rv9_task_create_background(engine_task, "rv9-tts",
+                                              ENGINE_STACK, s) != RV9_OK) {
+            heap_caps_free(s->ring);
+            s->ring = NULL;
+            err = RV9_IO_ERR_NOMEM;
+        } else {
+            s->engine_started = true;
         }
-        s->engine_started = true;
     }
-    if (s->state != ST_QUEUED && s->state != ST_RUNNING) reset(s);
-    return RV9_IO_OK;
+    if (err == RV9_IO_OK) {
+        s->in_use = true;
+        if (s->state != ST_QUEUED && s->state != ST_RUNNING) reset(s);
+    }
+    rv9_lock_release(s->lock);
+    return err;
 }
 
 /* The last path has gone: whatever is still being said, nobody hears it. */
@@ -344,11 +423,15 @@ static rv9_io_err_t tts_close(rv9_dev_t *dev)
 {
     tts_t *s = (tts_t *)dev->drv_state;
     if (s == NULL) return RV9_IO_OK;
+    rv9_lock_acquire(s->lock);
     if (s->state == ST_QUEUED) {
         reset(s);
     } else if (s->state == ST_RUNNING) {
         s->stop = true;             /* the engine sees it at the next chunk */
     }
+    s->in_use = false;
+    s->closed_at = esp_timer_get_time();
+    rv9_lock_release(s->lock);
     return RV9_IO_OK;
 }
 
@@ -440,7 +523,7 @@ static rv9_io_err_t tts_setstat(rv9_dev_t *dev, uint32_t code, void *arg)
     if (code == RV9_TTS_SS_VOICE) {
         const char *path = (const char *)arg;
         if (path == NULL || path[0] == '\0') return RV9_IO_ERR_INVAL;
-        if (s->loaded) return RV9_IO_ERR_BUSY;   /* one voice per boot */
+        if (s->loaded) return RV9_IO_ERR_BUSY;   /* until it is given back */
         strncpy(s->voice, path, sizeof(s->voice) - 1);
         s->voice[sizeof(s->voice) - 1] = '\0';
         return RV9_IO_OK;

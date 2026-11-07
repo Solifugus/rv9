@@ -1246,7 +1246,8 @@ _Static_assert(sizeof(rv9_audio_format_t) == 8, "audio format is 8 bytes");
  *
  * One text at a time, and one process at a time: the device has a session.
  * The voice is read on first use, from RV9_TTS_SS_VOICE's path if one was
- * given and /sd0/slt.flitevox if not, and stays in external memory.
+ * given and /sd0/slt.flitevox if not, and is given back three seconds
+ * after the last path closes: the next text reads it again, 1.6 s.
  *
  * The engine is CMU Flite, linked into the firmware behind the driver, as
  * Whistle was behind /stt0 before it became a module.

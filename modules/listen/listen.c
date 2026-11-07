@@ -1,10 +1,10 @@
 /*
  * listen -- hear something said, and write down what it was.
  *
- *   listen [seconds]       default 4, at most 10
+ *   listen [seconds]       default 4, at most 16
  *   listen -c [seconds]    again and again, until it is stopped (kill)
  *   listen -f <file>       a recording instead: raw 16 kHz, one channel,
- *                          at most 10 seconds of it
+ *                          at most 16 seconds of it
  *
  * Whistle's engine is in this module, not in the firmware: the model, the
  * audio and the engine's work are this process's arena, and all of it is
@@ -22,7 +22,7 @@
 #include "nd_whistle.h"
 
 #define RATE       16000
-#define MAX_SECS   10
+#define MAX_SECS   16
 #define CHUNK      640               /* stereo frames, 40 ms */
 #define BEEP       (RATE * 3 / 20)   /* 150 ms */
 #define DISCARD    (RATE * 3 / 10)   /* the beep, its echo, and the codecs settling */
@@ -208,9 +208,9 @@ __attribute__((noinline))
 static int run(const rv9_mod_env_t *env, listen_statics_t *st, int file,
                int again, uint32_t secs)
 {
-    /* The same 10 seconds from a file: the engine's work grows with the
+    /* The same 16 seconds from a file: the engine's work grows with the
        length, about 430 KB a second over a 20 MB base (the model is 17),
-       and 10 seconds is what fits beside /tts0's voice. */
+       and 16 seconds is 26.6 MB. */
     uint32_t cap = (file ? MAX_SECS : secs) * RATE;
     int16_t *pcm = nd_malloc((size_t)cap * 2);
     if (pcm == 0) {
