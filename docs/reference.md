@@ -354,6 +354,39 @@ same place.
 A module already resident is shared rather than loaded twice. That is what
 reentrancy is for, and it is why the rules below exist.
 
+### Where a module can come from
+
+| from | how | costs |
+|---|---|---|
+| the store | flashed with `tools/flash_modules.sh` | nothing to start: runs in place |
+| a volume's top level, `/f0/x.mod`, `/sd0/x.mod` | read at boot | its size in executable RAM, from boot until restart |
+| the module path, `/sd0/cmd/x.mod`, `/f0/cmd/x.mod` | read when its name is asked for and the store does not have it | its size in RAM while something runs it; 1–5 ms to read a small one from the card, 17–21 ms for 32 KB |
+| `load <file>` | read when told | its size in RAM, until restart |
+
+**The module path** is the list of places tried, in order, for a name the
+store does not have: each entry is a prefix, and `<entry><name>.mod` is
+tried. It is the file `/f0/path` — `echo /sd0/cmd/ /f0/cmd/ /r0/ > /f0/path`
+— read at every miss, so a change takes effect at once; with no file it is
+`/sd0/cmd/ /f0/cmd/`. RBF volumes are flat, so `cmd/` is part of the file's
+name, and a name is at most 27 characters: 19 for the module after `cmd/`
+and `.mod`.
+
+What the path finds becomes a directory entry (`mdir` lists it from then
+on) and is read again each time it is next started, checked by CRC exactly
+as `load` checks, and freed when the last process using it ends. The store
+always wins a name: a card can add commands, not replace the machine's;
+`load`, by revision, can. A program the path finds is admitted like any
+other, its manifest read from the file.
+
+**The fork pays for the read** on the forking program's stack: the
+shell's went from 1,440 bytes at its deepest to 2,568, and its stack from
+2,560 to 3,584. Other programs that fork modules by a name a person gave
+them should allow a kilobyte and a half beyond their own measurement.
+
+Not yet: a path entry on another machine. A board with no storage could
+run its commands from a peer's — and would run whatever answered. The CRC
+catches damage, not tampering, so that waits for modules to be signed.
+
 ### The rules, and what broke to find each one
 
 A module has no `.data` and no `.bss`. The linker script asserts both are

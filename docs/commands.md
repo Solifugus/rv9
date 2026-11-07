@@ -91,7 +91,7 @@ discovered.
 | `dump <file>` | Hex and printable characters, sixteen bytes a line. On a board this earns its place: a module header, a sector, a packet that arrived wrong. |
 | `format /sd0 yes` | Empty a volume. **Two words, because there is no undo** — without `yes` it says what it would destroy and refuses. |
 | `ed <file>` | A full-screen editor. Arrows, `^S` save, `^X` quit, `^K` cut. The same binary edits in a 236-column SSH window and on the panel at thirty by eight, because it asks the path how big it is. |
-| `load <file.mod>` | Add a program to the running system. The store stops being something you reflash and becomes something you add to. |
+| `load <file.mod>` | Add a program to the running system. The store stops being something you reflash and becomes something you add to. It stays in RAM until restart; a module in `/sd0/cmd/` or `/f0/cmd/` needs no `load` at all — typing its name finds it, and its memory is given back when it ends (reference §5, the module path). |
 
 ---
 

@@ -7459,6 +7459,64 @@ Faces are faster than ESP-DL's. Recognition is within 1.5 times, people
 1.7. What is left is mostly depthwise edge pixels, the per-group bias and
 store, and in the first layers, reading the picture.
 
+## 67. Commands from the card, when asked for
+
+RV-9 will have more programs than any one board runs at once, and not every
+board has the room — the C3 has no card, and a 1 MB store. The first step
+of keeping less resident: a name the store does not have is looked for on
+a **module path**, read when it is asked for, and given back when it ends.
+
+Where code could already live, and what each costs:
+
+| | to start | while unused |
+|---|---|---|
+| firmware: the kernel, managers, drivers | — | flash |
+| the store | nothing: runs in place from mapped flash | flash |
+| a volume's top level (`/f0/x.mod`), read at boot | — | its size in RAM, always |
+| `load` | — | its size in RAM, always |
+| **the module path** (`/sd0/cmd/x.mod`) | 1–5 ms small, 17–21 ms for 32 KB | nothing |
+
+The path is in the module manager (`rv9_mod_find`), not the shell, so any
+program that starts another by name gets it. It is a list of prefixes in
+`/f0/path`, read at each miss so an edit is immediate, defaulting to
+`/sd0/cmd/ /f0/cmd/`; RBF is flat, so `cmd/` is part of a file's name. The
+store is searched first and always wins: a card adds commands, it does not
+replace the ones the machine was built with. A module found becomes a
+directory entry that remembers its file; linking reads the file into
+executable memory and checks it as `load` does; the last unlink frees it.
+Admission reads its manifest from the file, as it reads the store's.
+
+Three things went wrong on the way, each worth recording:
+
+- **The store's copy step ran after the card's read.** `rv9_mod_link`
+  copies a non-in-place store module into RAM; a card module is not in
+  place either, so the copy ran too, over the image just read, from store
+  offset 0 — someone else's module — and failed verification. Then a
+  crash in `free`. A card entry now skips it.
+- **The boot autoload already loaded every `.mod` on `/f0` and `/sd0`**,
+  permanently. So `cmd/downloaded.mod` was preloaded at every boot where it
+  existed and the new code never ran — which made the first tests pass and
+  the bug above look intermittent. Autoload now takes only a volume's top
+  level, which keeps its meaning (put a program there to have it at every
+  boot) and leaves `cmd/` to the path.
+- **The read happens inside the fork, on the forking program's stack.**
+  The shell's deepest use went from 1,440 bytes to 2,576 — 16 over its
+  2,560 — and nothing caught it: the stack guard checks the 128 bytes of
+  painted pad below a stack when the thread is switched out, and this frame
+  reached past the pad into the heap block below before that happened. The
+  symptom was a hang at the next command, then a store fault in `free`
+  reaping the stack. The search's buffers moved to the heap, and the
+  shell's stack to 3,584 — a kilobyte for each shell. A guard that only
+  checks at a switch cannot see a frame that goes and comes back between
+  two; that is a known limit (§50, "The pad is now read, not just
+  reserved") this hit again.
+
+Not done, deliberately: a path entry on another machine. A board without
+storage could run its commands from a peer — and would run whatever
+answered. The CRC catches damage, not tampering, so that waits for module
+signing. And choosing, per board, what goes in firmware, the store, the
+card or a peer is the image builder's job, which this is the first part of.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

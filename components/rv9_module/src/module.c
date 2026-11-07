@@ -225,6 +225,8 @@ void rv9_mod_note_stack(rv9_mod_entry_t *entry, uint32_t given, uint32_t used)
  * `out_unit` may be NULL. When it is not, it receives the declared unit of
  * the *first* matching declaration, empty if it declared none.
  */
+static void *path_head(const struct rv9_mod_entry *e);   /* below */
+
 static bool declares_scan(uint16_t tag, const char *path,
                           char *out_unit, uint32_t cap)
 {
@@ -245,6 +247,13 @@ static bool declares_scan(uint16_t tag, const char *path,
         const void *image = e->image;
         uint8_t *buf = NULL;
 
+        if (image == NULL && e->path[0]) {
+            /* On the path and not loaded: as far as its manifest goes, and
+               a little, from the file -- as the store's is read below. */
+            buf = path_head(e);
+            if (buf == NULL) continue;
+            image = buf;
+        }
         if (image == NULL) {
             if (s_store == NULL) continue;
 
@@ -500,6 +509,196 @@ const rv9_mod_entry_t *rv9_mod_dir_next(const rv9_mod_entry_t *prev)
     return prev ? prev->next : s_dir;
 }
 
+static const rv9_mod_io_ops_t *s_io_ops;
+
+/* ---- the module path ---- */
+
+/*
+ * Where to look for a module the store does not have: a list of
+ * directories, each tried as <dir><name>.mod, the first found winning.
+ * The list is the file /f0/path, read at every miss -- so editing it takes
+ * effect at once, and a miss, which is rare, pays for one small read. With
+ * no file, the card and then the flash volume.
+ *
+ * The store is always first. A card can add commands; it cannot replace
+ * one the machine was built with, which a person at the board did not ask
+ * for. `load` can, by revision, because then somebody did.
+ *
+ * Only local volumes, for now. A peer's files over the network would make
+ * a board without storage able to run anything -- and would run whatever
+ * answered. The CRC catches damage, not tampering; that waits for modules
+ * to be signed.
+ */
+#define PATH_FILE     "/f0/path"
+#define PATH_DEFAULT  "/sd0/cmd/ /f0/cmd/"
+#define PATH_MAX_LEN  256
+#define PATH_MOD_MAX  (256 * 1024)
+
+/* The whole of a small file, or nothing. */
+static int read_small(const char *file, char *buf, uint32_t cap)
+{
+    int p = s_io_ops->open(file, RV9_MODE_READ);
+    if (p < 0) return -1;
+    uint32_t got = 0;
+    while (got < cap) {
+        int n = s_io_ops->read(p, buf + got, cap - got);
+        if (n <= 0) break;
+        got += (uint32_t)n;
+    }
+    s_io_ops->close(p);
+    return (int)got;
+}
+
+/* The first <dir><name>.mod on the path that is a module of that name, as
+   a directory entry that is not loaded yet. NULL if there is none. */
+static rv9_mod_entry_t *path_find(const char *name)
+{
+    if (s_io_ops == NULL || strlen(name) >= sizeof(((rv9_mod_entry_t *)0)->name))
+        return NULL;
+
+    /* On the heap, not the stack: this runs inside whoever is forking, on
+       their stack, with the I/O manager's open below it -- the shell's is
+       2.5 KB, and a search made from stack buffers ran it off the end. */
+    struct { char list[PATH_MAX_LEN]; char file[64]; char nm[32]; } *b = rv9_alloc(sizeof(*b));
+    if (b == NULL) return NULL;
+    char *list = b->list, *file = b->file;
+    rv9_mod_entry_t *found = NULL;
+    int n = read_small(PATH_FILE, list, PATH_MAX_LEN - 1);
+    if (n <= 0) {
+        strcpy(list, PATH_DEFAULT);
+    } else {
+        list[n] = '\0';
+    }
+
+    for (char *d = list; *d && found == NULL; ) {
+        while (*d == ' ' || *d == '\t' || *d == '\n' || *d == '\r') d++;
+        if (*d == '\0') break;
+        char *end = d;
+        while (*end && *end != ' ' && *end != '\t' && *end != '\n' && *end != '\r') end++;
+        size_t dl = (size_t)(end - d), nl = strlen(name);
+        if (dl + nl + 5 <= sizeof(b->file)) {
+            memcpy(file, d, dl);
+            memcpy(file + dl, name, nl);
+            memcpy(file + dl + nl, ".mod", 5);
+
+            rv9_mod_header_t h;
+            int p = s_io_ops->open(file, RV9_MODE_READ);
+            if (p >= 0) {
+                int got = s_io_ops->read(p, &h, sizeof(h));
+                char *nm = b->nm;
+                int ok = got == (int)sizeof(h) && h.magic == RV9_MODULE_MAGIC &&
+                         h.module_len <= PATH_MOD_MAX &&
+                         h.name_offset + nl < h.module_len &&
+                         s_io_ops->seek(p, (int32_t)h.name_offset, RV9_SEEK_SET) >= 0 &&
+                         s_io_ops->read(p, nm, (uint32_t)nl + 1) == (int)nl + 1 &&
+                         memcmp(nm, name, nl + 1) == 0;
+                s_io_ops->close(p);
+                if (ok) {
+                    found = rv9_calloc(1, sizeof(*found));
+                    if (found != NULL) {
+                        memcpy(found->name, name, nl + 1);
+                        found->type     = h.type;
+                        found->revision = h.revision;
+                        found->size     = h.module_len;
+                        memcpy(found->path, file, dl + nl + 5);
+                    }
+                    break;
+                }
+                ESP_LOGW(TAG, "%s is not the module '%s'", file, name);
+            }
+        }
+        d = end;
+    }
+    rv9_free(b);
+    return found;
+}
+
+/* The start of a path entry's file, up to its manifest and a kilobyte past
+   it, with the header saying that much: enough for the manifest to be read
+   without loading the module. NULL if the file will not give it. */
+static void *path_head(const rv9_mod_entry_t *e)
+{
+    if (s_io_ops == NULL) return NULL;
+    int p = s_io_ops->open(e->path, RV9_MODE_READ);
+    if (p < 0) return NULL;
+    rv9_mod_header_t h;
+    uint8_t *buf = NULL;
+    if (s_io_ops->read(p, &h, sizeof(h)) == (int)sizeof(h) &&
+        h.manifest_offset != 0 && h.manifest_offset < h.module_len &&
+        h.module_len <= PATH_MOD_MAX) {
+        uint32_t n = h.module_len;
+        if (n > h.manifest_offset + MANIFEST_SCAN_MAX) n = h.manifest_offset + MANIFEST_SCAN_MAX;
+        buf = rv9_alloc(n);
+        if (buf != NULL) {
+            uint32_t got = 0;
+            if (s_io_ops->seek(p, 0, RV9_SEEK_SET) >= 0) {
+                while (got < n) {
+                    int r = s_io_ops->read(p, buf + got, n - got);
+                    if (r <= 0) break;
+                    got += (uint32_t)r;
+                }
+            }
+            if (got == n) {
+                ((rv9_mod_header_t *)buf)->module_len = n;
+            } else {
+                rv9_free(buf);
+                buf = NULL;
+            }
+        }
+    }
+    s_io_ops->close(p);
+    return buf;
+}
+
+/* A path entry's image, read whole into executable memory and verified. */
+static rv9_mod_err_t path_read(rv9_mod_entry_t *e, void **out)
+{
+    int64_t t0 = rv9_time_us();
+    int p = s_io_ops ? s_io_ops->open(e->path, RV9_MODE_READ) : -1;
+    if (p < 0) {
+        ESP_LOGE(TAG, "%s: gone since it was found (%d)", e->path, p);
+        return RV9_MOD_ERR_NOTFOUND;
+    }
+    uint64_t size = 0;
+    int gs = s_io_ops->getstat(p, RV9_GS_SIZE, &size);
+    if (gs < 0 || size == 0 || size > PATH_MOD_MAX) {
+        ESP_LOGE(TAG, "%s: cannot take %lu bytes (%d)", e->path,
+                 (unsigned long)size, gs);
+        s_io_ops->close(p);
+        return RV9_MOD_ERR_INVAL;
+    }
+    uint8_t *image = rv9_alloc_exec((size_t)size);
+    if (image == NULL) {
+        s_io_ops->close(p);
+        return RV9_MOD_ERR_NOMEM;
+    }
+    uint32_t got = 0;
+    while (got < size) {
+        int n = s_io_ops->read(p, image + got, (uint32_t)size - got);
+        if (n <= 0) break;
+        got += (uint32_t)n;
+    }
+    s_io_ops->close(p);
+
+    /* The file may have changed since it was found: it is believed now. */
+    rv9_mod_err_t err = got == size ? rv9_mod_verify(image, got) : RV9_MOD_ERR_IO;
+    const rv9_mod_header_t *h = (const rv9_mod_header_t *)image;
+    if (err == RV9_MOD_OK && strcmp((const char *)image + h->name_offset, e->name) != 0) {
+        err = RV9_MOD_ERR_INVAL;
+    }
+    if (err != RV9_MOD_OK) {
+        rv9_free(image);
+        ESP_LOGE(TAG, "%s: %s", e->path, rv9_mod_strerror(err));
+        return err;
+    }
+    e->size     = h->module_len;
+    e->revision = h->revision;
+    ESP_LOGI(TAG, "read '%s' from %s: %lu bytes in %lu us", e->name, e->path,
+             (unsigned long)e->size, (unsigned long)(rv9_time_us() - t0));
+    *out = image;
+    return RV9_MOD_OK;
+}
+
 const rv9_mod_entry_t *rv9_mod_find(const char *name)
 {
     if (name == NULL) return NULL;
@@ -511,7 +710,25 @@ const rv9_mod_entry_t *rv9_mod_find(const char *name)
         if (strcmp(e->name, name) != 0) continue;
         if (best == NULL || e->revision > best->revision) best = e;
     }
-    return best;
+    if (best != NULL) return best;
+
+    /* Not on the machine: perhaps on the path. Looked for outside the lock
+       -- it is file reads -- and added under it, unless somebody else got
+       there first. */
+    rv9_mod_entry_t *e = path_find(name);
+    if (e == NULL) return NULL;
+    rv9_lock_acquire(s_lock);
+    for (rv9_mod_entry_t *o = s_dir; o; o = o->next) {
+        if (strcmp(o->name, name) == 0) {
+            rv9_lock_release(s_lock);
+            rv9_free(e);
+            return o;
+        }
+    }
+    dir_append(e);
+    rv9_lock_release(s_lock);
+    ESP_LOGI(TAG, "found '%s' rev %u on the path: %s", e->name, e->revision, e->path);
+    return e;
 }
 
 /*
@@ -580,7 +797,21 @@ rv9_mod_err_t rv9_mod_link(const char *name, rv9_mod_entry_t **out_entry)
     void *image = NULL;
     bool  in_place = false;
 
-    if (s_xip) {
+    if (e->path[0]) {
+        /* From its file, every time it is not already loaded. The lock is
+           let go for the read, and the entry checked again after. */
+        rv9_lock_release(s_lock);
+        rv9_mod_err_t err = path_read(e, &image);
+        if (err != RV9_MOD_OK) return err;
+        rv9_lock_acquire(s_lock);
+        if (e->image != NULL) {          /* linked meanwhile: share that */
+            e->link_count++;
+            rv9_lock_release(s_lock);
+            rv9_free(image);
+            *out_entry = e;
+            return RV9_MOD_OK;
+        }
+    } else if (s_xip) {
         /*
          * Where it already lies. Still verified -- the CRC is checked
          * against the mapped bytes, so a corrupt store is caught exactly as
@@ -615,7 +846,7 @@ rv9_mod_err_t rv9_mod_link(const char *name, rv9_mod_entry_t **out_entry)
         }
     }
 
-    if (!in_place) {
+    if (!in_place && !e->path[0]) {   /* a path entry's is read already */
         image = rv9_alloc_exec(e->size);
         if (image == NULL) {
             rv9_lock_release(s_lock);
@@ -685,8 +916,6 @@ rv9_mod_err_t rv9_mod_unlink(rv9_mod_entry_t *entry)
 }
 
 /* ---- the environment handed to modules ---- */
-
-static const rv9_mod_io_ops_t *s_io_ops;
 
 static int env_print(const char *s)
 {

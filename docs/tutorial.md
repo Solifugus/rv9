@@ -758,6 +758,28 @@ from a machine that may be using it.
 of the flash image on purpose (`.nostore`), served over HTTP and fetched. If it
 runs, a program reached the machine without anybody reflashing it.
 
+### Or without loading it either
+
+```
+rv9> fetch 192.168.1.12:8099 /downloaded.mod > /sd0/cmd/downloaded.mod
+rv9> downloaded
+```
+
+A name the store does not have is looked for on the **module path** —
+`/sd0/cmd/`, then `/f0/cmd/` — read from the file when it is asked for, and
+given back when it ends: 17 ms for a 32 KB program from the card. The path
+is the file `/f0/path`, a list of prefixes, read at every miss:
+
+```
+rv9> echo /sd0/cmd/ /f0/cmd/ /r0/ > /f0/path
+```
+
+So there are three places a command can live, and they cost different
+things: the store, which costs nothing to start and is reflashed to change;
+a volume's top level, `/f0/thing.mod`, read at every boot and held from
+then on; and `cmd/`, read when used and held only while it runs. A board
+with no card, like the C3, keeps its `cmd/` on `/f0`.
+
 ## 14. Seeing and hearing
 
 This section needs the P4: its microphones, its speaker and its camera.

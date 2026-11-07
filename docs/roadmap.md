@@ -1118,9 +1118,11 @@ RV-9 will grow, and not everything it can do will run at once. The detectors
 showed that a capability can live on the card and cost nothing until it is
 used. The agreed order:
 
-1. **Commands on demand from `/sd0`**: a command not in the store is looked
-   for on the card and loaded when typed. Measure first what the store and
-   the firmware hold that is rarely used.
+1. **Commands on demand — done**, design §67: a name the store lacks is
+   looked for on the module path (`/f0/path`, default `/sd0/cmd/ /f0/cmd/`),
+   read when asked for, freed when it ends. Next on this line: **path
+   entries on a peer**, for boards with no storage, which wait for **module
+   signing**.
 2. **The self-tests out of the firmware**, into modules run at boot.
 3. **Whistle as a module**, so `/stt0` costs nothing until somebody listens.
 4. Perhaps **loadable drivers**: a device whose driver is read from the card

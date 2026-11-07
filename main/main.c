@@ -198,9 +198,12 @@ static void autoload(const char *dev)
 
         int count = (int)(got / sizeof(rv9_dirent_t));
         for (int i = 0; i < count; i++) {
-            /* Only files that say they are modules. */
+            /* Only files that say they are modules, and only at the top:
+               cmd/ is the module path's, loaded when asked for and given
+               back after (rv9_mod_find), not held from boot. */
             size_t n = strlen(ents[i].name);
             if (n < 5 || strcmp(ents[i].name + n - 4, ".mod") != 0) continue;
+            if (strchr(ents[i].name, '/') != NULL) continue;
 
             char path[48];
             snprintf(path, sizeof(path), "%s/%s", dev, ents[i].name);
