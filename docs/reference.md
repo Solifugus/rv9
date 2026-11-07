@@ -383,6 +383,12 @@ shell's went from 1,440 bytes at its deepest to 2,568, and its stack from
 2,560 to 3,584. Other programs that fork modules by a name a person gave
 them should allow a kilobyte and a half beyond their own measurement.
 
+**Self-tests at boot.** `/f0/selftest` holding `once` runs the test suites
+at the next boot and is removed before they start; `always` runs them at
+every boot. With neither, a boot skips them (26 s on a P4). A firmware
+built without `CONFIG_RV9_SELFTEST` has no suites, and says so if the file
+asks. Design §68.
+
 Not yet: a path entry on another machine. A board with no storage could
 run its commands from a peer's — and would run whatever answered. The CRC
 catches damage, not tampering, so that waits for modules to be signed.

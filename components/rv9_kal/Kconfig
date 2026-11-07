@@ -37,6 +37,23 @@ config RV9_HEAP_FLOOR
 
         Zero disables it, which is how RV-9 behaved before phase 4.
 
+config RV9_SELFTEST
+    bool "Build the self-test suites into the firmware"
+    default y
+    help
+        The suites that check the KAL contract, the module manifest, I/O,
+        publication, faults, processes, real-time scheduling, memory
+        reserves and the card, and the phase demos.
+
+        Built in, they run at a boot that /f0/selftest asks for: "once"
+        runs them at the next boot and removes the file, "always" runs
+        them at every boot. Otherwise a boot skips them, which on a P4
+        is 26 seconds of its 31.
+
+        Off, they are not in the firmware at all. The KAL's own
+        self-test is not one of them: every boot runs it, because
+        nothing else is worth starting on a floor that is unsound.
+
 config RV9_ARG_MAX
     int "Longest argument a program may be given (characters)"
     range 63 4095

@@ -1903,6 +1903,19 @@ static rv9_proc_err_t fork_common(const char *module_name, int priority,
                                   const char *arg, rv9_proc_class_t cls,
                                   uint32_t period_us, rv9_pid_t *out_pid)
 {
+    /*
+     * Not before the manager is up. Without its lock nothing can find
+     * itself in the table -- every "who is calling" answers the system --
+     * so a child would run, open nothing of its own, and use the system's
+     * paths. For a long time the self-tests were what started the manager,
+     * which hid that boot never did.
+     */
+    if (!s_running) {
+        ESP_LOGE(TAG, "fork '%s' before the process manager is up",
+                 module_name ? module_name : "?");
+        return RV9_PROC_ERR_INVAL;
+    }
+
     int prev = rv9_mem_class_get();
     bool raise = (cls == RV9_CLASS_REALTIME && prev < RV9_MEM_REALTIME);
     if (raise) rv9_mem_class_set(RV9_MEM_REALTIME);

@@ -7517,6 +7517,52 @@ answered. The CRC catches damage, not tampering, so that waits for module
 signing. And choosing, per board, what goes in firmware, the store, the
 card or a peer is the image builder's job, which this is the first part of.
 
+## 68. The self-tests, when asked for
+
+A P4 took 31 seconds to reach a prompt, and 26 of them were the boot
+suites — conformance, the manifest, I/O, publication, faults, processes,
+real-time scheduling, memory, the card, then the phase demos — saying
+again what the last boot said. They run now when somebody wants the
+answer:
+
+| `/f0/selftest` holds | at the next boot |
+|---|---|
+| nothing, or no such file | the suites are skipped; prompt in about 4 s |
+| `once` | they run, and the file is removed first |
+| `always` | they run, at every boot, and the file stays |
+
+`once` is removed *before* the suites run, so that a suite which takes the
+machine down does not take it down again at every boot after. The KAL's
+own self-test is not one of them and still runs every time, in 0.3 s:
+nothing above it is worth starting on an unsound floor.
+
+`CONFIG_RV9_SELFTEST` (on by default) decides whether the suites are in
+the firmware at all. Off, the P4 image is 40 KB smaller, and a
+`/f0/selftest` is reported and ignored. That matters most where flash is
+short — the C3's partition is 74% full — and is the image builder's
+choice per board.
+
+Why not modules, which the roadmap first said: the suites test the
+system from inside. They publish as pid 0, read the claim table, drive the
+memory reserves to the floor and fork from init; the module ABI cannot
+reach most of that, by design. And measured, their flash was never the
+cost — 40 KB of a 4 MB partition. The time was.
+
+What skipping them found, at the first boot without them: **the process
+manager had never been started by the boot itself.** `rv9_proc_init` was
+called by the fault suite and the phase-2 demo, nowhere else, so every
+boot so far had started it by testing. Without it the services still
+forked — the manager's lock was NULL and taking a NULL lock does nothing —
+but no process could find itself in the table: every "who is calling"
+answered the system. The shell's first write looked up pid 0's path
+table, which init had made by opening `/term`, cached it, and wrote to a
+path that was not there. It ended at once, silently, and was restarted
+with a doubling back-off. init now starts the manager before anything
+forks, and a fork before then is refused and logged rather than run.
+
+Measured, P4, same card and store: prompt at 31.5 s with the suites
+(10 suites, 0 failures, as before), 4.2 s without.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

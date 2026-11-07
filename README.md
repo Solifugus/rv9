@@ -157,7 +157,8 @@ goes stale.
 
 ### Honest about what it measures
 Every claim in the design document has a test behind it, and those tests
-run at every boot on the hardware. Where the first version of a test was
+run on the hardware, in the shipped firmware, at any boot that asks
+(`echo once > /f0/selftest`). Where the first version of a test was
 wrong, or a number was worse than hoped, the document says so.
 
 ---
@@ -199,18 +200,22 @@ entirely is the remaining kernel work.
 | `components/rv9_io` | I/O manager, file managers (SCF, RBF, NFM, PIO, PFM, PIPE, IFM) and drivers |
 | `components/rv9_ssh` | SSH transport, authentication and channels, as a device |
 | `modules/` | about seventy modules: shell, commands, daemons, descriptors, test loops |
-| `main/` | bring-up and the boot test suites |
+| `main/` | bring-up and the test suites |
 
 ---
 
-## Tested on the hardware at every boot
+## Tested on the hardware
 
 ```
 kal 45   conform 27   mod 17   io 44   pub 38
 fault 76   proc 11   sched 15   mem 13   sd 7
 ```
 
-The boot suites cover the following:
+They run at a boot that asks for them: `/f0/selftest` holding `once` (run
+at the next boot, then removed) or `always`. A boot without them reaches the
+prompt in about 4 seconds instead of 31.
+
+The suites cover the following:
 - **conform**: the KAL contract, run on both kernels.
 - **fault**: kill, deadline misses, runaways, and faults published into
   cells.
@@ -223,7 +228,7 @@ The boot suites cover the following:
 - **sd**: the microSD card -- mounted, written, read back, and survived a
   reboot.
 
-Beyond the boot suites, soak runs have driven the board over SSH with a
+Beyond the suites, soak runs have driven the board over SSH with a
 100 Hz control loop, pipelines, flash round trips, shell scripts and session
 churn. The most recent is seven hours from a board the harness resets itself:
 **347 of 347 real-time loop rounds on time**, 1,735 SSH sessions with none

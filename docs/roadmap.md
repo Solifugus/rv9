@@ -1123,7 +1123,10 @@ used. The agreed order:
    read when asked for, freed when it ends. Next on this line: **path
    entries on a peer**, for boards with no storage, which wait for **module
    signing**.
-2. **The self-tests out of the firmware**, into modules run at boot.
+2. **The self-tests out of every boot — done**, design §68: they run when
+   `/f0/selftest` asks (`once` or `always`), and `CONFIG_RV9_SELFTEST`
+   leaves them out of the firmware. Prompt in 4 s, not 31. Not modules: they
+   test from inside, where the module ABI does not reach.
 3. **Whistle as a module**, so `/stt0` costs nothing until somebody listens.
 4. Perhaps **loadable drivers**: a device whose driver is read from the card
    when it is first opened.

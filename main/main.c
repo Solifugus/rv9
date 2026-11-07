@@ -106,6 +106,7 @@ static void mdir(void)
     }
 }
 
+#if CONFIG_RV9_SELFTEST
 /* Load a module, run it, and drop it again. Phase 2 turns this into fork(). */
 static void run_module(const char *name)
 {
@@ -146,6 +147,8 @@ static void run_module(const char *name)
 
     rv9_mod_unlink(mod);
 }
+
+#endif /* CONFIG_RV9_SELFTEST */
 
 /* devs -- list attached devices, showing the binding each descriptor made. */
 /*
@@ -337,6 +340,7 @@ static void term_banner(void)
  * needs a log path that cannot deadlock against the I/O manager it logs
  * through, so it waits for a phase with time to do it properly.
  */
+#if CONFIG_RV9_SELFTEST
 /*
  * Priority inversion, measured.
  *
@@ -494,6 +498,8 @@ static void inversion_demo(void)
                     RV9_PRIO_LOW, NULL);
 }
 
+#endif /* CONFIG_RV9_SELFTEST */
+
 /*
  * The services init keeps running.
  *
@@ -615,10 +621,9 @@ static void init_shell_loop(void)
     }
 }
 
+#if CONFIG_RV9_SELFTEST
 static void phase3_demo(void)
 {
-    term_banner();
-
     ESP_LOGI(TAG, "--- module I/O through the stack ---");
     rv9_pid_t pid = 0;
     if (rv9_proc_fork("greet", RV9_PRIO_NORMAL, NULL, &pid) == RV9_PROC_OK) {
@@ -793,40 +798,61 @@ static void phase2_demo(void)
     }
 }
 
+#endif /* CONFIG_RV9_SELFTEST */
+
 /*
- * The system runs here rather than in app_main, because it forks processes
- * and must outrank them. app_main sits at the host kernel's default
- * priority, far below any RV-9 process -- forking from there means the
- * child preempts the parent immediately.
+ * The self-tests, when they are asked for.
+ *
+ * They took 26 of the 31 seconds a P4 spent getting to a prompt, every
+ * boot, to say again what the last boot said. So they run when somebody
+ * wants the answer: /f0/selftest holding "once" runs them at the next
+ * boot and is removed first -- before, so that a suite which takes the
+ * machine down does not take it down again at every boot after -- and
+ * "always" runs them at every boot and stays.
+ *
+ * Built without CONFIG_RV9_SELFTEST they are not in the firmware at all,
+ * which is for a board that has the flash for its purpose and not for
+ * this; the file is then reported and left alone.
  */
-static void rv9_init_task(void *arg)
+#define SELFTEST_FILE "/f0/selftest"
+
+#if CONFIG_RV9_SELFTEST
+static bool selftest_asked(void)
 {
-    (void)arg;
+    char buf[16] = { 0 };
+    size_t got = 0;
+    int p = rv9_io_open(SELFTEST_FILE, RV9_MODE_READ);
+    if (p < 0) return false;
+    rv9_io_read(p, buf, sizeof(buf) - 1, &got);
+    rv9_io_close(p);
+    buf[got] = '\0';
 
-    /*
-     * The tests run here, not in app_main.
-     *
-     * With the native kernel behind the KAL, the KAL only means anything
-     * inside an RV-9 thread: a delay sleeps the calling thread, task_self
-     * names it, and a created task needs the scheduler to be running.
-     * app_main is a host task and none of that is true there -- which the
-     * self-test reported accurately the first time it was asked from the
-     * wrong place.
-     */
-    /*
-     * Start keeping the log before the tests run, so that whatever a
-     * failing boot has to say is still readable afterwards over the
-     * network -- which is the whole reason for keeping it.
-     */
-    rv9_logring_start();
-    rv9_mod_set_log_source(rv9_logring_read, rv9_logring_held);
-    rv9_mod_set_clock_source(rv9_clock_read);
+    if (strncmp(buf, "always", 6) == 0) {
+        ESP_LOGI(TAG, "self-tests: every boot (%s says always)", SELFTEST_FILE);
+        return true;
+    }
+    if (strncmp(buf, "once", 4) == 0) {
+        rv9_io_remove(SELFTEST_FILE);
+        ESP_LOGI(TAG, "self-tests: this boot (%s said once, now removed)",
+                 SELFTEST_FILE);
+        return true;
+    }
+    ESP_LOGW(TAG, "self-tests: %s holds neither once nor always -- not run",
+             SELFTEST_FILE);
+    return false;
+}
 
-    if (!rv9_kal_selftest()) {
-        ESP_LOGE(TAG, "KAL self-test failed -- not proceeding");
+static void selftests(int boot_cls)
+{
+    if (!selftest_asked()) {
+        ESP_LOGI(TAG, "self-tests not run (echo once > %s to ask)",
+                 SELFTEST_FILE);
         return;
     }
-    ESP_LOGI(TAG, "KAL is sound.");
+
+    /* These ran before bringup once, and still want the machine as an
+       ordinary caller sees it. */
+    int cls = rv9_mem_class_set(boot_cls);
 
     /*
      * The kernel tests build and tear down their own kernel, which is fine
@@ -841,20 +867,7 @@ static void rv9_init_task(void *arg)
     rv9_conformance_run(rv9_ops_freertos());
 
     rv9_module_selftest();
-
-    /*
-     * From here init is the system: it brings the machine up and keeps its
-     * services running, and restarting sshd after something ate the
-     * ordinary memory is precisely when it must still be able to allocate.
-     * After the KAL's own tests, which exercise the floor as an ordinary
-     * caller sees it.
-     */
-    rv9_mem_class_set(RV9_MEM_SYSTEM);
-
-    rv9_mod_dir_init();
-    mdir();
-    io_bringup();
-    heap_mark("after bringup");
+    rv9_mem_class_set(cls);
 
     /* After bringup: the claim table comes up with the I/O manager, and
        testing it before then would test nothing. The same goes for
@@ -893,6 +906,85 @@ static void rv9_init_task(void *arg)
 #if RV9_RUN_INVERSION_DEMO
     inversion_demo();
 #endif
+}
+#else
+static void selftests(int boot_cls)
+{
+    (void)boot_cls;
+    int p = rv9_io_open(SELFTEST_FILE, RV9_MODE_READ);
+    if (p >= 0) {
+        rv9_io_close(p);
+        ESP_LOGW(TAG, "%s asks for self-tests, and this firmware was built "
+                      "without them (CONFIG_RV9_SELFTEST)", SELFTEST_FILE);
+    }
+}
+#endif
+
+/*
+ * The system runs here rather than in app_main, because it forks processes
+ * and must outrank them. app_main sits at the host kernel's default
+ * priority, far below any RV-9 process -- forking from there means the
+ * child preempts the parent immediately.
+ */
+static void rv9_init_task(void *arg)
+{
+    (void)arg;
+
+    /*
+     * The tests run here, not in app_main.
+     *
+     * With the native kernel behind the KAL, the KAL only means anything
+     * inside an RV-9 thread: a delay sleeps the calling thread, task_self
+     * names it, and a created task needs the scheduler to be running.
+     * app_main is a host task and none of that is true there -- which the
+     * self-test reported accurately the first time it was asked from the
+     * wrong place.
+     */
+    /*
+     * Start keeping the log before the tests run, so that whatever a
+     * failing boot has to say is still readable afterwards over the
+     * network -- which is the whole reason for keeping it.
+     */
+    rv9_logring_start();
+    rv9_mod_set_log_source(rv9_logring_read, rv9_logring_held);
+    rv9_mod_set_clock_source(rv9_clock_read);
+
+    /* The one test every boot runs: everything above it stands on the
+       KAL, and a machine whose floor is unsound should not go on. */
+    if (!rv9_kal_selftest()) {
+        ESP_LOGE(TAG, "KAL self-test failed -- not proceeding");
+        return;
+    }
+    ESP_LOGI(TAG, "KAL is sound.");
+
+    /* The class the KAL's tests saw, for the suites that come after
+       bringup but were written against the machine as it is before. */
+    int boot_cls = rv9_mem_class_get();
+
+    /*
+     * From here init is the system: it brings the machine up and keeps its
+     * services running, and restarting sshd after something ate the
+     * ordinary memory is precisely when it must still be able to allocate.
+     */
+    rv9_mem_class_set(RV9_MEM_SYSTEM);
+
+    rv9_mod_dir_init();
+    mdir();
+
+    /* Before anything forks. The self-tests used to be what started it,
+       and a boot without them forked into a manager that was not there. */
+    if (rv9_proc_init() != RV9_PROC_OK) {
+        ESP_LOGE(TAG, "process manager failed to start -- not proceeding");
+        return;
+    }
+
+    io_bringup();
+    heap_mark("after bringup");
+    term_banner();
+
+    selftests(boot_cls);
+
+
     /* Every suite has run, mem-test included, so the low-water mark has
        been driven to the floor on purpose. Watch for local lows from here:
        what matters now is the machine as it serves. */

@@ -76,17 +76,25 @@ idf.py -p /dev/ttyACM0 monitor          # the console, on USB serial
 
 ## 3. The first boot tells you more than "it started"
 
-RV-9 runs its test suites at every boot, on the hardware, and prints the
-results. This is not a debug build — it is how the system is shipped, on the
-argument that a claim with no test behind it is a claim and not a feature.
+RV-9's test suites run on the hardware, in the firmware as shipped — not
+a debug build — on the argument that a claim with no test behind it is a
+claim and not a feature. They run at a boot that asks for them, because
+they take 26 seconds:
+
+```
+rv9> echo once > /f0/selftest
+```
+
+and reset the board. `once` runs them at the next boot and removes the
+file; `always` runs them at every boot (design §68). The results:
 
 ```
 kal 45   conform 27   mod 17   io 44   pub 38
 fault 76   proc 11   sched 15   mem 13   sd 7
 ```
 
-Ten suites, 294 checks. Among the things that just happened while you were
-waiting for a prompt: a control loop was admitted and met every deadline
+Ten suites, 294 checks. Among the things that happen while you wait for
+the prompt: a control loop was admitted and met every deadline
 beside a heavier one; another was refused because it would have made the
 first one late; a process was killed and its motor pin was parked by the
 system afterwards; a fork bomb stopped at its own memory budget; and a
