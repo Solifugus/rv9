@@ -10,28 +10,43 @@ into its store. From that this builds, in build-<name>/:
     system's choices on top, in system.defaults
   - the module store, modules.bin, for that firmware's drivers
   - a size report: firmware and store against their partitions, static
-    internal RAM, and what is left for the card
+    internal RAM, and the card
+  - the card, in card/: the commands `card` names that the store does not
+    have, as cmd/<name>.mod (the module path, design section 67), and the
+    files that what the system carries reads (each build.conf's `files`),
+    taken from --files
 
-What the store leaves out is still built, in build/modules, for the card.
+The card is RBF, which a PC cannot write, so --install puts it there over
+WiFi: it serves card/ over HTTP from this machine and, on the board's
+console, fetches each file that is missing or the wrong size. Run again, it
+fetches nothing.
 
-    tools/mksystem.py systems/c3.sys                build it and report
-    tools/mksystem.py systems/c3.sys --report       report on the last build
-    tools/mksystem.py systems/c3.sys --flash PORT   build, then write both
+    tools/mksystem.py systems/c3.sys                  build it and report
+    tools/mksystem.py systems/c3.sys --report         report on the last build
+    tools/mksystem.py systems/c3.sys --flash PORT     build, then write both
+    tools/mksystem.py systems/p4.sys --install PORT   build, then fill the card
 
 Needs the IDF environment (. $HOME/esp/esp-idf/export.sh). A system file is
 shell-shaped, like build.conf: key="value" lines and # comments.
 """
 import argparse
+import functools
 import glob
+import http.server
 import json
 import os
 import re
+import shutil
+import socket
 import subprocess
 import sys
+import threading
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 KEYS = {"target", "drivers", "selftest", "store"}
+OPTIONAL = {"card": ""}
 
 # What a group's programs open, for the warning when a store carries a group
 # whose devices the firmware lacks. Any one of the drivers is enough.
@@ -61,12 +76,14 @@ def read_system(path):
             m = re.fullmatch(r'(\w+)="([^"]*)"', line)
             if not m:
                 fail(f"{path}:{n}: expected key=\"value\"")
-            if m[1] not in KEYS:
+            if m[1] not in KEYS and m[1] not in OPTIONAL:
                 fail(f"{path}:{n}: no such key '{m[1]}'")
             sysdef[m[1]] = m[2]
     for k in KEYS:
         if k not in sysdef:
             fail(f"{path}: '{k}' is missing")
+    for k, v in OPTIONAL.items():
+        sysdef.setdefault(k, v)
     if sysdef["selftest"] not in ("yes", "no"):
         fail(f"{path}: selftest is yes or no")
     return sysdef
@@ -172,26 +189,70 @@ def static_ram(build):
     return used, total
 
 
-def store_report(build):
-    mods = os.path.join(ROOT, "build", "modules")
+def modules():
+    """Every module with a build.conf: its groups and the files it reads."""
+    mods = {}
+    for conf in glob.glob(os.path.join(ROOT, "modules", "*", "build.conf")):
+        text = open(conf).read()
+        g = re.search(r'^groups="([^"]*)"', text, re.M)
+        f = re.search(r'^files="([^"]*)"', text, re.M)
+        mods[os.path.basename(os.path.dirname(conf))] = (
+            set(g[1].split()) if g else set(), f[1].split() if f else [])
+    return mods
+
+
+def select(words, mods, what):
+    """The modules a list of groups and names picks, as build_modules.sh does."""
+    w = set(words.split())
+    known = {"all"} | set(mods) | {g for gs, _ in mods.values() for g in gs}
+    if w - known:
+        fail(f"{what}: '{' '.join(sorted(w - known))}' is no group or module")
+    return {n for n, (gs, _) in mods.items() if "all" in w or n in w or gs & w}
+
+
+def card_plan(build, sysdef, drivers, files_dir):
+    """What goes on the card: [(name on the card, file here)], and what is
+    missing here. The store's contents are read from its build log."""
+    mods = modules()
     log = os.path.join(build, "store.txt")
-    count, out = 0, []
-    if os.path.exists(log):
-        text = open(log).read()
-        m = re.search(r"\((\d+) bytes, (\d+) modules\)", text)
-        count = int(m[2]) if m else 0
-        m = re.search(r"built, not in the store: (.*)", text)
-        out = m[1].split() if m else []
-    card = sum(os.path.getsize(os.path.join(mods, n + ".mod")) for n in out
-               if os.path.exists(os.path.join(mods, n + ".mod")))
-    return count, out, card
+    text = open(log).read() if os.path.exists(log) else ""
+    m = re.search(r"built, not in the store: (.*)", text)
+    left = set(m[1].split()) if m else set()
+    count = re.search(r"\((\d+) bytes, (\d+) modules\)", text)
+
+    stored = set(mods) - left
+    commands = select(sysdef["card"], mods, "card") & left
+    if commands and "sdcard" not in drivers:
+        fail("card names commands, and the firmware has no sdcard")
+
+    plan, missing = [], []
+    for n in sorted(commands):
+        plan.append((f"cmd/{n}.mod", os.path.join(ROOT, "build", "modules", n + ".mod")))
+    if "sdcard" in drivers:
+        wanted = sorted({f for n in stored | commands for f in mods[n][1]})
+        for f in wanted:
+            src = os.path.join(files_dir, f)
+            if os.path.exists(src):
+                plan.append((f, src))
+            else:
+                missing.append(f)
+    return plan, missing, left - commands, int(count[2]) if count else 0
+
+
+def make_card(build, plan):
+    card = os.path.join(build, "card")
+    shutil.rmtree(card, ignore_errors=True)
+    os.makedirs(os.path.join(card, "cmd"))
+    for name, src in plan:
+        os.symlink(os.path.abspath(src), os.path.join(card, name))
+    return card
 
 
 def kb(n):
     return f"{(n + 1023) // 1024:,} KB"
 
 
-def report(name, build, sysdef, drivers):
+def report(name, build, sysdef, drivers, files_dir):
     cfg = sdkconfig(build)
     parts = partitions(cfg)
     app = os.path.join(build, "rv9.bin")
@@ -199,7 +260,7 @@ def report(name, build, sysdef, drivers):
     if not os.path.exists(app) or not os.path.exists(store):
         fail(f"no build in {os.path.relpath(build, ROOT)}; run without --report")
     fw, st = os.path.getsize(app), os.path.getsize(store)
-    count, out, card = store_report(build)
+    plan, missing, unused, count = card_plan(build, sysdef, drivers, files_dir)
     ram = static_ram(build)
 
     def line(what, n, part):
@@ -214,7 +275,18 @@ def report(name, build, sysdef, drivers):
     if ram is not None:
         print(f"  {'RAM':<10}{kb(ram[0]):>10} of {kb(ram[1]):>9} {100 * ram[0] // max(ram[1], 1):3d}%"
               "   internal, taken before anything runs")
-    print(f"  {'for card':<10}{kb(card):>10}  {len(out)} modules built and left out")
+    if "sdcard" in drivers:
+        size = sum(os.path.getsize(src) for _, src in plan)
+        ncmd = sum(1 for n, _ in plan if n.startswith("cmd/"))
+        print(f"  {'card':<10}{kb(size):>10}  {ncmd} commands, {len(plan) - ncmd} files")
+        if missing:
+            print(f"  missing   {' '.join(missing)}, not in {os.path.relpath(files_dir)}"
+                  " (docs/tutorial.md, \"Putting the models on the card\")")
+    else:
+        print(f"  {'card':<10}{'none':>10}")
+    descs = {n for n in unused if os.path.exists(os.path.join(ROOT, "modules", n, "descriptor.conf"))}
+    if unused - descs:
+        print(f"  not here  {' '.join(sorted(unused - descs))}")
     print(f"  drivers   {' '.join(sorted(drivers)) or '(the core only)'}")
 
     warned = False
@@ -233,11 +305,93 @@ def report(name, build, sysdef, drivers):
     return warned
 
 
+def lan_address():
+    """This machine's address on the way out, which the board can reach."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("192.0.2.1", 9))
+        return s.getsockname()[0]
+
+
+class Console:
+    """The board's shell, over its console. Opened without the reset that
+    toggling DTR and RTS would be; a C5's or C3's own USB console restarts
+    the chip when it is opened all the same, so the network may not be up
+    yet when the prompt is."""
+
+    def __init__(self, port):
+        import serial
+        self.s = serial.Serial()
+        self.s.port, self.s.baudrate, self.s.timeout = port, 115200, 0.2
+        self.s.dtr = self.s.rts = False
+        self.s.open()
+
+    def run(self, line, timeout):
+        self.s.reset_input_buffer()
+        self.s.write(line.encode() + b"\r")
+        out, end = b"", time.time() + timeout
+        while time.time() < end:
+            out += self.s.read(4096)
+            if out.endswith(b"rv9> "):
+                return out.decode(errors="replace")
+        fail(f"no prompt after '{line}' in {timeout} s:\n{out.decode(errors='replace')[-500:]}")
+
+    def listing(self, dev):
+        out = self.run(f"dir {dev}", 20)
+        if "cannot open" in out:
+            fail(f"{dev} is not there: no card in the board?")
+        return {m[1]: int(m[2]) for m in re.finditer(r"^(\S+)\s+(\d+)\r?$", out, re.M)}
+
+
+def install(port, card, plan, host, http_port):
+    handler = functools.partial(QuietHandler, directory=card)
+    server = http.server.ThreadingHTTPServer(("", http_port), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    con = Console(port)
+    con.run("", 10)
+
+    have = con.listing("/sd0")
+    todo = [(n, os.path.getsize(src)) for n, src in plan
+            if have.get(n) != os.path.getsize(src)]
+    print(f"card: {len(plan) - len(todo)} of {len(plan)} already there"
+          + (f", fetching {len(todo)} from {host}:{http_port}" if todo else ""))
+    for n, size in todo:
+        t = time.time()
+        print(f"  {n} ({kb(size)})...", end="", flush=True)
+        # The headers reach the console, the body the file. Anything but a
+        # 200 is retried for half a minute: the board's WiFi may still be
+        # joining, and a fetch then fails at once with an empty file.
+        for tries in range(10):
+            out = con.run(f"fetch {host}:{http_port} /{n} > /sd0/{n}", 60 + size // 20000)
+            if re.search(r"HTTP/1\.\d 200", out):
+                break
+            time.sleep(3)
+        else:
+            fail(f"fetching {n} kept failing:\n{out[-500:]}")
+        print(f" {time.time() - t:.0f} s")
+
+    have = con.listing("/sd0")
+    bad = [n for n, src in plan if have.get(n) != os.path.getsize(src)]
+    server.shutdown()
+    if bad:
+        fail(f"wrong size on the card afterwards: {' '.join(bad)}")
+    print("card: every file there, at its size")
+
+
+class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("system", help="a systems/*.sys file")
     ap.add_argument("--report", action="store_true", help="report only")
     ap.add_argument("--flash", metavar="PORT", help="write firmware and store")
+    ap.add_argument("--install", metavar="PORT", help="fill the card, over WiFi")
+    ap.add_argument("--files", default=os.path.join(ROOT, "out"),
+                    help="where the card's files are (default out/)")
+    ap.add_argument("--host", help="this machine's address, as the board sees it")
+    ap.add_argument("--http-port", type=int, default=8000)
     a = ap.parse_args()
 
     sysdef = read_system(a.system)
@@ -276,12 +430,23 @@ def main():
             sys.stderr.write(r.stdout[-2000:] + r.stderr)
             fail("the store did not build")
 
-    report(name, build, sysdef, drivers)
+    report(name, build, sysdef, drivers, a.files)
+    plan, missing, _, _ = card_plan(build, sysdef, drivers, a.files)
+    card = make_card(build, plan)
 
     if a.flash:
         run(["idf.py", "-B", build, "-p", a.flash, "flash"])
         run([os.path.join(ROOT, "tools", "flash_modules.sh"), a.flash,
              os.path.join(build, "sdkconfig"), os.path.join(build, "modules.bin")])
+
+    if a.install:
+        if "sdcard" not in drivers:
+            fail("this system has no card")
+        if missing:
+            fail(f"not in {a.files}: {' '.join(missing)}")
+        if a.flash:
+            time.sleep(8)       # the board's boot, after flashing
+        install(a.install, card, plan, a.host or lan_address(), a.http_port)
 
 
 if __name__ == "__main__":

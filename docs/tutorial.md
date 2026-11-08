@@ -964,8 +964,16 @@ git clone https://github.com/festvox/flite && cd flite
 bin/flite -voice slt -voicedump ../out/slt.flitevox -t x -o /dev/null
 ```
 
-Then serve the directory from the PC and fetch each file from the board,
-as in §13:
+With them in `out/`, one command puts on the card everything the P4's
+system wants, over the board's console and WiFi. It fetches only what is
+missing or the wrong size, so running it again does nothing:
+
+```sh
+./tools/mksystem.py systems/p4.sys --install /dev/serial/by-id/usb-1a86_...
+```
+
+Or by hand: serve the directory from the PC and fetch each file from the
+board, as in §13:
 
 ```sh
 cd out && python3 -m http.server 8000

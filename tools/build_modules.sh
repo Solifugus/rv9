@@ -191,6 +191,7 @@ for dir in "$ROOT"/modules/*/; do
                         # extension. Such a module carries those opcodes
                         # to every board and must ask RV9_ISA_* first.
     groups=""           # which systems carry it; see --store above
+    files=""            # what it reads off the card, for tools/mksystem.py
     sources=""          # more .c files, relative to the module's directory:
                         # a vendored engine kept in a subdirectory of its own.
 

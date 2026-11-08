@@ -5,6 +5,10 @@ sdkconfig
 sdkconfig.old
 managed_components/
 
+# What the card gets that is not ours to commit: models and the voice
+# (docs/tutorial.md, "Putting the models on the card"; tools/mksystem.py).
+out/
+
 # dependencies.lock stays ignored, and the reason is specific to this project
 # rather than general.
 #

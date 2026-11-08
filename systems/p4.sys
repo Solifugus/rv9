@@ -16,3 +16,8 @@ selftest="yes"
 # Groups or module names (tools/build_modules.sh --store). The rest are
 # built and kept for the card.
 store="all"
+
+# Commands for the card instead, in the same words; they run from /sd0/cmd/
+# when asked for. The card also gets the files that what this system
+# carries reads (each build.conf's `files`): tools/mksystem.py --install.
+card=""

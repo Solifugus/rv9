@@ -7827,6 +7827,40 @@ the reason the all-off P4 firmware was 573 KB: without it, 296. And each
 build directory keeps its own `dependencies.lock` (`CMakeLists.txt`), so
 building one system no longer rewrites another's.
 
+### Step 4: the card
+
+What a system carries is now in three places, and the system file chooses
+for each command: the firmware's drivers, the store, and the card.
+`card="rt"` takes the same words as `store`. The commands it names that
+the store does not have go on the card as `cmd/<name>.mod`, where the module
+path (§67) finds them when they are asked for. The card also gets the
+files that whatever the system carries reads. Each module says what those
+are in its `build.conf`: `files="whistle.cact"` for `listen`,
+`slt.flitevox` for `say` (`/tts0` reads it), and the four models for
+`detect`. They are not ours to commit, so they are taken from `out/`
+(`--files` names another place), and a missing one is reported, not
+guessed.
+
+The card is RBF, so a PC cannot write it. `mksystem.py --install PORT`
+does it the way a person did it by hand. It serves the card's tree over
+HTTP from the PC and types `fetch` lines at the board's shell, on the
+console. It reads `dir /sd0` first and fetches only what is missing or
+the wrong size. Then it reads `dir` again and fails if anything is still
+not right. On the P4, whose card already had them, that is "6 of 6 already
+there" and nothing sent.
+
+Found on the C5: opening its USB console restarts it, whatever DTR and RTS
+say, so the prompt can come back before WiFi has joined. A fetch then
+fails at once and leaves an empty file. Every fetch must now show its
+`200`, and is tried again every three seconds for half a minute. Tested
+with a C5 whose store left out `rt` and whose card carried it: eight
+commands fetched, one of them after a retry, and `pubs`, which the store
+did not have, ran from the card.
+
+Not done: a board with no card. The C3's left-out commands are simply not
+there. `/f0/cmd/` is on the module path too, so they could go on its
+flash volume, but not before the volume has room for that to matter.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

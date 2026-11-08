@@ -1150,7 +1150,9 @@ choice. In steps:
 3. **A system file per board — done**, §71: `systems/p4.sys`, `c5.sys`,
    `c3.sys`, and `tools/mksystem.py` builds firmware and store for one,
    reports sizes and flashes them. `esp_hosted` goes with the network.
-4. The card's contents, and putting them there.
+4. **The card — done**, §71: a system's `card=` names commands for
+   `/sd0/cmd/`, each `build.conf` names the `files` it reads, and
+   `mksystem.py --install` fetches what is missing over WiFi.
 
 ## Working with two boards attached
 
