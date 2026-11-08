@@ -139,8 +139,44 @@ def encode_manifest(entries):
     return bytes(out)
 
 
+# A signed module ends in this block, counted in module_len, and says so
+# with ATTR_SIGNED. What is signed is everything before the block with the
+# crc32 field taken as zero; the CRC is then taken over all of it, block
+# included, as for any module. ECDSA P-256 over SHA-256, deterministic
+# (RFC 6979), so the same key and module give the same bytes every time.
+#
+#     u32 magic "RV9S"  u8 key_id[8]  u32 reserved  u8 sig[64] (r then s)
+SIG_MAGIC = 0x53395652
+SIG_LEN = 80
+ATTR_SIGNED = 0x01
+
+
+def key_id(public_key):
+    """The first eight bytes of SHA-256 over the uncompressed point."""
+    from cryptography.hazmat.primitives import serialization
+    import hashlib
+    raw = public_key.public_bytes(serialization.Encoding.X962,
+                                  serialization.PublicFormat.UncompressedPoint)
+    return hashlib.sha256(raw).digest()[:8]
+
+
+def sign(image, private_key):
+    """Append the signature block to an image whose header already says
+    ATTR_SIGNED and counts the block; returns the finished bytes."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+    msg = bytes(image[:-SIG_LEN])
+    der = private_key.sign(msg, ec.ECDSA(hashes.SHA256(), deterministic_signing=True))
+    r, s_ = decode_dss_signature(der)
+    block = (struct.pack("<I", SIG_MAGIC) + key_id(private_key.public_key())
+             + b"\0" * 4 + r.to_bytes(32, "big") + s_.to_bytes(32, "big"))
+    image[-SIG_LEN:] = block
+    return image
+
+
 def build(blob, name, mtype, entry_off, static_size, stack_size, revision,
-          manifest=b""):
+          manifest=b"", key=None):
     name_bytes = name.encode("ascii") + b"\0"
     name_bytes += b"\0" * (-len(name_bytes) % 4)      # keep the blob aligned
 
@@ -148,19 +184,26 @@ def build(blob, name, mtype, entry_off, static_size, stack_size, revision,
     manifest_offset = HDR_LEN + len(name_bytes) if manifest else 0
     blob_offset = HDR_LEN + len(name_bytes) + len(manifest)
     module_len = blob_offset + len(blob)
+    pad = b""
+    if key is not None:
+        pad = b"\0" * (-module_len % 4)      # the block starts aligned
+        module_len += len(pad) + SIG_LEN
 
     header = struct.pack(
         HDR_FMT,
         MAGIC, HDR_LEN, ABI, module_len,
         name_offset, blob_offset + entry_off,
         static_size, stack_size,
-        TYPES[mtype], 0, revision, 0,
+        TYPES[mtype], ATTR_SIGNED if key is not None else 0, revision, 0,
         0,          # crc32, filled in below
         manifest_offset,
     )
     assert len(header) == HDR_LEN, len(header)
 
-    image = bytearray(header + name_bytes + manifest + blob)
+    image = bytearray(header + name_bytes + manifest + blob + pad
+                      + (b"\0" * SIG_LEN if key is not None else b""))
+    if key is not None:
+        image = sign(image, key)
     crc = zlib.crc32(bytes(image)) & 0xFFFFFFFF
     struct.pack_into("<I", image, 32, crc)            # crc32 field at 0x20
     return bytes(image), crc
@@ -183,6 +226,9 @@ def main():
                     help="manifest entry; NAME! marks it mandatory, meaning a "
                          "loader that does not understand it must refuse the "
                          "module. Repeatable.")
+    ap.add_argument("--sign", metavar="KEY",
+                    help="sign it with this private key (PEM, P-256); see "
+                         "tools/mkkey.py")
     args = ap.parse_args()
 
     entries = []
@@ -206,14 +252,22 @@ def main():
     if not blob:
         sys.exit(f"{args.input} is empty")
 
+    key = None
+    if args.sign:
+        from cryptography.hazmat.primitives import serialization
+        with open(args.sign, "rb") as f:
+            key = serialization.load_pem_private_key(f.read(), password=None)
+
     image, crc = build(blob, args.name, args.type, args.entry_offset,
                        args.static_size, args.stack_size, args.revision,
-                       manifest)
+                       manifest, key)
 
     with open(args.output, "wb") as f:
         f.write(image)
 
     extra = f", manifest {len(manifest)}" if manifest else ""
+    if key is not None:
+        extra += f", signed by {key_id(key.public_key()).hex()}"
     print(f"{args.name}: {len(image)} bytes "
           f"({len(blob)} code+rodata{extra}), crc32 {crc:#010x}")
 

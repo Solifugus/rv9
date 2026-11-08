@@ -10,6 +10,7 @@ store image, and it prints what the loader will see.
     tools/modinfo.py build/modules/control.mod
     tools/modinfo.py build/modules.bin        # every module in the store
 """
+import os
 import struct
 import sys
 import zlib
@@ -99,6 +100,63 @@ def show_manifest(image, off, module_len):
         off += -off % 4
 
 
+TRUST = [os.path.expanduser("~/.config/rv9/trust")]
+ATTR_SIGNED = 0x01
+
+
+def trusted_keys():
+    """name -> public point, from a trust file like the board's /f0/trust,
+    and the key tools/mkkey.py made, when there is one."""
+    keys = {}
+    for path in TRUST + [os.environ.get("RV9_TRUST", "")]:
+        if path and os.path.exists(path):
+            for line in open(path):
+                f = line.split()
+                if len(f) == 3 and len(f[1]) == 16:
+                    keys[f[1]] = (f[0], bytes.fromhex(f[2]))
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import mkkey
+        from cryptography.hazmat.primitives import serialization
+        if os.path.exists(mkkey.DEFAULT):
+            k = serialization.load_pem_private_key(open(mkkey.DEFAULT, "rb").read(), None)
+            name, kid, pub = mkkey.trust_line("yours", k).split()
+            keys.setdefault(kid, (f"{name}, {mkkey.DEFAULT}", bytes.fromhex(pub)))
+    except ImportError:
+        pass
+    return keys
+
+
+def show_signature(image, attr, module_len):
+    if not attr & ATTR_SIGNED:
+        print("  signature      none")
+        return
+    block = image[module_len - 80:module_len]
+    if struct.unpack_from("<I", block, 0)[0] != 0x53395652:
+        print("  signature      BAD BLOCK")
+        return
+    kid = block[4:12].hex()
+    known = trusted_keys().get(kid)
+    if known is None:
+        print(f"  signature      key {kid}, not one known here")
+        return
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+    msg = bytearray(image[:module_len - 80])
+    struct.pack_into("<I", msg, 32, 0)
+    pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), known[1])
+    sig = encode_dss_signature(int.from_bytes(block[16:48], "big"),
+                               int.from_bytes(block[48:80], "big"))
+    try:
+        pub.verify(sig, bytes(msg), ec.ECDSA(hashes.SHA256()))
+        verdict = "ok"
+    except InvalidSignature:
+        verdict = "DOES NOT MATCH"
+    print(f"  signature      key {kid} ({known[0]}): {verdict}")
+
+
 def show(image, base=0):
     (magic, header_len, abi, module_len, name_off, entry_off,
      static_size, stack_size, mtype, attr, revision, _r0,
@@ -125,6 +183,7 @@ def show(image, base=0):
     print(f"  crc32          {crc:#010x} "
           f"({'ok' if computed == crc else 'MISMATCH'})")
     show_manifest(image, manifest_off, module_len)
+    show_signature(image, attr, module_len)
     print()
 
     return module_len

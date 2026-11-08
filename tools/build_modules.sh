@@ -18,6 +18,11 @@
 #                             in when it has the self-tests, which fork them.
 #                             Without it, every descriptor goes in.
 #   --out FILE                the store image; build/modules.bin by default
+#   --sign KEY                sign every module with this private key
+#                             (tools/mkkey.py), so a board whose /f0/trust
+#                             holds its public half will run it from a file.
+#                             ~/.config/rv9/sign.key by default, when it
+#                             exists; --no-sign builds them unsigned
 #
 # What is built but left out stays in build/modules, for the card.
 
@@ -27,17 +32,24 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SELECT="all"
 CFG=""
+SIGN=()
+NOSIGN=0
 STORE="$ROOT/build/modules.bin"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --store)     SELECT="$2"; shift 2 ;;
         --sdkconfig) CFG="$2"; shift 2 ;;
         --out)       STORE="$2"; shift 2 ;;
-        *) echo "usage: $0 [--store \"groups or names\"] [--sdkconfig FILE] [--out FILE]" >&2
+        --sign)      SIGN=(--sign "$2"); shift 2 ;;
+        --no-sign)   SIGN=(); NOSIGN=1; shift ;;
+        *) echo "usage: $0 [--store \"groups or names\"] [--sdkconfig FILE] [--out FILE] [--sign KEY | --no-sign]" >&2
            exit 2 ;;
     esac
 done
 [[ -z "$CFG" || -f "$CFG" ]] || { echo "error: no $CFG" >&2; exit 2; }
+if [[ ${#SIGN[@]} -eq 0 && $NOSIGN -eq 0 && -f "$HOME/.config/rv9/sign.key" ]]; then
+    SIGN=(--sign "$HOME/.config/rv9/sign.key")
+fi
 
 cfg_on() { [[ -n "$CFG" ]] && grep -q "^CONFIG_$1=y" "$CFG"; }
 
@@ -127,6 +139,7 @@ for dir in "$ROOT"/modules/*/; do
             "$OUT/$name.bin"
         python3 "$ROOT/tools/mkmodule.py" \
             --name "$name" --type descriptor --revision "${revision:-1}" \
+            "${SIGN[@]}" \
             "$OUT/$name.bin" "$OUT/$name.mod"
         if ! wanted_desc "$driver"; then
             left_out+="$name "
@@ -279,7 +292,7 @@ for dir in "$ROOT"/modules/*/; do
         --static-size "$static_size" \
         --stack-size "$stack_size" \
         --revision "$revision" \
-        "${tags[@]}" \
+        "${tags[@]}" "${SIGN[@]}" \
         "$OUT/$name.bin" "$OUT/$name.mod"
 
     # A module marked .nostore is built but kept out of the flash image --

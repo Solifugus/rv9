@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "sig.h"
 #include "esp_partition.h"
 
 static const char *TAG = "rv9-mod";
@@ -87,6 +88,7 @@ const char *rv9_mod_strerror(rv9_mod_err_t err)
     case RV9_MOD_ERR_IO:       return "storage error";
     case RV9_MOD_ERR_INVAL:    return "invalid module";
     case RV9_MOD_ERR_CONTRACT: return "requires something unsupported";
+    case RV9_MOD_ERR_SIGNATURE: return "not signed by a key this machine trusts";
     default:                   return "unknown error";
     }
 }
@@ -653,6 +655,124 @@ static void *path_head(const rv9_mod_entry_t *e)
     return buf;
 }
 
+/*
+ * May a module read from a file run here? The policy of rv9_mod_sig_t.
+ *
+ * /f0/trust holds the keys this machine trusts, one per line:
+ *
+ *     <name> <key id, 16 hex> <public key, 130 hex>
+ *
+ * as tools/mkkey.py prints it and `trust add` writes it. With no key there,
+ * anything is accepted as it was before signatures, with a warning, which
+ * is the bench. With one, a module must be signed by one of them. Read at
+ * every check, like /f0/path, so a change is immediate.
+ */
+#define TRUST_FILE "/f0/trust"
+#define TRUST_MAX  2048
+
+static int unhex(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool hex_bytes(const char *s, uint8_t *out, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        int hi = unhex(s[2 * i]), lo = unhex(s[2 * i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i] = (uint8_t)(hi << 4 | lo);
+    }
+    return true;
+}
+
+static rv9_mod_err_t trust_check(const uint8_t *image, uint32_t len, const char *from)
+{
+    const rv9_mod_header_t *h = (const rv9_mod_header_t *)image;
+    bool is_signed = (h->attr & RV9_MOD_ATTR_SIGNED) && len >= h->header_len + sizeof(rv9_mod_sig_t);
+    const rv9_mod_sig_t *b = is_signed ? (const rv9_mod_sig_t *)(image + len - sizeof(*b)) : NULL;
+    if (b != NULL && b->magic != RV9_MOD_SIG_MAGIC) {
+        ESP_LOGE(TAG, "%s: says it is signed and has no signature block", from);
+        return RV9_MOD_ERR_SIGNATURE;
+    }
+
+    char *text = rv9_alloc(TRUST_MAX + 1);
+    if (text == NULL) return RV9_MOD_ERR_NOMEM;
+    int n = read_small(TRUST_FILE, text, TRUST_MAX);
+    text[n > 0 ? n : 0] = '\0';
+
+    /* Each line: name, key id, key. Find the signer's, and count them. */
+    int keys = 0;
+    char who[24] = "";
+    uint8_t pub[65];
+    bool have_pub = false;
+    for (char *line = text; *line; ) {
+        char *end = line;
+        while (*end && *end != '\n') end++;
+        char *f[3] = { 0 };
+        size_t fl[3] = { 0 };
+        char *c = line;
+        for (int k = 0; k < 3; k++) {
+            while (c < end && (*c == ' ' || *c == '\t' || *c == '\r')) c++;
+            f[k] = c;
+            while (c < end && *c != ' ' && *c != '\t' && *c != '\r') c++;
+            fl[k] = (size_t)(c - f[k]);
+        }
+        if (fl[0] && f[0][0] != '#' && fl[1] == 16 && fl[2] == 130) {
+            keys++;
+            uint8_t id[8];
+            if (b != NULL && !have_pub && hex_bytes(f[1], id, 8) &&
+                memcmp(id, b->key_id, 8) == 0 && hex_bytes(f[2], pub, 65)) {
+                have_pub = true;
+                size_t wl = fl[0] < sizeof(who) - 1 ? fl[0] : sizeof(who) - 1;
+                memcpy(who, f[0], wl);
+                who[wl] = '\0';
+            }
+        }
+        line = *end ? end + 1 : end;
+    }
+    rv9_free(text);
+
+    if (b == NULL) {
+        if (keys == 0) {
+            ESP_LOGW(TAG, "%s: not signed; accepted, as %s holds no key", from, TRUST_FILE);
+            return RV9_MOD_OK;
+        }
+        ESP_LOGE(TAG, "%s: not signed, and this machine runs only modules "
+                      "signed by a key in %s", from, TRUST_FILE);
+        return RV9_MOD_ERR_SIGNATURE;
+    }
+    if (!have_pub) {
+        char id[17];
+        for (int i = 0; i < 8; i++) {
+            id[2 * i] = "0123456789abcdef"[b->key_id[i] >> 4];
+            id[2 * i + 1] = "0123456789abcdef"[b->key_id[i] & 15];
+        }
+        id[16] = '\0';
+        if (keys == 0) {
+            ESP_LOGW(TAG, "%s: signed by key %s, not checked; accepted, as %s "
+                          "holds no key", from, id, TRUST_FILE);
+            return RV9_MOD_OK;
+        }
+        ESP_LOGE(TAG, "%s: signed by key %s, which %s does not hold", from, id,
+                 TRUST_FILE);
+        return RV9_MOD_ERR_SIGNATURE;
+    }
+
+    uint32_t us = 0;
+    int v = rv9_sig_verify(image, len, pub, &us);
+    if (v != 0) {
+        ESP_LOGE(TAG, "%s: %s", from, v == -2 ? "the signature does not match: "
+                 "changed since it was signed, or signed by somebody else"
+                 : "the signature could not be checked");
+        return RV9_MOD_ERR_SIGNATURE;
+    }
+    ESP_LOGI(TAG, "%s: signed by %s, checked in %lu us", from, who, (unsigned long)us);
+    return RV9_MOD_OK;
+}
+
 /* A path entry's image, read whole into executable memory and verified. */
 static rv9_mod_err_t path_read(rv9_mod_entry_t *e, void **out)
 {
@@ -689,6 +809,7 @@ static rv9_mod_err_t path_read(rv9_mod_entry_t *e, void **out)
     if (err == RV9_MOD_OK && strcmp((const char *)image + h->name_offset, e->name) != 0) {
         err = RV9_MOD_ERR_INVAL;
     }
+    if (err == RV9_MOD_OK) err = trust_check(image, got, e->path);
     if (err != RV9_MOD_OK) {
         rv9_free(image);
         ESP_LOGE(TAG, "%s: %s", e->path, rv9_mod_strerror(err));
@@ -1339,8 +1460,9 @@ rv9_mod_err_t rv9_mod_load_path(const char *path)
     }
     s_io_ops->close(p);
 
-    rv9_mod_err_t err = (got == size) ? rv9_mod_register_image(buf, got)
-                                      : RV9_MOD_ERR_IO;
+    rv9_mod_err_t err = (got == size) ? rv9_mod_verify(buf, got) : RV9_MOD_ERR_IO;
+    if (err == RV9_MOD_OK) err = trust_check(buf, got, path);
+    if (err == RV9_MOD_OK) err = rv9_mod_register_image(buf, got);
     if (err != RV9_MOD_OK) {
         ESP_LOGE(TAG, "load '%s': %s", path, rv9_mod_strerror(err));
     }

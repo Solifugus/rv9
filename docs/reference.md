@@ -312,7 +312,7 @@ that is the whole of what makes it relocatable.
 | 20 | `static_size` | Per-instance storage the loader must provide. |
 | 24 | `stack_size` | A hint; 0 means the loader decides. |
 | 28 | `type` | `PROGRAM`, `LIBRARY`, `FILEMGR`, `DRIVER`, `DESCRIPTOR`, `DATA` or `SYSTEM` (1–7). |
-| 29 | `attr` | Reserved. |
+| 29 | `attr` | `RV9_MOD_ATTR_SIGNED` (bit 0): the module ends in a signature block. Other bits reserved. |
 | 30 | `revision` | **Higher wins when names collide.** |
 | 31 | — | Reserved. |
 | 32 | `crc32` | Over the whole image with this field taken as zero. |
@@ -335,6 +335,38 @@ what the header says it means. The profile records a `since_abi` for every
 environment entry, so the number is computable; deciding *how* to compute it
 is the open part, since a module reaches `write` through `m_say` as often as
 directly.
+
+### The signature
+
+A signed module ends in an 80-byte `rv9_mod_sig_t`, counted in `module_len`,
+and says so in `attr`:
+
+| at | field | |
+|---|---|---|
+| 0 | `magic` | `0x53395652`, `RV9S`. |
+| 4 | `key_id` | The first 8 bytes of SHA-256 over the signer's public key, as an uncompressed point. |
+| 12 | — | Reserved. |
+| 16 | `sig` | ECDSA P-256 over SHA-256: `r` then `s`, 32 bytes each, big-endian. |
+
+What is signed is everything before the block, with the `crc32` field taken
+as zero. The CRC is then taken over the whole module, block included, so a
+loader that knows nothing of signatures accepts a signed module and never
+reaches the block. Signing is deterministic (RFC 6979): the same key and
+module give the same bytes.
+
+**What must be signed** is the module manager's policy. A module read from a
+file (the module path, `load`, a volume's top level at boot) must be signed
+by a key in `/f0/trust` once that file holds any key, and is refused with
+`RV9_MOD_ERR_SIGNATURE` otherwise. With no key there, it is accepted with a
+warning. The store is trusted as it is, because writing it is flashing the
+board. Built-in images the self-tests register are not files and are not
+checked.
+
+`/f0/trust` is one key per line, `<name> <key id> <public key>`, as
+`tools/mkkey.py` prints it; the `trust` command manages it. Anything that can
+write `/f0` can change it, so it is as strong as access to a shell: RV-9 has
+no privileges yet. The check runs in a host task of its own, below RV-9's
+threads (3 KB of stack, 1.2 KB used): 19.6 ms on the C5.
 
 **The CRC is the zlib polynomial**, so `tools/mkmodule.py` computes it with
 Python's `zlib` and the loader agrees. It is checked with the field taken as

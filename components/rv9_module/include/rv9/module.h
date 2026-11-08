@@ -62,12 +62,37 @@ typedef struct __attribute__((packed)) {
     uint32_t static_size;   /* per-instance storage the loader must provide */
     uint32_t stack_size;    /* hint; 0 means "loader decides" */
     uint8_t  type;          /* rv9_mod_type_t */
-    uint8_t  attr;          /* reserved for flags */
+    uint8_t  attr;          /* RV9_MOD_ATTR_* */
     uint8_t  revision;      /* higher revision wins when names collide */
     uint8_t  reserved0;
     uint32_t crc32;
     uint32_t manifest_offset; /* TLV manifest, from module start; 0 = none */
 } rv9_mod_header_t;
+
+/*
+ * A signed module ends in an rv9_mod_sig_t, counted in module_len, and its
+ * header says so with RV9_MOD_ATTR_SIGNED. The signature is ECDSA P-256
+ * over SHA-256 of everything before the block, with the crc32 field taken
+ * as zero; the CRC is then taken over all of it, the block included, so a
+ * loader that knows nothing of signatures still accepts the module and
+ * never reaches the block.
+ *
+ * What must be signed is the module manager's policy, not the format's: a
+ * module read from a file (the module path, `load`, a volume at boot) must
+ * carry a signature by a key in /f0/trust, once /f0/trust holds any key.
+ * The store is trusted as it is, because writing it is flashing the board.
+ */
+#define RV9_MOD_ATTR_SIGNED  0x01u
+#define RV9_MOD_SIG_MAGIC    0x53395652u   /* "RV9S" little-endian */
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;         /* RV9_MOD_SIG_MAGIC */
+    uint8_t  key_id[8];     /* SHA-256 of the public key's uncompressed point */
+    uint32_t reserved;
+    uint8_t  sig[64];       /* r then s, big-endian, 32 bytes each */
+} rv9_mod_sig_t;
+
+_Static_assert(sizeof(rv9_mod_sig_t) == 80, "signature block is 80 bytes");
 
 _Static_assert(sizeof(rv9_mod_header_t) == RV9_MODULE_HDR_LEN,
                "module header must be exactly 40 bytes");
@@ -1853,6 +1878,7 @@ typedef enum {
     RV9_MOD_ERR_IO,
     RV9_MOD_ERR_INVAL,
     RV9_MOD_ERR_CONTRACT,   /* the manifest demands something unknown here */
+    RV9_MOD_ERR_SIGNATURE,  /* not signed by a key this machine trusts */
 } rv9_mod_err_t;
 
 const char *rv9_mod_strerror(rv9_mod_err_t err);

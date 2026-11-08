@@ -7930,6 +7930,71 @@ Two things went wrong on the way:
   want of 35 KB, not for want of an FPU. The check now reads the manifest
   alone (`rv9_mod_peek_u32`) before anything is linked.
 
+## 73. Signed modules
+
+Step 2 towards a module path across a federation, and the step before any
+module crosses the network. The CRC catches damage and nothing else: a
+module on the card, or one day from a peer, runs whatever whoever wrote it
+wanted. Now a board can be told to run, from a file, only what a key it
+trusts signed.
+
+**The algorithm is ECDSA P-256 over SHA-256**, through PSA, which the
+firmware already carries because `sshd` verifies P-256 and RSA. Ed25519
+would have been the first choice and mbedTLS does not implement it.
+
+**The signature is a block at the end of the module** (reference §5): 80
+bytes, counted in `module_len`, announced by a bit in the header's reserved
+`attr`. What is signed is everything before it with the CRC field taken as
+zero; the CRC is taken last, over all of it. So the store's walk and every
+loader that never heard of signatures are unchanged, and an unsigned module
+is exactly what it was. Signing is deterministic (RFC 6979): the same key
+and module give the same bytes, so a signed build is as reproducible as an
+unsigned one, which was checked.
+
+**Keys.** `tools/mkkey.py` makes one, in `~/.config/rv9/sign.key`, outside
+the repository, and prints its trust line. `build_modules.sh` and
+`mksystem.py` sign with it whenever it exists. A board keeps public keys in
+`/f0/trust`, managed by `trust`, and `mksystem.py --install` adds the key
+the card was signed with.
+
+**The policy:**
+
+| from | |
+|---|---|
+| the store | trusted as it is: writing it is flashing the board |
+| a file: the module path, `load`, a volume at boot | signed by a key in `/f0/trust`, once it holds one. With none, accepted with a warning: the bench |
+| a peer (step 3) | to be signed always |
+
+The check runs where the image is already read whole (`path_read`,
+`rv9_mod_load_path`), with the directory lock released. **It runs in a host
+task of its own**, below RV-9's threads. A module read off the card is read
+on the stack of whoever is starting it, which `can` had just shown can
+overflow, and the C3 does its arithmetic in software while every RV-9 thread
+shares one host task. On the C5 a check takes **19.6 ms and 1.2 KB of
+stack**, the same three times running; the task has 3 KB. The C3 is still to
+be measured: it has no network to fetch a module with yet.
+
+Tested on the C5 with modules its store does not carry, so that they came
+off the card: with no key, signed and unsigned run with a warning; with the
+key, the signed one runs, the unsigned one is refused ("not signed, and this
+machine runs only modules signed by a key in /f0/trust"), and one changed
+by a bit after signing, its CRC put right, is refused ("the signature does
+not match"). `trust remove` returns the board to the bench; `--install`
+puts the key back. The first boot with a key also refused the old unsigned
+`/f0/downloaded.mod`, as it should.
+
+**What it does not do, deliberately:**
+
+- **Privilege.** Anything that can write `/f0` can add a key. Trust is as
+  strong as access to a shell, the console or an SSH login, until RV-9 has
+  privileges.
+- **Revocation** is `trust remove`, and **rollback** is not prevented: an
+  old signed module with a bug still verifies. The highest-revision rule
+  narrows it; pinning by hash belongs to step 3.
+- **Data files** (models, the voice) are not modules and are not signed.
+- `can` and `mdir` do not show the signer yet; `tools/modinfo.py` does,
+  and checks the signature against your key.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

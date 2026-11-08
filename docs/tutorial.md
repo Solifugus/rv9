@@ -811,6 +811,32 @@ is the file `/f0/path`, a list of prefixes, read at every miss:
 rv9> echo /sd0/cmd/ /f0/cmd/ /r0/ > /f0/path
 ```
 
+### Signing what you build
+
+A module from a file runs whoever wrote the file, so a board can be told to
+run only modules you signed. Make a key once, on the PC:
+
+```sh
+./tools/mkkey.py               # ~/.config/rv9/sign.key, and its trust line
+```
+
+From then on everything `build_modules.sh` and `mksystem.py` build is signed
+with it (`--no-sign` for an unsigned build), and `tools/modinfo.py` says whose
+signature a module carries and whether it matches. On the board, give it the
+line `mkkey.py` printed, or let `mksystem.py --install` do it:
+
+```
+rv9> trust add matthew 4ecc8c51b88337cc 04f6c36a52...
+rv9> trust
+name                    key id
+matthew                 4ecc8c51b88337cc
+```
+
+With a key in `/f0/trust`, a module from the card, `/f0` or `load` must be
+signed by it, and one that is not, or was changed after it was signed, is
+refused. The store is trusted as it is. `trust remove matthew` goes back to
+accepting anything with a warning.
+
 So there are three places a command can live, and they cost different
 things: the store, which costs nothing to start and is reflashed to change;
 a volume's top level, `/f0/thing.mod`, read at every boot and held from

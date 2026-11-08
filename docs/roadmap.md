@@ -1160,7 +1160,10 @@ a peer as it finds one on its card, and runs it if it can. In steps:
 1. **What a module needs, declared and checked — done**, design §72:
    `devices`, `isa` (refused at fork), `uses`, `modules`, `files` (said,
    never refused), `can <command>`, and `mksystem.py` warning from them.
-2. **Module signing**, before any module crosses the network.
+2. **Module signing — done**, design §73: ECDSA P-256 in a block at the
+   end of the module, `tools/mkkey.py`, signed builds by default,
+   `/f0/trust` and `trust`. A module from a file must be signed by a
+   trusted key once one is trusted; the store is trusted as flashed.
 3. **Path entries on a peer, where the code moves**: a peer publishes a
    catalog (name, revision, hash, needs, size), the first entry on the path
    whose needs this machine meets wins, and `/f0/path` can pin a command to

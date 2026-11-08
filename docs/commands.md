@@ -197,6 +197,7 @@ rasteriser out of its own — see `modules/pic/build.conf` and
 | `netstat` | State, SSID, address. |
 | `fetch <host[:port]> [path]` | An HTTP GET, with no sockets, no DNS call and no connect — it builds a path name, opens it, writes a request and reads the answer. Headers to stderr, body to stdout, so `fetch host /x.mod > /r0/x.mod` puts exactly the bytes on the volume. If the volume fills, it says how much it kept and fails, rather than counting what it was sent. |
 | `passwd <password>` / `passwd show` | The login password, and the host key fingerprint. Goes to `/sshcfg`, which is the SSH driver bound so that opening it does not wait for a login. |
+| `trust` / `trust add [line]` / `trust remove <name or id>` | The keys whose signed modules this machine runs from a file (`/f0/trust`). `add` takes the line `tools/mkkey.py` prints, as an argument or pasted. With no key, a module from the card, `/f0` or `load` runs signed or not, with a warning; with one, it must be signed by a key here. The store is trusted either way. |
 | `authkey` / `authkey list` / `authkey clear` | Trust a public key, read from stdin because a key line is longer than an argument should be. No Ed25519 in mbedTLS as shipped — use ECDSA P-256 or RSA. |
 | `sshd` | A shell over SSH. |
 | `rshd` | The same over a plain socket, on port 2300. `sshd` is this with one string changed, which is the argument for where the protocol was put. |

@@ -386,12 +386,28 @@ class Console:
         return {m[1]: int(m[2]) for m in re.finditer(r"^(\S+)\s+(\d+)\r?$", out, re.M)}
 
 
-def install(port, card, plan, host, http_port):
+def install(port, card, plan, host, http_port, sign_key=None):
     handler = functools.partial(QuietHandler, directory=card)
     server = http.server.ThreadingHTTPServer(("", http_port), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     con = Console(port)
     con.run("", 10)
+
+    # The key the card's modules are signed with, in /f0/trust: from then
+    # on the board runs modules from files only when they are signed by it
+    # (rv9_mod_sig_t). Added once; `trust remove` takes it away.
+    if sign_key and os.path.exists(sign_key):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import mkkey
+        from cryptography.hazmat.primitives import serialization
+        key = serialization.load_pem_private_key(open(sign_key, "rb").read(), None)
+        line = mkkey.trust_line(os.environ.get("USER", "builder"), key)
+        if line.split()[1] not in con.run("trust", 10):
+            out = con.run(f"trust add {line}", 20)
+            if "trusted" not in out:
+                fail(f"could not add the signing key to /f0/trust:\n{out[-300:]}")
+            print(f"trust: added key {line.split()[1]}; modules from files must "
+                  "now be signed by it")
 
     have = con.listing("/sd0")
     todo = [(n, os.path.getsize(src)) for n, src in plan
@@ -436,6 +452,9 @@ def main():
                     help="where the card's files are (default out/)")
     ap.add_argument("--host", help="this machine's address, as the board sees it")
     ap.add_argument("--http-port", type=int, default=8000)
+    ap.add_argument("--sign", default=os.path.expanduser("~/.config/rv9/sign.key"),
+                    help="sign the modules with this key, when it exists "
+                         "(default ~/.config/rv9/sign.key; tools/mkkey.py)")
     a = ap.parse_args()
 
     sysdef = read_system(a.system)
@@ -466,6 +485,8 @@ def main():
                "--store", sysdef["store"],
                "--sdkconfig", os.path.join(build, "sdkconfig"),
                "--out", os.path.join(build, "modules.bin")]
+        if a.sign and os.path.exists(a.sign):
+            cmd += ["--sign", a.sign]
         print("+ " + " ".join(cmd), flush=True)
         r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
         with open(os.path.join(build, "store.txt"), "w") as f:
@@ -490,7 +511,7 @@ def main():
             fail(f"not in {a.files}: {' '.join(missing)}")
         if a.flash:
             time.sleep(8)       # the board's boot, after flashing
-        install(a.install, card, plan, a.host or lan_address(), a.http_port)
+        install(a.install, card, plan, a.host or lan_address(), a.http_port, a.sign)
 
 
 if __name__ == "__main__":
