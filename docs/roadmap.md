@@ -1144,7 +1144,9 @@ choice. In steps:
 
 1. **A switch per driver — done**, design §71: `CONFIG_RV9_DRV_<NAME>`, all
    on by default. All off is 573 KB of firmware on the P4, not 1.8 MB.
-2. Module groups, and a store built from a list.
+2. **Module groups, and a store built from a list — done**, §71:
+   `groups=` in every `build.conf`, `build_modules.sh --store`, and
+   descriptors chosen from the firmware's drivers.
 3. `tools/mksystem.py` and a system file per board, with a size report.
 4. The card's contents, and putting them there.
 

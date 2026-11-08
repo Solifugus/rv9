@@ -7756,6 +7756,30 @@ boot without `NET`. It comes in as a managed component and starts itself,
 so leaving it out needs the component list chosen per system too. That is
 step 3's job.
 
+### Step 2: a store built from a list
+
+Every module now says which systems carry it, in its `build.conf`:
+`groups="base"`, from `base` (the shell and its tools), `net`, `pins`, `rt`,
+`screen`, `sound`, `vision` and `tests` (what the self-tests fork). One
+module can be in several. The store builder takes the groups, or names,
+to put in:
+
+```
+tools/build_modules.sh --store "base net" --sdkconfig build-c3/sdkconfig
+```
+
+Every module is still built, and what is left out stays in
+`build/modules` for the card. With `--sdkconfig`, descriptors go in only
+for the drivers that firmware was built with, and `tests` goes in when it
+has the self-tests, because they fork those. Without either option the
+store is what it was, byte for byte. A word that is neither a group nor a
+module stops the build, rather than quietly selecting nothing, and so does
+a module with no `groups`.
+
+`base net` against the all-off firmware of the table above is 68 modules
+and 55 KB, against 121 and 193 KB. That includes `tests`, since that
+firmware still has the suites.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

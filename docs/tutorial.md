@@ -566,7 +566,13 @@ stack_size=2048
 revision=1
 mtype=program
 desc="says hello"
+groups="base"
 ```
+
+`groups` says which systems carry it: `build_modules.sh --store "base net"`
+puts only those groups in the store, and the build refuses a module that
+names none. The groups are `base`, `net`, `pins`, `rt`, `screen`, `sound`,
+`vision` and `tests`.
 
 Then:
 

@@ -6,10 +6,68 @@
 # with no libc and no linkage to the kernel, which is the entire point.
 #
 # Requires the IDF toolchain on PATH (. $HOME/esp/esp-idf/export.sh).
+#
+# Every module is built, always. Which of them go into the store is chosen:
+#
+#   --store "base net pins"   groups (each build.conf says its `groups`) or
+#                             module names; "all", the default, is all of
+#                             them
+#   --sdkconfig FILE          the firmware this store is for. Descriptors
+#                             go in only for the drivers it was built with
+#                             (CONFIG_RV9_DRV_*), and the `tests` group goes
+#                             in when it has the self-tests, which fork them.
+#                             Without it, every descriptor goes in.
+#
+# What is built but left out stays in build/modules, for the card.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+SELECT="all"
+CFG=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --store)     SELECT="$2"; shift 2 ;;
+        --sdkconfig) CFG="$2"; shift 2 ;;
+        *) echo "usage: $0 [--store \"groups or names\"] [--sdkconfig FILE]" >&2
+           exit 2 ;;
+    esac
+done
+[[ -z "$CFG" || -f "$CFG" ]] || { echo "error: no $CFG" >&2; exit 2; }
+
+cfg_on() { [[ -n "$CFG" ]] && grep -q "^CONFIG_$1=y" "$CFG"; }
+
+# The drivers a firmware always has (components/rv9_io/CMakeLists.txt).
+CORE_DRIVERS=" uart flashdisk pubmem pipemem "
+
+# Every group any module declares, so that a word in --store that is
+# neither a group nor a module is caught rather than quietly selecting
+# nothing.
+KNOWN=" all "
+for c in "$ROOT"/modules/*/build.conf; do
+    KNOWN+="$(basename "$(dirname "$c")") "
+    g=$(sed -n 's/^groups="\(.*\)".*/\1/p' "$c")
+    for w in $g; do [[ "$KNOWN" == *" $w "* ]] || KNOWN+="$w "; done
+done
+WANT=" $SELECT "
+[[ -n "$CFG" ]] && cfg_on RV9_SELFTEST && WANT+="tests "
+for w in $WANT; do
+    [[ "$KNOWN" == *" $w "* ]] || { echo "error: '$w' is no group or module" >&2; exit 2; }
+done
+
+# In the store? A descriptor by its driver, a module by its name or groups.
+wanted_desc() {
+    [[ -z "$CFG" || "$CORE_DRIVERS" == *" $1 "* ]] && return 0
+    cfg_on "RV9_DRV_${1^^}"
+}
+wanted_mod() {
+    [[ "$WANT" == *" all "* || "$WANT" == *" $1 "* ]] && return 0
+    for g in $2; do [[ "$WANT" == *" $g "* ]] && return 0; done
+    return 1
+}
+in_store=0
+left_out=""
 OUT="$ROOT/build/modules"
 STORE="$ROOT/build/modules.bin"
 
@@ -68,6 +126,11 @@ for dir in "$ROOT"/modules/*/; do
         python3 "$ROOT/tools/mkmodule.py" \
             --name "$name" --type descriptor --revision "${revision:-1}" \
             "$OUT/$name.bin" "$OUT/$name.mod"
+        if ! wanted_desc "$driver"; then
+            left_out+="$name "
+            continue
+        fi
+        in_store=$((in_store + 1))
         cat "$OUT/$name.mod" >> "$STORE"
         size=$(stat -c%s "$OUT/$name.mod")
         pad=$(( (4 - size % 4) % 4 ))
@@ -125,6 +188,7 @@ for dir in "$ROOT"/modules/*/; do
     cflags=""           # more compiler flags, e.g. an -march with an
                         # extension. Such a module carries those opcodes
                         # to every board and must ask RV9_ISA_* first.
+    groups=""           # which systems carry it; see --store above
     sources=""          # more .c files, relative to the module's directory:
                         # a vendored engine kept in a subdirectory of its own.
 
@@ -212,6 +276,15 @@ for dir in "$ROOT"/modules/*/; do
         continue
     fi
 
+    if [[ -z "$groups" ]]; then
+        echo "error: module '$name' has no groups= in its build.conf" >&2
+        exit 1
+    fi
+    if ! wanted_mod "$name" "$groups"; then
+        left_out+="$name "
+        continue
+    fi
+    in_store=$((in_store + 1))
     cat "$OUT/$name.mod" >> "$STORE"
 
     # Modules are 4-byte aligned in the store.
@@ -220,4 +293,6 @@ for dir in "$ROOT"/modules/*/; do
     (( pad > 0 )) && head -c "$pad" /dev/zero >> "$STORE"
 done
 
-echo "module store: $STORE ($(stat -c%s "$STORE") bytes)"
+echo "module store: $STORE ($(stat -c%s "$STORE") bytes, $in_store modules)"
+[[ -n "$left_out" ]] && echo "  built, not in the store: $left_out"
+true
