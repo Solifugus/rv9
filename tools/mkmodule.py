@@ -32,13 +32,17 @@ TAGS = {
     "capability": 0x000D, "compiler": 0x000E, "runtime": 0x000F,
     "on_deadline": 0x0010, "publishes": 0x0011, "watches": 0x0012,
     "mem_max": 0x0013, "placement": 0x0014, "heap_in": 0x0015,
-    "ext_max": 0x0016,
+    "ext_max": 0x0016, "uses": 0x0017, "isa": 0x0018, "module": 0x0019,
+    "file": 0x001A,
 }
 
 CLASSES = {"unspecified": 0, "proaction": 1, "reaction": 2, "realtime": 3}
 ON_DEADLINE = {"report": 0, "fault": 1}
 PLACEMENT = {"derived": 0, "urgent": 1, "routine": 2}
 HEAP_IN = {"internal": 0, "external": 1}
+
+# isa is a set of RV9_ISA_* bits, written by name: isa="fpu pie".
+ISA_BITS = {"pie": 1 << 0, "fpu": 1 << 1}
 
 # The names a u8 tag may be written with, per tag.
 U8_NAMES = {"class": CLASSES, "on_deadline": ON_DEADLINE,
@@ -47,10 +51,11 @@ U8_NAMES = {"class": CLASSES, "on_deadline": ON_DEADLINE,
 # How each tag's value is encoded, so a build.conf says `heap_max=0` and
 # gets four bytes rather than the string "0".
 U32_TAGS = {"stack", "static", "heap_max", "period_us", "deadline_us",
-            "min_inter_us", "wcet_us", "mem_max", "ext_max"}
+            "min_inter_us", "wcet_us", "mem_max", "ext_max", "isa"}
 U8_TAGS = {"class", "on_deadline", "placement", "heap_in"}
 STR_TAGS = {"desc", "device", "exclusive", "capability",
-            "compiler", "runtime", "publishes", "watches"}
+            "compiler", "runtime", "publishes", "watches", "uses",
+            "module", "file"}
 
 # A failsafe is a constant and a device, written PATH=VALUE. It encodes as
 # the u32 value followed by the path, because that is the only shape RV-9
@@ -59,7 +64,7 @@ STR_TAGS = {"desc", "device", "exclusive", "capability",
 FS_TAGS = {"failsafe"}
 
 REPEATABLE = {"device", "exclusive", "capability", "failsafe",
-              "publishes", "watches"}
+              "publishes", "watches", "uses", "module", "file"}
 
 
 def encode_manifest(entries):
@@ -81,7 +86,14 @@ def encode_manifest(entries):
             out += b"\0" * (-len(out) % 4)
             continue
 
-        if name in U32_TAGS:
+        if name == "isa":
+            bits = 0
+            for w in str(value).replace(",", " ").split():
+                if w.lower() not in ISA_BITS:
+                    raise ValueError(f"isa: {w!r} is not one of {sorted(ISA_BITS)}")
+                bits |= ISA_BITS[w.lower()]
+            payload = struct.pack("<I", bits)
+        elif name in U32_TAGS:
             payload = struct.pack("<I", int(str(value), 0))
         elif name in U8_TAGS:
             n = U8_NAMES.get(name, {}).get(str(value).lower())

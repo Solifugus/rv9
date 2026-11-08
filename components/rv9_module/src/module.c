@@ -227,6 +227,44 @@ void rv9_mod_note_stack(rv9_mod_entry_t *entry, uint32_t given, uint32_t used)
  */
 static void *path_head(const struct rv9_mod_entry *e);   /* below */
 
+/*
+ * A module's header and manifest, wherever it is: its image when it is
+ * loaded, else as far as its manifest goes, and a little, from the store
+ * or from its file on the path. A copy goes in *buf for the caller to free,
+ * with the header in it saying how much was copied, so that a walk bounded
+ * by the header runs past nothing. NULL if there is no manifest to read.
+ * Called with s_lock held, so no image is freed from under it.
+ */
+static const void *entry_head(rv9_mod_entry_t *e, uint8_t **buf)
+{
+    *buf = NULL;
+    if (e->image != NULL) return e->image;
+
+    if (e->path[0]) {
+        *buf = path_head(e);
+        return *buf;
+    }
+    if (s_store == NULL) return NULL;
+
+    rv9_mod_header_t h;
+    if (esp_partition_read(s_store, e->store_offset, &h, sizeof(h)) != ESP_OK) {
+        return NULL;
+    }
+    if (h.manifest_offset == 0 || h.manifest_offset >= h.module_len) return NULL;
+
+    uint32_t n = h.module_len;
+    if (n > h.manifest_offset + MANIFEST_SCAN_MAX) n = h.manifest_offset + MANIFEST_SCAN_MAX;
+    *buf = rv9_alloc(n);
+    if (*buf == NULL) return NULL;
+    if (esp_partition_read(s_store, e->store_offset, *buf, n) != ESP_OK) {
+        rv9_free(*buf);
+        *buf = NULL;
+        return NULL;
+    }
+    ((rv9_mod_header_t *)*buf)->module_len = n;
+    return *buf;
+}
+
 static bool declares_scan(uint16_t tag, const char *path,
                           char *out_unit, uint32_t cap)
 {
@@ -244,44 +282,9 @@ static bool declares_scan(uint16_t tag, const char *path,
     for (rv9_mod_entry_t *e = s_dir; e != NULL && !found; e = e->next) {
         if (e->type != RV9_MOD_PROGRAM) continue;
 
-        const void *image = e->image;
         uint8_t *buf = NULL;
-
-        if (image == NULL && e->path[0]) {
-            /* On the path and not loaded: as far as its manifest goes, and
-               a little, from the file -- as the store's is read below. */
-            buf = path_head(e);
-            if (buf == NULL) continue;
-            image = buf;
-        }
-        if (image == NULL) {
-            if (s_store == NULL) continue;
-
-            rv9_mod_header_t h;
-            if (esp_partition_read(s_store, e->store_offset, &h,
-                                   sizeof(h)) != ESP_OK) {
-                continue;
-            }
-            if (h.manifest_offset == 0 || h.manifest_offset >= h.module_len) {
-                continue;
-            }
-
-            uint32_t n = h.module_len;
-            if (n > h.manifest_offset + MANIFEST_SCAN_MAX) {
-                n = h.manifest_offset + MANIFEST_SCAN_MAX;
-            }
-            buf = rv9_alloc(n);
-            if (buf == NULL) continue;
-            if (esp_partition_read(s_store, e->store_offset, buf, n) != ESP_OK) {
-                rv9_free(buf);
-                continue;
-            }
-
-            /* The walk is bounded by the header's length, so the header in
-               the copy says how much was copied. Nothing runs past it. */
-            ((rv9_mod_header_t *)buf)->module_len = n;
-            image = buf;
-        }
+        const void *image = entry_head(e, &buf);
+        if (image == NULL) continue;
 
         const void *v = NULL;
         uint16_t len = 0;
@@ -1037,6 +1040,55 @@ static int env_dup2(int from, int to)
  * directly; process records come back through the process manager's ops,
  * because rv9_module must not depend on rv9_proc.
  */
+bool rv9_mod_peek_u32(const char *name, uint16_t tag, uint32_t *out)
+{
+    rv9_mod_entry_t *e = (rv9_mod_entry_t *)rv9_mod_find(name);
+    if (e == NULL) return false;
+
+    rv9_lock_acquire(s_lock);
+    uint8_t *copy = NULL;
+    const void *image = entry_head(e, &copy);
+    bool got = image != NULL && rv9_mod_manifest_u32(image, tag, out);
+    rv9_lock_release(s_lock);
+    if (copy) rv9_free(copy);
+    return got;
+}
+
+/* RV9_SYS_NEEDS: a module's manifest, found as a fork would find it. */
+static int needs_op(void *buf, uint32_t len)
+{
+    if (len < sizeof(rv9_sys_needs_t)) return -1;
+
+    char name[sizeof(((rv9_mod_entry_t *)0)->name)];
+    size_t n = strnlen((const char *)buf, len);
+    if (n == 0 || n >= sizeof(name)) return 0;
+    memcpy(name, buf, n + 1);
+
+    rv9_sys_needs_t *out = (rv9_sys_needs_t *)buf;
+    rv9_mod_entry_t *e = (rv9_mod_entry_t *)rv9_mod_find(name);
+    if (e == NULL || e->type != RV9_MOD_PROGRAM) return 0;
+
+    rv9_lock_acquire(s_lock);
+    uint8_t *copy = NULL;
+    const rv9_mod_header_t *h = entry_head(e, &copy);
+
+    memset(out, 0, sizeof(*out));
+    strncpy(out->from, e->path, sizeof(out->from) - 1);
+    out->revision = e->revision;
+
+    uint32_t room = len - (uint32_t)sizeof(*out);
+    if (h != NULL && h->manifest_offset != 0 && h->manifest_offset < h->module_len) {
+        uint32_t have = h->module_len - h->manifest_offset;
+        if (have > MANIFEST_SCAN_MAX) have = MANIFEST_SCAN_MAX;
+        if (have > room) have = room & ~3u;     /* whole entries, four-aligned */
+        memcpy(out->manifest, (const uint8_t *)h + h->manifest_offset, have);
+        out->len = (uint16_t)have;
+    }
+    rv9_lock_release(s_lock);
+    if (copy) rv9_free(copy);
+    return 1;
+}
+
 static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
 {
     if (buf == NULL) return -1;
@@ -1091,6 +1143,9 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
     case RV9_SYS_HAVE:
         if (s_io_ops == NULL || s_io_ops->have == NULL) return -1;
         return s_io_ops->have(buf, len);
+
+    case RV9_SYS_NEEDS:
+        return needs_op(buf, len);
 
     case RV9_SYS_LIMITS:
         if (s_proc_ops == NULL || s_proc_ops->limits == NULL) return -1;

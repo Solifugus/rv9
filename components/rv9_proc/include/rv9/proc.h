@@ -275,6 +275,11 @@ typedef enum {
        command that runs on part of what it was told is worse than one
        that does not run. */
     RV9_PROC_ERR_TOOLONG,
+
+    /* It declared instructions this CPU does not have (RV9_MTAG_ISA).
+       Refused before it runs: an instruction the CPU lacks is a fault the
+       moment it is reached, whenever that is. */
+    RV9_PROC_ERR_ISA,
 } rv9_proc_err_t;
 
 const char *rv9_proc_strerror(rv9_proc_err_t err);

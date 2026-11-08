@@ -48,18 +48,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KEYS = {"target", "drivers", "selftest", "store"}
 OPTIONAL = {"card": ""}
 
-# What a group's programs open, for the warning when a store carries a group
-# whose devices the firmware lacks. Any one of the drivers is enough.
-GROUP_NEEDS = {
-    "net": {"net"},
-    "pins": {"gpio", "pwm", "adc", "tsens", "i2c"},
-    "screen": {"svgwin", "lcdcon"},
-    "sound": {"audio"},
-    "vision": {"camera"},
-}
-
 # Drivers that are built anywhere but attach only on the P4 (the #if in each).
 P4_ONLY = {"audio", "camera", "tts"}
+
+# What each chip has of what a module may declare it needs (isa=).
+TARGET_ISA = {"esp32p4": {"fpu", "pie"}}
+
+# The drivers every firmware has, whose devices nothing declares.
+CORE_DRIVERS = {"uart", "flashdisk", "pubmem", "pipemem"}
 
 
 def fail(msg):
@@ -190,15 +186,63 @@ def static_ram(build):
 
 
 def modules():
-    """Every module with a build.conf: its groups and the files it reads."""
-    mods = {}
+    """Every module with a build.conf: (groups, files), and its needs."""
+    mods, needs = {}, {}
     for conf in glob.glob(os.path.join(ROOT, "modules", "*", "build.conf")):
         text = open(conf).read()
-        g = re.search(r'^groups="([^"]*)"', text, re.M)
-        f = re.search(r'^files="([^"]*)"', text, re.M)
-        mods[os.path.basename(os.path.dirname(conf))] = (
-            set(g[1].split()) if g else set(), f[1].split() if f else [])
-    return mods
+
+        def key(k):
+            m = re.search(rf'^{k}="?([^"\n#]*)"?', text, re.M)
+            return m[1].split() if m else []
+        name = os.path.basename(os.path.dirname(conf))
+        mods[name] = (set(key("groups")), key("files"))
+        needs[name] = {"devices": key("devices") + key("exclusives"),
+                       "isa": key("isa"), "modules": key("modules"),
+                       "external": key("heap_in") == ["external"]}
+    return mods, needs
+
+
+def device_drivers():
+    """Each device's driver, from the descriptors: /cam0 is camera."""
+    out = {}
+    for conf in glob.glob(os.path.join(ROOT, "modules", "*", "descriptor.conf")):
+        text = open(conf).read()
+        d = re.search(r"^dev_name=(\S+)", text, re.M)
+        v = re.search(r"^driver=(\S+)", text, re.M)
+        if d and v:
+            out[d[1]] = v[1]
+    return out
+
+
+def need_warnings(carried, sysdef, drivers, cfg):
+    """Each carried module whose declared needs this system cannot meet,
+    gathered by reason: {"needs /cam0, which this firmware lacks": [snap]}."""
+    _, needs = modules()
+    dev_driver = device_drivers()
+    isa_here = TARGET_ISA.get(sysdef["target"], set())
+    psram = cfg.get("CONFIG_SPIRAM") == "y"
+    out = {}
+    for n in sorted(carried):
+        nd = needs.get(n)
+        if nd is None:
+            continue
+        for path in nd["devices"]:
+            dev = "/" + path.split("/")[1]
+            drv = dev_driver.get(dev)
+            if drv and drv not in CORE_DRIVERS and drv not in drivers:
+                out.setdefault(f"needs {dev}, which this firmware lacks", []).append(n)
+        lack = set(nd["isa"]) - isa_here
+        if lack:
+            out.setdefault(f"needs {' '.join(sorted(lack))}, which "
+                           f"{sysdef['target']} lacks", []).append(n)
+        if nd["external"] and not psram:
+            out.setdefault("keeps its arena in external memory, which this "
+                           "board lacks", []).append(n)
+        for m in nd["modules"]:
+            if m not in carried:
+                out.setdefault(f"starts {m}, which this system does not carry",
+                               []).append(n)
+    return out
 
 
 def select(words, mods, what):
@@ -213,7 +257,7 @@ def select(words, mods, what):
 def card_plan(build, sysdef, drivers, files_dir):
     """What goes on the card: [(name on the card, file here)], and what is
     missing here. The store's contents are read from its build log."""
-    mods = modules()
+    mods, _ = modules()
     log = os.path.join(build, "store.txt")
     text = open(log).read() if os.path.exists(log) else ""
     m = re.search(r"built, not in the store: (.*)", text)
@@ -229,14 +273,16 @@ def card_plan(build, sysdef, drivers, files_dir):
     for n in sorted(commands):
         plan.append((f"cmd/{n}.mod", os.path.join(ROOT, "build", "modules", n + ".mod")))
     if "sdcard" in drivers:
-        wanted = sorted({f for n in stored | commands for f in mods[n][1]})
+        wanted = sorted({f[len("/sd0/"):] for n in stored | commands
+                         for f in mods[n][1] if f.startswith("/sd0/")})
         for f in wanted:
             src = os.path.join(files_dir, f)
             if os.path.exists(src):
                 plan.append((f, src))
             else:
                 missing.append(f)
-    return plan, missing, left - commands, int(count[2]) if count else 0
+    return (plan, missing, left - commands, int(count[2]) if count else 0,
+            (stored | commands) & set(mods))
 
 
 def make_card(build, plan):
@@ -260,7 +306,7 @@ def report(name, build, sysdef, drivers, files_dir):
     if not os.path.exists(app) or not os.path.exists(store):
         fail(f"no build in {os.path.relpath(build, ROOT)}; run without --report")
     fw, st = os.path.getsize(app), os.path.getsize(store)
-    plan, missing, unused, count = card_plan(build, sysdef, drivers, files_dir)
+    plan, missing, unused, count, carried = card_plan(build, sysdef, drivers, files_dir)
     ram = static_ram(build)
 
     def line(what, n, part):
@@ -290,11 +336,9 @@ def report(name, build, sysdef, drivers, files_dir):
     print(f"  drivers   {' '.join(sorted(drivers)) or '(the core only)'}")
 
     warned = False
-    for g, needs in GROUP_NEEDS.items():
-        if (g in sysdef["store"].split() or sysdef["store"] == "all") and not needs & drivers:
-            print(f"  warning: the store has '{g}' and the firmware none of "
-                  f"{' '.join(sorted(needs))}")
-            warned = True
+    for why, names in need_warnings(carried, sysdef, drivers, cfg).items():
+        print(f"  warning: {' '.join(names)}: {why}")
+        warned = True
     if sysdef["target"] != "esp32p4" and P4_ONLY & drivers:
         print(f"  warning: {' '.join(sorted(P4_ONLY & drivers))} attach only on "
               "the P4; here they are built and do nothing")
@@ -431,7 +475,7 @@ def main():
             fail("the store did not build")
 
     report(name, build, sysdef, drivers, a.files)
-    plan, missing, _, _ = card_plan(build, sysdef, drivers, a.files)
+    plan, missing, _, _, _ = card_plan(build, sysdef, drivers, a.files)
     card = make_card(build, plan)
 
     if a.flash:

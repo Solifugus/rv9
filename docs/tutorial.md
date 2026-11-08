@@ -583,6 +583,20 @@ puts only those groups in the store, and the build refuses a module that
 names none. The groups are `base`, `net`, `pins`, `rt`, `screen`, `sound`,
 `vision` and `tests`.
 
+A module that needs something says so there too, and the machine reads it:
+
+```
+devices="/w0"          # cannot run without it: refused on a board without
+uses="/touch"          # only some of what it does needs it: said, not refused
+isa="fpu pie"          # instructions it cannot do without: refused without
+modules="control"      # what it starts
+files="/sd0/x.rv9m"    # what it reads
+```
+
+`can mine` on the board then says whether it would run there, and why not.
+The devices every machine has (`/f0`, `/pub0`, `/pipe`, `/uart0`) need no
+saying.
+
 Then:
 
 ```

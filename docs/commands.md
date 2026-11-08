@@ -69,6 +69,7 @@ The habit this machine rewards: ask it, do not guess. All of these read
 | `date` | Acquired from the network, and **unknown until it answers** — this board has no clock that survives power. It says so rather than printing 1970. |
 | `netstat` | The link: state, SSID, address. |
 | `have` | Does this machine have it? `have /i2c0` by name, `have svgwin` by driver, `have scf` by file manager. `have` alone lists what a program would usually ask about. |
+| `can <command>` | Could this machine run it, and if not, why not. Every need its manifest declares, met or not: the devices and instructions it cannot run without, devices it only uses for some of what it does, the modules it starts, the files it reads, external memory for its arena. Ends `yes`, `no: it would be refused` or `no: it would start, and lack what it needs`; the status is 0 for yes. Finds the command as running it would, in the store or on the module path. |
 | `profile` | What *this board* offers a program, as JSON. The other half — what every RV-9 offers — is `docs/target/rv9-profile.json`. |
 
 ---

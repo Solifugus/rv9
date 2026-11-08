@@ -29,7 +29,8 @@ TAGS = {0x0000: "end", 0x0001: "desc", 0x0002: "stack", 0x0003: "static",
         0x000D: "capability", 0x000E: "compiler", 0x000F: "runtime",
         0x0010: "on_deadline", 0x0011: "publishes", 0x0012: "watches",
         0x0013: "mem_max", 0x0014: "placement", 0x0015: "heap_in",
-        0x0016: "ext_max"}
+        0x0016: "ext_max", 0x0017: "uses", 0x0018: "isa", 0x0019: "module",
+        0x001A: "file"}
 
 CLASSES = {0: "unspecified", 1: "proaction", 2: "reaction", 3: "realtime"}
 ON_DEADLINE = {0: "report", 1: "fault"}
@@ -42,6 +43,7 @@ U32 = {"stack", "static", "heap_max", "period_us", "deadline_us",
        "min_inter_us", "wcet_us", "mem_max", "ext_max"}
 U8 = {"class", "on_deadline", "placement", "heap_in"}
 FS = {"failsafe"}
+ISA_BITS = {1 << 0: "pie", 1 << 1: "fpu"}
 
 
 def show_value(name, raw):
@@ -50,6 +52,9 @@ def show_value(name, raw):
         value = struct.unpack("<I", raw[:4])[0]
         path = raw[4:].decode("utf-8", "replace")
         return f"{path} = {value}"
+    if name == "isa" and len(raw) == 4:
+        n = struct.unpack("<I", raw)[0]
+        return " ".join(v for b, v in sorted(ISA_BITS.items()) if n & b) or "0"
     if name in U32 and len(raw) == 4:
         n = struct.unpack("<I", raw)[0]
         if name == "heap_max" and n == 0:

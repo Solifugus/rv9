@@ -241,7 +241,7 @@ def manifest(module_h):
             "enforced": any(re.search(r"\b%s\b" % macro, src)
                             for src in sources.values()),
         }
-        names = mkmodule.U8_NAMES.get(name)
+        names = mkmodule.U8_NAMES.get(name) or (mkmodule.ISA_BITS if name == "isa" else None)
         if names:
             entry["values"] = dict(sorted(names.items(), key=lambda kv: kv[1]))
         out.append(entry)

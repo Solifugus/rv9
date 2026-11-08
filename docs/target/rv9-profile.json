@@ -4,7 +4,7 @@
   "generated_by": "tools/mkprofile.py -- regenerate, do not edit",
   "module": {
     "magic": 1295603282,
-    "abi": 15,
+    "abi": 16,
     "header_bytes": 40,
     "types": {
       "PROGRAM": 1,
@@ -19,7 +19,7 @@
   },
   "manifest": {
     "mandatory_bit": 32768,
-    "highest_known_tag": 22,
+    "highest_known_tag": 26,
     "unknown_advisory": "skipped",
     "unknown_mandatory": "module refused",
     "layout": "entries of u16 tag, u16 length, value, padded to 4 bytes; ends at tag 0 or the end of the module",
@@ -196,6 +196,38 @@
         "encoding": "u32",
         "repeatable": false,
         "enforced": true
+      },
+      {
+        "name": "uses",
+        "tag": 23,
+        "encoding": "string",
+        "repeatable": true,
+        "enforced": false
+      },
+      {
+        "name": "isa",
+        "tag": 24,
+        "encoding": "u32",
+        "repeatable": false,
+        "enforced": true,
+        "values": {
+          "pie": 1,
+          "fpu": 2
+        }
+      },
+      {
+        "name": "module",
+        "tag": 25,
+        "encoding": "string",
+        "repeatable": true,
+        "enforced": false
+      },
+      {
+        "name": "file",
+        "tag": 26,
+        "encoding": "string",
+        "repeatable": true,
+        "enforced": false
       }
     ]
   },
@@ -264,7 +296,8 @@
     "UNSCHEDULABLE": 16,
     "BUDGET": 17,
     "MEANING": 18,
-    "TOOLONG": 19
+    "TOOLONG": 19,
+    "ISA": 20
   },
   "io_errors": {
     "NOTFOUND": 1,
@@ -299,7 +332,8 @@
     "STACK_PEAKS": 11,
     "LOG": 12,
     "CLOCK": 13,
-    "HAVE": 14
+    "HAVE": 14,
+    "NEEDS": 15
   },
   "calls": [
     {

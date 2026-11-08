@@ -495,6 +495,10 @@ means it is recorded and passed on but nothing checks it.
 | `mem_max` | **yes** | The process's whole memory budget, itself and everything it starts. An internal arena counts against it. |
 | `ext_max` | **yes** | The same for external memory, which only an arena spends. No default: a program that declares none is limited by what the board has. |
 | `placement` | **yes** | `DERIVED`, `URGENT` or `ROUTINE`. A pin constrains the analysis rather than overriding it: if the pin would make any loop late, the program is refused. |
+| `isa` | **yes** | Instructions it cannot run without, as `RV9_ISA_*` bits: `isa="fpu pie"` in `build.conf`. Refused with `RV9_PE_ISA` on a CPU that lacks one. A module that only *prefers* them (`detect`) asks `RV9_SYS_LIMITS` instead and declares nothing. |
+| `uses` | advisory | A device only some of what it does needs: `detect` opens `/cam0` unless given a file. Said so that `can` and `tools/mksystem.py` can report it; never refused on. |
+| `module` | advisory | A module it starts. Not refused on, because it may be on a card put in later, or (one day) on a peer. |
+| `file` | advisory | A file it reads, by path: `/sd0/whistle.cact`. The same reasoning; `tools/mksystem.py` puts the card's on the card. |
 | `mandatory` | — | Not a tag but a bitmask over them. See below. |
 
 ### Mandatory tags, and unknown ones
@@ -757,6 +761,7 @@ and why `RV9_SYS_MEM_MIN` exists to mark the part that may never move.
 | `RV9_SYS_LOG` | bytes | The log ring, oldest first. What `log` prints, and what makes `log \| match error \| last 20` possible. |
 | `RV9_SYS_CLOCK` | one `rv9_sys_clock_t` | Wall-clock time and whether it has ever been set. UTC only. It says *false* rather than lying when the network has never been asked. |
 | `RV9_SYS_HAVE` | one `rv9_sys_device_t` | **A question, not an enumeration.** Name in, device record out, returns 1 or 0. See §18. |
+| `RV9_SYS_NEEDS` | one `rv9_sys_needs_t` | A module's manifest, wherever a fork would find it. Module name in; where it was found, its revision and its manifest entries out. Returns 1, or 0 when there is no such module. What `can` reads. See §18. |
 
 ## 9. Device settings: getstat and setstat
 
@@ -1593,6 +1598,7 @@ something different about **whose fault it is**:
 | `RV9_PE_NOPUB` | 15 | It `watches` a cell that nothing on this machine `publishes`. |
 | `RV9_PE_MEANING` | 18 | It watches a cell that means something else. Both sides declared a unit and they disagree — see §17. |
 | `RV9_PE_TOOLONG` | 19 | Its argument is longer than this board takes: `arg_max`, §14. Refused rather than cut short. |
+| `RV9_PE_ISA` | 20 | It declared instructions (`isa`) this CPU does not have. Refused before it runs, because an instruction the CPU lacks faults whenever it is reached. |
 
 *It ran and then ended* — these arrive as an exit status, and are the ones
 `wait_why` exists to disambiguate from a program's own return:
@@ -1685,7 +1691,7 @@ same quantity.
 
 | profile | value | |
 |---|---|---|
-| `abi` | 15 | What this firmware implements. See §7 on `abi_version`. |
+| `abi` | 16 | What this firmware implements. See §7 on `abi_version`. |
 | `header_bytes` | 40 | The fixed header before the manifest (§5). |
 
 Two of these are worth a sentence, because the number is not the interesting
@@ -2022,14 +2028,40 @@ rather than notional.
 
 | | |
 |---|---|
-| **Must have it** | Declare it in the manifest. Admission refuses the program with `RV9_PE_NODEV` *before it runs*, naming what was missing. |
-| **Would like it** | Ask with `RV9_SYS_HAVE` and do without when the answer is 0. |
+| **Must have it** | Declare it in the manifest (`device`, `exclusive`, `isa`). Admission refuses the program with `RV9_PE_NODEV` or `RV9_PE_ISA` *before it runs*, naming what was missing. |
+| **Would like it** | Ask with `RV9_SYS_HAVE` and do without when the answer is 0. Declare it as `uses`, so that it can be reported. |
 | **How much of it** | `getstat` the device once open. |
 
 That is what lets one binary serve a small board and a large one: **require
 only what is essential, and ask about the rest.** `ed` is the worked example
 already in the tree — it asks the screen its size on every redraw, so the same
 binary runs at 236 columns over SSH and 30×8 on the panel.
+
+### RV9_SYS_NEEDS, and `can`
+
+`have` asks about a device. `can` asks about a program: could this machine
+run it, and if not, why not. It reads the manifest through `RV9_SYS_NEEDS`,
+which finds the module as a fork would (the store, then the module path),
+and checks every need, not only the first that fails:
+
+```
+rv9> can listen                 (on a C5, with listen on its card)
+listen, from /sd0/cmd/listen.mod
+  --   uses /au0              only for some of what it does
+  no   file /sd0/whistle.cact not there
+  no   isa fpu pie            this CPU has neither
+  no   memory 28160 KB external this machine has none
+no: it would be refused
+```
+
+A `device`, `exclusive` or `isa` it lacks means admission would refuse it.
+A `module` it starts, a `file` it reads or external memory for its arena
+that is not there means it would start and fail, and counts against *yes*
+too. A device it only `uses` is shown and never counts. The status is the
+answer, 0 for yes.
+
+The call reports and checks nothing itself, because a program asking may
+want every reason, and admission already refuses on the first.
 
 The `have` command is this at the shell, and its exit status is the answer so
 it composes:

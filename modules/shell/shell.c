@@ -979,7 +979,10 @@ static void say_fork_error(const rv9_mod_env_t *env, const char *name, int pid)
                                    "(see 'owns')\n");
         } else if (pid == -RV9_PE_NODEV) {
             m_say(env, RV9_STDOUT, ": it needs a device this machine does "
-                                   "not have (see the log)\n");
+                                   "not have (see 'can')\n");
+        } else if (pid == -RV9_PE_ISA) {
+            m_say(env, RV9_STDOUT, ": it needs instructions this CPU does "
+                                   "not have (see 'can')\n");
         } else if (pid == -RV9_PE_NOPUB) {
             m_say(env, RV9_STDOUT, ": it watches a publication nothing on "
                                    "this machine provides (see the log)\n");

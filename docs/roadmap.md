@@ -1154,6 +1154,20 @@ choice. In steps:
    `/sd0/cmd/`, each `build.conf` names the `files` it reads, and
    `mksystem.py --install` fetches what is missing over WiFi.
 
+Then **one module path across a federation**: a machine finds a command on
+a peer as it finds one on its card, and runs it if it can. In steps:
+
+1. **What a module needs, declared and checked — done**, design §72:
+   `devices`, `isa` (refused at fork), `uses`, `modules`, `files` (said,
+   never refused), `can <command>`, and `mksystem.py` warning from them.
+2. **Module signing**, before any module crosses the network.
+3. **Path entries on a peer, where the code moves**: a peer publishes a
+   catalog (name, revision, hash, needs, size), the first entry on the path
+   whose needs this machine meets wins, and `/f0/path` can pin a command to
+   a peer or a hash.
+4. **Running on a peer, where the work must move**: `listen` asked for on a
+   C3 runs on the P4, which has the microphone, the FPU and the memory.
+
 ## Working with two boards attached
 
 `/dev/ttyACM0` is not the C5. Enumeration order depends on which board was

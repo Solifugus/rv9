@@ -191,7 +191,13 @@ for dir in "$ROOT"/modules/*/; do
                         # extension. Such a module carries those opcodes
                         # to every board and must ask RV9_ISA_* first.
     groups=""           # which systems carry it; see --store above
-    files=""            # what it reads off the card, for tools/mksystem.py
+    files=""            # files it reads, by path: "/sd0/whistle.cact".
+                        # tools/mksystem.py puts the card's on the card
+    uses=""             # devices only some of its uses need: said, never
+                        # refused (devices= is what it cannot run without)
+    isa=""              # "fpu pie": what it cannot run without; refused
+                        # at fork on a CPU that lacks it
+    modules=""          # the modules it starts
     sources=""          # more .c files, relative to the module's directory:
                         # a vendored engine kept in a subdirectory of its own.
 
@@ -257,6 +263,10 @@ for dir in "$ROOT"/modules/*/; do
     add_tag ext_max      "$ext_max"
     add_tag placement    "$placement"
     for d in $devices;      do add_tag device     "$d"; done
+    for d in $uses;         do add_tag uses       "$d"; done
+    for m in $modules;      do add_tag module     "$m"; done
+    for f in $files;        do add_tag file       "$f"; done
+    add_tag isa          "$isa"
     for d in $exclusives;   do add_tag exclusive  "$d"; done
     for f in $failsafes;    do add_tag failsafe   "$f"; done
     for c in $capabilities; do add_tag capability "$c"; done

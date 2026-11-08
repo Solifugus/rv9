@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     15
+#define RV9_MODULE_ABI     16
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -155,10 +155,34 @@ typedef struct __attribute__((packed)) {
 #define RV9_MTAG_HEAP_IN      0x0015  /* u8:  RV9_HEAP_*: where the arena is */
 #define RV9_MTAG_EXT_MAX      0x0016  /* u32: external bytes it and all it
                                          starts may hold; see RV9_PE_BUDGET */
+#define RV9_MTAG_USES         0x0017  /* string: a device some of its uses
+                                         need; repeats. Never refused */
+#define RV9_MTAG_ISA          0x0018  /* u32: RV9_ISA_* it cannot run
+                                         without; see RV9_PE_ISA */
+#define RV9_MTAG_MODULE       0x0019  /* string: a module it starts; repeats */
+#define RV9_MTAG_FILE         0x001A  /* string: a file it reads; repeats */
 
 /* The highest tag this build understands. Anything above it is unknown,
    and unknown plus mandatory is a refusal. */
-#define RV9_MTAG_MAX          0x0016
+#define RV9_MTAG_MAX          0x001A
+
+/*
+ * What a module needs, said where the machine can read it.
+ *
+ * Two strengths, and the difference is the point:
+ *
+ *   RV9_MTAG_DEVICE, RV9_MTAG_EXCLUSIVE, RV9_MTAG_ISA
+ *       it cannot run without them. Admission refuses it, before it runs,
+ *       on a machine that lacks one: RV9_PE_NODEV, RV9_PE_ISA.
+ *   RV9_MTAG_USES, RV9_MTAG_MODULE, RV9_MTAG_FILE
+ *       said, never enforced. A device only some of its uses need --
+ *       `detect` opens /cam0 unless it is given a file -- and modules and
+ *       files that may arrive later, on a card put in or from a peer. The
+ *       `can` command reports them; nothing refuses on them.
+ *
+ * The devices every machine has (/f0, /pub0, /pipe, /uart0) go undeclared.
+ * RV9_SYS_NEEDS hands any module's manifest to a program that asks.
+ */
 
 /*
  * Publications, declared rather than conventional.
@@ -609,6 +633,7 @@ typedef struct {
 #define RV9_PE_NOPUB        15
 #define RV9_PE_MEANING      18   /* it watches a cell that means something else */
 #define RV9_PE_TOOLONG      19   /* its argument is longer than this board takes */
+#define RV9_PE_ISA          20   /* it needs instructions this CPU lacks (RV9_MTAG_ISA) */
 
 /* The CPU is not over-promised, but no placement of the real-time work lets
    every loop meet its deadline with this one added: response-time
@@ -1374,6 +1399,29 @@ _Static_assert(sizeof(rv9_cam_frame_t) == 16, "camera frame is 16 bytes");
 #define RV9_SYS_HAVE    14     /* name in, rv9_sys_device_t out; 1 or 0 */
 
 /*
+ * What a module says it needs, wherever this machine would find it.
+ *
+ * On entry `buf` holds a NUL-terminated module name. It is looked for as a
+ * fork would look -- the store, then the module path -- and on success
+ * `buf` is overwritten with an rv9_sys_needs_t: where it was found, and
+ * its manifest's entries as they are laid out in the module (see the
+ * registry above), as many as fit. Returns 1, or 0 when there is no such
+ * module here. `len` must be at least sizeof(rv9_sys_needs_t).
+ *
+ * The program walks the entries itself. This call reports; it checks
+ * nothing, so that `can` can say every reason a module would be refused,
+ * not only the first.
+ */
+#define RV9_SYS_NEEDS   15
+
+typedef struct __attribute__((packed)) {
+    char     from[64];      /* "" for the store, else the file it was found in */
+    uint16_t revision;
+    uint16_t len;           /* bytes of manifest entries that follow */
+    uint8_t  manifest[];    /* tag, len, value, padded to four; ends at END */
+} rv9_sys_needs_t;
+
+/*
  * What time it is, as opposed to how long the machine has been up.
  *
  * `set` is the field that matters. This board has no clock that survives
@@ -1826,6 +1874,15 @@ int rv9_mod_dir_init(void);
 const rv9_mod_entry_t *rv9_mod_dir_next(const rv9_mod_entry_t *prev);
 
 const rv9_mod_entry_t *rv9_mod_find(const char *name);
+
+/*
+ * A u32 from a module's manifest without loading it: from the store, or
+ * from its file on the module path, as far as the manifest goes. What lets
+ * a fork be refused on what the module says before 35 KB of it is read
+ * off a card into memory the machine may not have. False if it is not
+ * found or does not say.
+ */
+bool rv9_mod_peek_u32(const char *name, uint16_t tag, uint32_t *out);
 
 /*
  * Load a module into executable memory and take a link on it. Repeated

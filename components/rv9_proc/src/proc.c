@@ -29,6 +29,7 @@ _Static_assert((int)RV9_PROC_ERR_RUNAWAY  == RV9_PE_RUNAWAY,  "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_NOPUB    == RV9_PE_NOPUB,    "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_MEANING  == RV9_PE_MEANING,  "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_TOOLONG  == RV9_PE_TOOLONG,  "ABI drift");
+_Static_assert((int)RV9_PROC_ERR_ISA      == RV9_PE_ISA,      "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_UNSCHEDULABLE == RV9_PE_UNSCHEDULABLE,
                "ABI drift");
 _Static_assert((int)RV9_PROC_ERR_BUDGET   == RV9_PE_BUDGET,   "ABI drift");
@@ -131,8 +132,22 @@ const char *rv9_proc_strerror(rv9_proc_err_t err)
     case RV9_PROC_ERR_UNSCHEDULABLE:
         return "no placement meets every real-time deadline";
     case RV9_PROC_ERR_BUDGET:   return "over its memory budget";
+    case RV9_PROC_ERR_ISA:      return "it needs instructions this CPU lacks";
     default:                    return "unknown error";
     }
+}
+
+/* RV9_ISA_*: what this CPU has beyond a module's baseline. */
+static uint32_t cpu_isa(void)
+{
+    uint32_t isa = 0;
+#if SOC_CPU_HAS_PIE
+    isa |= RV9_ISA_PIE;
+#endif
+#if SOC_CPU_HAS_FPU
+    isa |= RV9_ISA_FPU;
+#endif
+    return isa;
 }
 
 static rv9_proc_t *find_locked(rv9_pid_t pid)
@@ -1345,12 +1360,7 @@ static int proc_limits_op(void *buf, uint32_t len)
     l.rt_reserve               = (uint32_t)rv9_heap_rt_reserve();
     l.budget_default           = PROC_BUDGET_DEFAULT;
     l.arg_max                  = CONFIG_RV9_ARG_MAX;
-#if SOC_CPU_HAS_PIE
-    l.isa                     |= RV9_ISA_PIE;
-#endif
-#if SOC_CPU_HAS_FPU
-    l.isa                     |= RV9_ISA_FPU;
-#endif
+    l.isa                      = cpu_isa();
 
     memcpy(buf, &l, len < sizeof(l) ? len : sizeof(l));
     return 1;
@@ -1945,6 +1955,22 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
                       "%u", module_name, (unsigned)arg_len,
                  (unsigned)CONFIG_RV9_ARG_MAX);
         return RV9_PROC_ERR_TOOLONG;
+    }
+
+    /* The instructions it said it cannot do without, read before it is
+       linked: from the card, linking is reading the whole module into
+       memory, and a refusal for want of an FPU should not first be one
+       for want of 35 KB. Every module is built for every board, so one
+       carrying the P4's opcodes reaches a C3 as easily; here it stops. */
+    uint32_t isa = 0;
+    if (rv9_mod_peek_u32(module_name, RV9_MTAG_ISA, &isa) &&
+        (isa & ~cpu_isa()) != 0) {
+        uint32_t lack = isa & ~cpu_isa();
+        ESP_LOGE(TAG, "admit '%s': it needs %s, which this CPU does not have",
+                 module_name,
+                 lack == (RV9_ISA_FPU | RV9_ISA_PIE) ? "the FPU and the vector unit"
+                 : (lack & RV9_ISA_FPU) ? "the FPU" : "the vector unit");
+        return RV9_PROC_ERR_ISA;
     }
 
     rv9_mod_entry_t *mod = NULL;

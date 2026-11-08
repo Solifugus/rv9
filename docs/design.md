@@ -7861,6 +7861,75 @@ Not done: a board with no card. The C3's left-out commands are simply not
 there. `/f0/cmd/` is on the module path too, so they could go on its
 flash volume, but not before the volume has room for that to matter.
 
+## 72. What a module needs, said where the machine can read it
+
+The first step towards one module path across a federation (roadmap, "one
+module path across a federation"). Before a machine can take a module from
+a peer, it has to be able to tell whether that module would run on it, and
+before this nothing could say. Fourteen modules declared their devices; the
+rest opened what they needed and failed when it was not there. `listen` on a
+C3 would have reached its first FPU instruction and faulted.
+
+**Two strengths of need**, and the difference is the point:
+
+| `build.conf` | manifest tag | meaning | enforced |
+|---|---|---|---|
+| `devices=`, `exclusives=` | `device`, `exclusive` | it cannot run without it | refused at fork, `RV9_PE_NODEV` (as before) |
+| `isa="fpu pie"` | `isa` | instructions it cannot do without | refused at fork, `RV9_PE_ISA` (new) |
+| `uses=` | `uses` | a device only some of what it does needs | never: `detect -f`, `say -o` and `listen -f` work without |
+| `modules=` | `module` | a module it starts | never: it may arrive later |
+| `files=` | `file` | a file it reads | never: the same |
+
+Devices and instructions are properties of the machine, and will not
+change while it runs, so admission refuses on them. Modules and files can
+arrive later, on a card put in or, one day, from a peer, so they are said
+and reported but nothing refuses on them. The devices every machine has
+(`/f0`, `/pub0`, `/pipe`, `/uart0`) go undeclared.
+
+The audit behind the declarations read every module's source for the
+devices it opens, then each one by hand for whether the open was a need or
+a default. `dir`'s `/r0` is only a default; `detect`'s `/cam0` is skipped
+when it is given a file; `mystify` runs for thirty seconds when there is no
+`/touch` to stop it. 32 modules gained declarations: 26 `devices`, 7 `uses`,
+`listen`'s `isa`, and the 8 that start another module. `detect`
+deliberately declares no `isa`: it asks for the vector unit and runs in
+plain C without it.
+
+**`can <command>`** is the question at the shell. It reads the manifest
+through a new `sysinfo` query, `RV9_SYS_NEEDS`, which finds the module as a
+fork would (store, then module path) and returns its manifest entries
+without checking anything. `can` then checks every one, not only the first
+that fails, and its status is the answer. ABI 16.
+
+**`tools/mksystem.py`** now warns from the declarations, per module, in
+place of the table of groups against drivers that step 3 of §71 guessed
+with: "snap: needs /cam0, which this firmware lacks", "listen: needs fpu
+pie, which esp32c5 lacks", "welcome: starts say, which this system does not
+carry". On the three systems it found what the group table could not:
+the C5's store carries `taps`, `wslop` and `wtap`, which need the touch
+panel it does not have, and the C3's carries the `greet` fixture, which
+needs `/term`.
+
+On the boards: on the P4 `can listen`, `detect`, `say`, `snap` and
+`welcome` all answer yes. On the C5, with `listen` put on its card, `can
+listen` names the FPU and vector unit, the missing model and the missing
+external memory, and running it is refused with "it needs the FPU and the
+vector unit". `taps` is refused for `/touch`. On the C3, `greet` for
+`/term`, while `fetch` and `rshd` answer yes.
+
+Two things went wrong on the way:
+
+- **`can`'s stack.** Looking a module up on the card is file I/O, and it
+  runs on the asking program's stack, as §67 found for the shell. `can`
+  was given 2 KB and peaked at 2,300 bytes. The overflow ran into the heap
+  block below it and was found by the next heap walk, which panicked in
+  `free`'s query. `can` has 3.5 KB.
+- **The order of refusals.** The instruction-set check was first written
+  after linking, and linking a module from the card means reading all of
+  it into executable memory. `listen` on the C5 was therefore refused for
+  want of 35 KB, not for want of an FPU. The check now reads the manifest
+  alone (`rv9_mod_peek_u32`) before anything is linked.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has
