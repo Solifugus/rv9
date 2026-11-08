@@ -16,7 +16,9 @@ managed_components/
 # "target: esp32c5" with no dependencies in it at all: a lock file pinning
 # nothing, naming the wrong chip.
 #
-# Versions are pinned where that cannot happen instead: exactly, in
+# Since then each build directory keeps its own lock (CMakeLists.txt), so
+# none is at the root to track. Versions are pinned where that cannot
+# matter instead: exactly, in
 # main/idf_component.yml, which is tracked and does not change with whichever
 # board was built last.
 dependencies.lock

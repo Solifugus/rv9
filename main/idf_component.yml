@@ -13,15 +13,18 @@
 # board that does not need it would be changing the working board to suit
 # the new one.
 #
+# And gated to a firmware with the network (CONFIG_RV9_DRV_NET). Without
+# it nothing calls esp_hosted, but it starts itself, and it would still
+# reset the radio's co-processor at every boot.
+#
 # Together they make esp_wifi's own API answer on a chip with no radio, which
 # is why components/rv9_io/src/drv_net.c needs no P4 branch: it was already
 # written against esp_wifi, and that is the whole argument for a stable
 # interface.
 # PINNED EXACTLY, not with a caret, and dependencies.lock is NOT tracked --
-# see the note in .gitignore. The lock is per-target state in one file at the
-# project root, and a repository that builds two chips out of one directory
-# rewrites it every time the other board is checked. So the pin lives here,
-# where it cannot flip.
+# see the note in .gitignore. A lock is per-target state, so each build
+# directory keeps its own (CMakeLists.txt), and none of them is the
+# project's. So the pin lives here, where it is the same for all of them.
 #
 # Exact rather than ">=" because the far end of this link is firmware already
 # flashed on a companion chip. The C6 on this board reports its own version as
@@ -34,7 +37,9 @@ dependencies:
     version: "3.0.9"
     rules:
       - if: "target == esp32p4"
+      - if: "$CONFIG{RV9_DRV_NET} == True"
   espressif/esp_wifi_remote:
     version: "1.6.5"
     rules:
       - if: "target == esp32p4"
+      - if: "$CONFIG{RV9_DRV_NET} == True"

@@ -1,0 +1,9 @@
+# An ESP32-C3 SuperMini: a federation node for motors and sensors.
+#
+# No panel and no card. The network, the pins and real-time control. It
+# still uses the C5's pin assignments until its own wiring is decided.
+
+target="esp32c3"
+drivers="ramdisk net ssh gpio pwm adc tsens i2c"
+selftest="yes"
+store="base net pins rt"

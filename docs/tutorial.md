@@ -66,6 +66,15 @@ So `./tools/flash_modules.sh` on its own is usually all you need. Changing a
 command, or adding one, does not touch the firmware. Later on you will fetch
 a module over WiFi and run it without flashing anything at all.
 
+For a board other than the P4, or for less than everything, build its
+**system** instead. `systems/c5.sys` says which chip, which devices and
+which groups of commands, and one command builds the firmware and store for
+it in `build-c5/`, reports their sizes, and with `--flash` writes both:
+
+```sh
+./tools/mksystem.py systems/c5.sys --flash /dev/serial/by-id/usb-Espressif_...
+```
+
 ```sh
 idf.py -p /dev/ttyACM0 monitor          # the console, on USB serial
 ```

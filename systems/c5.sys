@@ -1,0 +1,10 @@
+# The Waveshare ESP32-C5-LCD-1.47: the panel, the microSD socket and the
+# radio.
+#
+# No touch, microphones, speaker or camera, so no /touch, /au0, /cam0 or
+# /tts0, and no programs for them in the store.
+
+target="esp32c5"
+drivers="lcdcon svgwin sdcard ramdisk net ssh gpio pwm adc tsens i2c"
+selftest="yes"
+store="base net pins rt screen"

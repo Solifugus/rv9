@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+# The dependency lock is per build, not per project: each build directory is
+# one system on one chip (tools/mksystem.py), and one lock at the root was
+# rewritten by whichever of them was built last. See .gitignore.
+idf_build_set_property(DEPENDENCIES_LOCK "${CMAKE_BINARY_DIR}/dependencies.lock")
+
 project(rv9)
 
 # The layering check is not optional and not a lint step you can skip. It is

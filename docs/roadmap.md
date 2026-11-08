@@ -1147,7 +1147,9 @@ choice. In steps:
 2. **Module groups, and a store built from a list — done**, §71:
    `groups=` in every `build.conf`, `build_modules.sh --store`, and
    descriptors chosen from the firmware's drivers.
-3. `tools/mksystem.py` and a system file per board, with a size report.
+3. **A system file per board — done**, §71: `systems/p4.sys`, `c5.sys`,
+   `c3.sys`, and `tools/mksystem.py` builds firmware and store for one,
+   reports sizes and flashes them. `esp_hosted` goes with the network.
 4. The card's contents, and putting them there.
 
 ## Working with two boards attached

@@ -16,7 +16,8 @@
 #
 #     tools/flash_modules.sh /dev/ttyACM0 build-c3/sdkconfig
 #
-# Without it, the C3 got the P4's table read for it.
+# Without it, the C3 got the P4's table read for it. A third argument names
+# the store image, for a system built by tools/mksystem.py.
 
 set -euo pipefail
 
@@ -24,6 +25,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT="${1:-/dev/ttyACM0}"
 CFG="${2:-$ROOT/sdkconfig}"
 [[ "$CFG" = /* ]] || CFG="$ROOT/$CFG"
+STORE="${3:-$ROOT/build/modules.bin}"
 
 CSV="$ROOT/partitions.csv"
 if [[ -f "$CFG" ]]; then
@@ -39,9 +41,9 @@ OFFSET=$(awk -F',' '/^modules,/ { gsub(/ /, "", $4); print $4 }' "$CSV")
 }
 echo "store -> $OFFSET, per $(basename "$CSV")" 
 
-[[ -f "$ROOT/build/modules.bin" ]] || {
-    echo "error: build/modules.bin missing. Run tools/build_modules.sh first." >&2
+[[ -f "$STORE" ]] || {
+    echo "error: $STORE missing. Run tools/build_modules.sh first." >&2
     exit 1
 }
 
-exec python -m esptool --port "$PORT" write-flash "$OFFSET" "$ROOT/build/modules.bin"
+exec python -m esptool --port "$PORT" write-flash "$OFFSET" "$STORE"

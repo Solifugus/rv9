@@ -7780,6 +7780,53 @@ a module with no `groups`.
 and 55 KB, against 121 and 193 KB. That includes `tests`, since that
 firmware still has the suites.
 
+### Step 3: a system file per board
+
+A system is one file in `systems/`, shell-shaped like `build.conf`:
+
+```
+target="esp32c3"
+drivers="ramdisk net ssh gpio pwm adc tsens i2c"
+selftest="yes"
+store="base net pins rt"
+```
+
+`tools/mksystem.py systems/c3.sys` writes `build-c3/system.defaults`, with
+every `CONFIG_RV9_DRV_*` on or off and the self-tests, and builds the
+firmware from `sdkconfig.defaults`, the chip's own defaults and that. It
+then builds the store for that firmware, checks both against their
+partitions, and reports. `--flash PORT` writes both, and `--report` reports
+on the last build. A driver that is not named is off: the list is what the
+board has, not what to remove from everything. A name no Kconfig offers
+stops it, and so does `ssh` without `net`. When the sdkconfig that comes
+out is not what was asked for, because Kconfig refused something, that
+stops it too. A changed system file starts the sdkconfig again (the old one
+is kept as `sdkconfig.old`), since defaults only fill in what an sdkconfig
+does not already say.
+
+The report warns when the store carries a group whose devices the firmware
+lacks (`sound` without `audio`), and when a chip other than the P4 is given
+audio, the camera or `/tts0`, which are built there but never attach.
+
+| system | firmware | store | internal RAM, static | for the card |
+|---|---|---|---|---|
+| `p4`: everything | 1,797 KB of 4 MB | 189 KB, 121 modules | 130 of 648 KB | none |
+| `c5`: panel, card, radio | 1,232 KB of 1.5 MB | 114 KB, 109 modules | 167 of 314 KB | 12 modules |
+| `c3`: radio and pins | 1,030 KB of 1.5 MB | 74 KB, 92 modules | 136 of 314 KB | 29 modules |
+| P4, core only, no tests | 296 KB | 38 KB, 39 modules | 101 of 648 KB | 82 modules |
+
+`p4` is the same firmware as a plain `idf.py build`, byte for byte except
+the build stamp. On the boards, the C3 comes up in 0.6 s with 13 devices and
+144 KB free, and no longer looks for a panel, a card or a touch controller
+it does not have. The C5 comes up with its panel, card and WiFi, 54 KB free.
+
+Two things the step needed besides the tool. The P4's radio link,
+`esp_hosted` and `esp_wifi_remote`, now comes in only with
+`CONFIG_RV9_DRV_NET` (a Kconfig rule in `main/idf_component.yml`). It was
+the reason the all-off P4 firmware was 573 KB: without it, 296. And each
+build directory keeps its own `dependencies.lock` (`CMakeLists.txt`), so
+building one system no longer rewrites another's.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

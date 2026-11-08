@@ -17,6 +17,7 @@
 #                             (CONFIG_RV9_DRV_*), and the `tests` group goes
 #                             in when it has the self-tests, which fork them.
 #                             Without it, every descriptor goes in.
+#   --out FILE                the store image; build/modules.bin by default
 #
 # What is built but left out stays in build/modules, for the card.
 
@@ -26,11 +27,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SELECT="all"
 CFG=""
+STORE="$ROOT/build/modules.bin"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --store)     SELECT="$2"; shift 2 ;;
         --sdkconfig) CFG="$2"; shift 2 ;;
-        *) echo "usage: $0 [--store \"groups or names\"] [--sdkconfig FILE]" >&2
+        --out)       STORE="$2"; shift 2 ;;
+        *) echo "usage: $0 [--store \"groups or names\"] [--sdkconfig FILE] [--out FILE]" >&2
            exit 2 ;;
     esac
 done
@@ -69,7 +72,6 @@ wanted_mod() {
 in_store=0
 left_out=""
 OUT="$ROOT/build/modules"
-STORE="$ROOT/build/modules.bin"
 
 CC=riscv32-esp-elf-gcc
 OBJCOPY=riscv32-esp-elf-objcopy
@@ -100,7 +102,7 @@ CFLAGS=(
 )
 LDFLAGS=(-nostdlib -nostartfiles -T"$ROOT/modules/module.ld" -Wl,--gc-sections)
 
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$(dirname "$STORE")"
 : > "$STORE"
 
 # The probe link, for the position-independence check below: the same script
