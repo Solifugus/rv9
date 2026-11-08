@@ -1,0 +1,11 @@
+menu "RV-9 voice"
+
+    config RV9_DRV_TTS
+        bool "/tts0: text to speech (CMU Flite, 757 KB, P4 only)"
+        default y
+        help
+            Flite and its English voice data. Only the P4 has the external
+            memory and the FPU for it; elsewhere the driver alone is built
+            and the device does not attach.
+
+endmenu

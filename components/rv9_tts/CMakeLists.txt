@@ -9,10 +9,13 @@
 # single precision (flite_mlsa.c), and opening a voice RV-9 has already
 # read into memory (flite_file.c). The engine is compiled -O2, as Whistle's
 # is, whatever the firmware is.
-set(TTS_SRCS "src/drv_tts.c")
+set(TTS_SRCS "")
 set(TTS_INC  "include")
+if(CONFIG_RV9_DRV_TTS)
+    list(APPEND TTS_SRCS "src/drv_tts.c")
+endif()
 
-if("${IDF_TARGET}" STREQUAL "esp32p4")
+if(CONFIG_RV9_DRV_TTS AND "${IDF_TARGET}" STREQUAL "esp32p4")
     set(F "${CMAKE_CURRENT_LIST_DIR}/flite")
     set(FL_SRCS "")
     foreach(d utils regex hrg stats speech lexicon synth cg wavesynth)
@@ -37,7 +40,7 @@ idf_component_register(SRCS ${TTS_SRCS}
                        INCLUDE_DIRS ${TTS_INC}
                        REQUIRES rv9_io rv9_kal rv9_module heap esp_timer)
 
-if("${IDF_TARGET}" STREQUAL "esp32p4")
+if(CONFIG_RV9_DRV_TTS AND "${IDF_TARGET}" STREQUAL "esp32p4")
     target_include_directories(${COMPONENT_LIB} PRIVATE
         "${F}/src/cg" "${F}/lang/usenglish" "${F}/lang/cmulex")
     target_compile_definitions(${COMPONENT_LIB} PRIVATE

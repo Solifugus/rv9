@@ -281,6 +281,17 @@ running because a program exited is a bad surprise. Declaring a failsafe
 value for a PWM channel is therefore refused at admission: it would be a
 promise that expires at the moment it matters.
 
+**Which drivers a firmware has** is chosen when it is built:
+`CONFIG_RV9_DRV_<NAME>` for `LCDCON`, `SVGWIN`, `TOUCH`, `SDCARD`, `RAMDISK`,
+`NET`, `GPIO`, `PWM`, `ADC`, `TSENS`, `I2C`, `AUDIO`, `CAMERA`, `TTS` and
+`SSH` (which needs `NET`), all on by default (menuconfig, "RV-9 devices").
+The console (`/uart0`), `/f0`, `/pub0` and pipes are always built, because
+the system uses them itself. A driver left out is not compiled, and a
+descriptor for it attaches nothing: the boot log says "not in this
+firmware", and `have` says no. Without `NET` there is no `rshd`, `sshd` or
+network clock. The self-test suites assume every device is there. On the
+P4, all of them off is 573 KB of firmware instead of 1.8 MB (design §71).
+
 ## 5. The module format
 
 A module is one blob: a 40-byte header, a name, an optional manifest (§6),

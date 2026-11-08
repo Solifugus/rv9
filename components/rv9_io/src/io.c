@@ -173,15 +173,22 @@ rv9_io_err_t rv9_io_attach(const rv9_devdesc_t *desc)
 
     if (find_dev(name)) return RV9_IO_ERR_EXISTS;
 
+    /*
+     * Not an error: a firmware is built with the devices its system names
+     * (Kconfig, "RV-9 devices"), and a store may describe more than that.
+     * The device is simply not here, which is what `have` then says.
+     */
     const rv9_filemgr_t *fm = find_filemgr(fmname);
     if (fm == NULL) {
-        ESP_LOGE(TAG, "%s: no file manager '%s'", name, fmname);
+        ESP_LOGI(TAG, "%s: not in this firmware (no file manager '%s')",
+                 name, fmname);
         return RV9_IO_ERR_NOTFOUND;
     }
 
     const rv9_driver_t *drv = find_driver(drvname);
     if (drv == NULL) {
-        ESP_LOGE(TAG, "%s: no driver '%s'", name, drvname);
+        ESP_LOGI(TAG, "%s: not in this firmware (no driver '%s')",
+                 name, drvname);
         return RV9_IO_ERR_NOTFOUND;
     }
 

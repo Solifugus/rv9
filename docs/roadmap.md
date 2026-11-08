@@ -1137,7 +1137,16 @@ used. The agreed order:
 
 After that, **system images**: a way to describe a platform and a purpose
 (this board, these devices, these commands) and build the firmware, the
-store and the card's contents for it.
+store and the card's contents for it. Flite stays in the P4's firmware: its
+English data holds 4,019 absolute pointers, a module cannot, and since §70
+it costs no RAM while nobody speaks. Whether a board gets it is the image's
+choice. In steps:
+
+1. **A switch per driver — done**, design §71: `CONFIG_RV9_DRV_<NAME>`, all
+   on by default. All off is 573 KB of firmware on the P4, not 1.8 MB.
+2. Module groups, and a store built from a list.
+3. `tools/mksystem.py` and a system file per board, with a size report.
+4. The card's contents, and putting them there.
 
 ## Working with two boards attached
 

@@ -132,6 +132,10 @@ rv9_io_err_t rv9_i2c_bus_claim(uint32_t khz, i2c_master_bus_handle_t *out)
     return RV9_IO_OK;
 }
 
+/* ---- /i2c0, the device programs open, if this firmware has it ---- */
+
+#if CONFIG_RV9_DRV_I2C
+
 static rv9_io_err_t i2c_init(rv9_dev_t *dev)
 {
     /*
@@ -276,3 +280,5 @@ rv9_io_err_t rv9_drv_i2c_register(void)
 {
     return rv9_io_register_driver(&i2c);
 }
+
+#endif /* CONFIG_RV9_DRV_I2C */

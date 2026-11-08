@@ -251,30 +251,66 @@ static void io_bringup(void)
 
     REGISTER(rv9_scf_register());
     REGISTER(rv9_rbf_register());
+#if CONFIG_RV9_DRV_NET
     REGISTER(rv9_nfm_register());
+#endif
+#if CONFIG_RV9_DRV_GPIO || CONFIG_RV9_DRV_PWM || CONFIG_RV9_DRV_ADC || CONFIG_RV9_DRV_TSENS
     REGISTER(rv9_pio_register());
+#endif
     REGISTER(rv9_pfm_register());
     REGISTER(rv9_pipefm_register());
+#if CONFIG_RV9_DRV_I2C
     REGISTER(rv9_ifm_register());
+#endif
     REGISTER(rv9_drv_uart_register());
+#if CONFIG_RV9_DRV_LCDCON
     REGISTER(rv9_drv_lcdcon_register());
+#endif
+#if CONFIG_RV9_DRV_RAMDISK
     REGISTER(rv9_drv_ramdisk_register());
+#endif
     REGISTER(rv9_drv_flashdisk_register());
+#if CONFIG_RV9_DRV_SDCARD
     REGISTER(rv9_drv_sdcard_register());
+#endif
+#if CONFIG_RV9_DRV_NET
     REGISTER(rv9_drv_net_register());
+#endif
+#if CONFIG_RV9_DRV_GPIO
     REGISTER(rv9_drv_gpio_register());
+#endif
+#if CONFIG_RV9_DRV_PWM
     REGISTER(rv9_drv_pwm_register());
+#endif
+#if CONFIG_RV9_DRV_ADC
     REGISTER(rv9_drv_adc_register());
+#endif
+#if CONFIG_RV9_DRV_TSENS
     REGISTER(rv9_drv_tsens_register());
+#endif
+#if CONFIG_RV9_DRV_SVGWIN
     REGISTER(rv9_drv_svgwin_register());
+#endif
+#if CONFIG_RV9_DRV_TOUCH
     REGISTER(rv9_drv_touch_register());
+#endif
+#if CONFIG_RV9_DRV_AUDIO
     REGISTER(rv9_drv_audio_register());
+#endif
+#if CONFIG_RV9_DRV_CAMERA
     REGISTER(rv9_drv_camera_register());
+#endif
+#if CONFIG_RV9_DRV_TTS
     REGISTER(rv9_drv_tts_register());
+#endif
     REGISTER(rv9_drv_pubmem_register());
     REGISTER(rv9_drv_pipemem_register());
+#if CONFIG_RV9_DRV_I2C
     REGISTER(rv9_drv_i2c_register());
+#endif
+#if CONFIG_RV9_DRV_SSH
     REGISTER(rv9_drv_ssh_register());
+#endif
 
     #undef REGISTER
 
@@ -298,6 +334,7 @@ static void io_bringup(void)
     rv9_io_set_system_std("/uart0", "/uart0");
 }
 
+#if CONFIG_RV9_DRV_LCDCON
 /* Write the banner to the panel from kernel context, through the same
    stack a module would use. */
 static void term_banner(void)
@@ -317,6 +354,7 @@ static void term_banner(void)
     rv9_io_close(t);
     ESP_LOGI(TAG, "banner written to /term");
 }
+#endif
 
 /*
  * init: run a shell, and keep running one.
@@ -529,11 +567,16 @@ typedef struct {
 #define SERVICE_BACKOFF_MAX 60000
 #define SERVICE_STAYED_UP   60000  /* this long and a failure is a new one */
 
+/* The network's two only where there is a network to listen on. */
 static service_t s_services[] = {
+#if CONFIG_RV9_DRV_NET
     { .name = "rshd",  .priority = RV9_PRIO_LOW,
       .says = "rshd listening on port 2300 (nc <ip> 2300)" },
+#endif
+#if CONFIG_RV9_DRV_SSH
     { .name = "sshd",  .priority = RV9_PRIO_LOW,
       .says = "sshd listening on port 22 (ssh <user>@<ip>)" },
+#endif
     { .name = "shell", .priority = RV9_PRIO_NORMAL,
       .says = "shell on /uart0 (log quiet while it runs)" },
 };
@@ -551,7 +594,9 @@ static void init_shell_loop(void)
      * keeps asking, and a board with no network simply never learns the
      * time, which is the truth and is reported as such.
      */
+#if CONFIG_RV9_DRV_NET
     rv9_clock_start();
+#endif
 
     for (;;) {
         uint64_t now = rv9_time_ms();
@@ -978,7 +1023,9 @@ static void rv9_init_task(void *arg)
 
     io_bringup();
     heap_mark("after bringup");
+#if CONFIG_RV9_DRV_LCDCON
     term_banner();
+#endif
 
     selftests(boot_cls);
 

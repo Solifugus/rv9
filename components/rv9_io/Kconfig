@@ -1,0 +1,65 @@
+menu "RV-9 devices"
+
+    comment "Always built: the console (/uart0), /f0, /pub0 and pipes. The system uses them itself."
+
+    config RV9_DRV_LCDCON
+        bool "/term: the panel as a text console"
+        default y
+
+    config RV9_DRV_SVGWIN
+        bool "/w0: the panel as a window you write SVG to"
+        default y
+
+    config RV9_DRV_TOUCH
+        bool "/touch: the panel's touch controller"
+        default y
+
+    config RV9_DRV_SDCARD
+        bool "/sd0: the microSD card"
+        default y
+
+    config RV9_DRV_RAMDISK
+        bool "/r0: a volume in RAM"
+        default y
+
+    config RV9_DRV_NET
+        bool "/n0: WiFi and TCP"
+        default y
+        help
+            The network file manager and the WiFi driver under it. Without
+            it there is no SSH, no rshd, no clock from the network and no
+            fetch.
+
+    config RV9_DRV_GPIO
+        bool "/gpio: pins"
+        default y
+
+    config RV9_DRV_PWM
+        bool "/pwm0: pulse-width outputs"
+        default y
+
+    config RV9_DRV_ADC
+        bool "/adc0: analogue inputs"
+        default y
+
+    config RV9_DRV_TSENS
+        bool "/tsens: the chip's temperature"
+        default y
+
+    config RV9_DRV_I2C
+        bool "/i2c0: the two-wire bus, for programs"
+        default y
+        help
+            The device programs open. The bus underneath is built whenever
+            anything needs it -- audio, the camera and touch talk to their
+            chips over it -- whether or not this is.
+
+    config RV9_DRV_AUDIO
+        bool "/au0: microphones and speaker"
+        default y
+
+    config RV9_DRV_CAMERA
+        bool "/cam0: the camera"
+        default y
+
+endmenu

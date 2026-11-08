@@ -7709,6 +7709,53 @@ across the unload itself. Twenty `say`s timed to arrive just as the
 three seconds ran out all spoke, some reading the voice again and some
 finding it still there.
 
+## 71. Choosing what a firmware has
+
+Every board got every driver. Each looked for its hardware at boot and
+declined if it was not there, and that was all the choosing there was. The
+first step towards system images (roadmap, "Less in the firmware") is a
+switch per driver, so that a firmware has what its system needs and
+nothing else:
+
+| `CONFIG_RV9_DRV_` | device | brings with it |
+|---|---|---|
+| `LCDCON`, `SVGWIN`, `TOUCH` | `/term`, `/w0`, `/touch` | the panel driver; the font for the first two, the rasteriser for `/w0` |
+| `SDCARD` | `/sd0` | on the C5, the panel's SPI bus, which the card shares |
+| `NET` | `/n0` | WiFi, lwIP, the P4's link to its radio, `rshd`, the clock |
+| `SSH` | `/ssh0`, `/sshcfg` | needs `NET`; `sshd` |
+| `GPIO`, `PWM`, `ADC`, `TSENS` | `/gpio`, `/pwm0`, `/adc0`, `/tsens` | the `pio` file manager, for any of them |
+| `I2C` | `/i2c0` | the `ifm` file manager. The bus itself is built whenever audio, the camera or touch needs it |
+| `AUDIO`, `CAMERA`, `TTS`, `RAMDISK` | `/au0`, `/cam0`, `/tts0`, `/r0` | Flite, with `TTS` |
+
+The console, `/f0`, `/pub0` and pipes are not switches. The system itself
+uses them for the shell, the module path, publication and the shell's pipes.
+
+All on is the default, and it builds to the same firmware as before. All
+off, on the P4:
+
+| | everything | the always-built core |
+|---|---|---|
+| firmware | 1,796 KB | 573 KB |
+| internal memory free at the prompt | 353 KB | 456 KB |
+| boot to prompt | 4.2 s | 2.6 s |
+
+Most of the difference is the network: WiFi, lwIP and the SDIO link to the
+P4's radio are about 1 MB of firmware and 100 KB of internal memory. Flite
+is most of the rest.
+
+A descriptor for a device the firmware does not have now attaches nothing
+and says so as information ("not in this firmware"), not as an error. With
+switches, that is an expected situation, and the store is still the same
+for every board until step 2 builds one per system.
+
+Found by building with everything off, and fixed: the `/term` banner was
+written whether or not there was a `/term`, and `rshd`, `sshd` and the
+network clock were started whether or not there was a network. Still to
+do: the P4's radio link (`esp_hosted`) still resets its co-processor at
+boot without `NET`. It comes in as a managed component and starts itself,
+so leaving it out needs the component list chosen per system too. That is
+step 3's job.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

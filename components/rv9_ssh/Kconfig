@@ -1,0 +1,8 @@
+menu "RV-9 SSH"
+
+    config RV9_DRV_SSH
+        bool "/ssh0: SSH sessions"
+        default y
+        depends on RV9_DRV_NET
+
+endmenu

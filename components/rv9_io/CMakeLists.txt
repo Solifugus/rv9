@@ -1,12 +1,41 @@
-# Everything that does not depend on which chip this is.
+# Everything that does not depend on which chip this is, and that the
+# system uses itself: the console, /f0, publication and pipes.
 set(RV9_IO_SRCS "src/io.c" "src/claim.c" "src/scf.c" "src/drv_uart.c"
-                "src/rbf.c" "src/drv_ramdisk.c"
-                "src/drv_flashdisk.c"
-                "src/pio.c" "src/drv_gpio.c" "src/console.c" "src/drv_pwm.c"
-                "src/drv_adc.c" "src/drv_tsens.c"
+                "src/rbf.c" "src/drv_flashdisk.c" "src/console.c"
                 "src/pfm.c" "src/drv_pubmem.c"
-                "src/pipefm.c" "src/drv_pipemem.c"
-                "src/ifm.c" "src/drv_i2c.c" "src/drv_audio.c")
+                "src/pipefm.c" "src/drv_pipemem.c")
+
+#
+# The rest is chosen, one device at a time (Kconfig, "RV-9 devices"): a
+# board without a camera, or a system that does not want one, leaves its
+# driver out of the firmware altogether. Shared pieces come in with
+# whatever needs them.
+#
+macro(rv9_if opt)
+    if(${opt})
+        list(APPEND RV9_IO_SRCS ${ARGN})
+    endif()
+endmacro()
+
+rv9_if(CONFIG_RV9_DRV_RAMDISK "src/drv_ramdisk.c")
+rv9_if(CONFIG_RV9_DRV_GPIO    "src/drv_gpio.c")
+rv9_if(CONFIG_RV9_DRV_PWM     "src/drv_pwm.c")
+rv9_if(CONFIG_RV9_DRV_ADC     "src/drv_adc.c")
+rv9_if(CONFIG_RV9_DRV_TSENS   "src/drv_tsens.c")
+rv9_if(CONFIG_RV9_DRV_AUDIO   "src/drv_audio.c")
+rv9_if(CONFIG_RV9_DRV_I2C     "src/ifm.c")
+
+# The file manager behind /gpio, /pwm0, /adc0 and /tsens.
+if(CONFIG_RV9_DRV_GPIO OR CONFIG_RV9_DRV_PWM OR CONFIG_RV9_DRV_ADC OR
+   CONFIG_RV9_DRV_TSENS)
+    list(APPEND RV9_IO_SRCS "src/pio.c")
+endif()
+
+# The bus, for /i2c0 and for the chips audio, the camera and touch talk to.
+if(CONFIG_RV9_DRV_I2C OR CONFIG_RV9_DRV_AUDIO OR CONFIG_RV9_DRV_CAMERA OR
+   CONFIG_RV9_DRV_TOUCH)
+    list(APPEND RV9_IO_SRCS "src/drv_i2c.c")
+endif()
 
 set(RV9_IO_REQ rv9_kal rv9_module rv9_proc driver esp_driver_i2c
                esp_driver_usb_serial_jtag esp_timer
@@ -31,7 +60,7 @@ set(RV9_IO_REQ rv9_kal rv9_module rv9_proc driver esp_driver_i2c
 # registers, the descriptor finds it, and the device fails to attach -- no
 # driver, no device, and `have net` says no.
 #
-list(APPEND RV9_IO_SRCS "src/nfm.c" "src/drv_net.c")
+rv9_if(CONFIG_RV9_DRV_NET "src/nfm.c" "src/drv_net.c")
 list(APPEND RV9_IO_REQ lwip esp_netif esp_wifi esp_event)
 
 #
@@ -39,7 +68,7 @@ list(APPEND RV9_IO_REQ lwip esp_netif esp_wifi esp_event)
 # the P4, which is the only one with the MIPI receiver, image processor and
 # JPEG engine it drives -- see src/drv_camera.c.
 #
-list(APPEND RV9_IO_SRCS "src/drv_camera.c")
+rv9_if(CONFIG_RV9_DRV_CAMERA "src/drv_camera.c")
 
 if("${IDF_TARGET}" STREQUAL "esp32p4")
     list(APPEND RV9_IO_REQ esp_driver_cam esp_driver_isp esp_driver_jpeg)
@@ -73,15 +102,28 @@ endif()
 # drv_lcdcon.c, which had the C5's 172x320 written into it while claiming
 # to ask the panel -- see the note there.
 #
-list(APPEND RV9_IO_SRCS "src/drv_lcdcon.c" "src/font.c" "src/raster.c"
-                        "src/drv_svgwin.c" "src/drv_touch.c")
+rv9_if(CONFIG_RV9_DRV_LCDCON "src/drv_lcdcon.c")
+rv9_if(CONFIG_RV9_DRV_SVGWIN "src/drv_svgwin.c" "src/raster.c")
+rv9_if(CONFIG_RV9_DRV_TOUCH  "src/drv_touch.c")
+if(CONFIG_RV9_DRV_LCDCON OR CONFIG_RV9_DRV_SVGWIN)
+    list(APPEND RV9_IO_SRCS "src/font.c")
+endif()
 list(APPEND RV9_IO_REQ esp_lcd esp_hw_support)
 
+# The panel, for whatever draws on it or touches it -- and on the boards
+# whose card shares its SPI bus, for the card.
 if("${IDF_TARGET}" STREQUAL "esp32p4")
-    list(APPEND RV9_IO_SRCS "src/panel_dsi.c" "src/drv_sdmmc.c")
+    if(CONFIG_RV9_DRV_LCDCON OR CONFIG_RV9_DRV_SVGWIN OR CONFIG_RV9_DRV_TOUCH)
+        list(APPEND RV9_IO_SRCS "src/panel_dsi.c")
+    endif()
+    rv9_if(CONFIG_RV9_DRV_SDCARD "src/drv_sdmmc.c")
     list(APPEND RV9_IO_REQ esp_driver_sdmmc sdmmc)
 else()
-    list(APPEND RV9_IO_SRCS "src/panel.c" "src/drv_sdspi.c")
+    if(CONFIG_RV9_DRV_LCDCON OR CONFIG_RV9_DRV_SVGWIN OR CONFIG_RV9_DRV_TOUCH OR
+       CONFIG_RV9_DRV_SDCARD)
+        list(APPEND RV9_IO_SRCS "src/panel.c")
+    endif()
+    rv9_if(CONFIG_RV9_DRV_SDCARD "src/drv_sdspi.c")
     list(APPEND RV9_IO_REQ esp_driver_sdspi sdmmc)
 endif()
 
