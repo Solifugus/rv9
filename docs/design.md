@@ -8125,6 +8125,52 @@ ahead of `/peer/pc/b/cmd/`: `twin`, built for the FPU in `a` and plain in
 in `a` and the vector unit in `b`, was refused for `/cam0`, and `can bothbad`
 named `a`. `listen` from the P4 is passed over and refused as before.
 
+### 3e: catalogs and pins
+
+**Catalogs.** `/peer/<name>/.../cmd` opened as a directory is a GET of the
+`catalog` beside it, each line made the entry `<name>.mod` with its size,
+so `dir /peer/p4/cmd` lists what the path would find on the P4. A release
+on a PC carries a `catalog` the same way, which packaging will write.
+Catalog bytes read past a full caller's buffer are kept for its next read,
+since `dir` reads sixteen entries at a time and a 64-byte chunk can end
+several lines.
+
+**Pins**, `/f0/pins`, one name a line, a place and a hash in either order.
+A place (a peer's name, meaning `/peer/<name>/`, or a prefix of path
+entries) narrows the search to entries under it, and nothing outside is
+tried, which is the point of saying it. A hash is a prefix of the file's
+SHA-256, 8 to 64 hex digits, so `sha256sum` on the PC gives it, and it is
+checked on the bytes read, every time they are read: a build the place
+finds that is not the one named is refused, not passed over, since a hash
+names one thing and looking further would find a different one. The hash
+is taken in a background task, as a signature is checked, off the forking
+program's stack; the shell's peak after a pinned start was 2,416 of 3,584.
+
+**The path as it is now.** A module found on the path was kept as found
+until restart, so a change to `/f0/path` reached only names not used yet,
+which would have made a pin a promise kept after the next boot. Now each
+entry keeps a CRC of `/f0/path` and `/f0/pins` as they were when it was
+found, and a start that finds them changed searches again, unless the
+module is running. The entry is reused, never freed, since others may hold
+a pointer to it; one no longer found has its head dropped and is no longer
+a candidate. The cost is reading two small files on `/f0` at each start of
+a module from the path.
+
+**A bug in the shell, found here.** `dir /peer/p4/cmd | count` opened
+`"/peer/p4/cmd "`: a stage's argument kept the space before the bar. A
+card's file managers never noticed; `/peer` sent it as `GET /cmd  HTTP/1.0`,
+which a PC's server answers with a 400, and the peer was then passed over
+for a minute. The shell now trims before the bar, and `/peer` refuses a
+path with a space in it rather than asking for it.
+
+Measured on the C5, with a PC serving `a/` and `b/`: `dir /peer/p4/cmd`
+lists 125, `dir /peer/pc/a/cmd` 4. `twin` ran from `b`; pinned to
+`/peer/pc/a/` it was refused for the FPU, at once and without a restart;
+pinned to `pc`, it ran from `b` again. `needcam` pinned to its hash ran;
+pinned to another, it was refused with its own hash named. `rec` pinned
+to a peer that is not listed was "no such module". Each start from a peer
+was one GET per candidate tried and one to read.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

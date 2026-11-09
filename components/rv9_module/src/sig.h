@@ -10,3 +10,7 @@
  */
 int rv9_sig_verify(const void *image, uint32_t len, const uint8_t pub[65],
                    uint32_t *out_us);
+
+/* SHA-256 of `len` bytes, as `sha256sum` gives it. 0, or -1. Waits; done in
+   a task of its own. */
+int rv9_sha256(const void *data, uint32_t len, uint8_t out[32]);

@@ -237,6 +237,12 @@ a detached path, and lets go of it from its close with
 `rv9_io_close_below`, because a file manager's close runs with the I/O
 manager's lock held and `rv9_io_close_path` would wait on it.
 
+`/peer/p4/cmd` opened as a directory is the peer's catalog, `GET /catalog`,
+one entry per line, `<name>.mod` and its size: `dir /peer/p4/cmd` lists
+what the module path would find there. Any path ending in `/cmd` reads the
+`catalog` beside it, so a PC serving `a/cmd/` and `a/catalog` is listed as
+`dir /peer/pc/a/cmd`. A path with a space in it is not asked for.
+
 ### `pfm` — the publication file manager
 
 A cell at `/pub0/NAME` with exactly one writer, declared in that writer's
@@ -283,7 +289,7 @@ the firmware.
 | `/touch` | `scf` | `touch` | The touch panel, as a stream of 12-byte events. Reads block; records are never split. The queue is emptied on first open, so a program gets fingers from now rather than a backlog. Only where there is one. **Flashing the P4 leaves the controller not scanning; an ordinary reset does not. Its reset line is not wired, so take the board's power away.** The driver says so when it sees it. |
 | `/i2c0/ADDR` | `ifm` | `i2c` | The two-wire bus. The pins are the board's; the only option is kHz (100). Shared with the touch controller. A register number above `0xff` is sent as two bytes, high first. |
 | `/n0/…` | `nfm` | `net` | TCP, out and in. |
-| `/peer/NAME/…` | `peerfm` | `peer` | Another machine's files, as its `httpd` serves them: `/peer/p4/catalog`, `/peer/p4/cmd/listen.mod`, `/peer/p4/files/pico.rv9m`. Peers are named in `/f0/peers`, one a line, `<name> <host>[:<port>]` (8080), read at every open. One GET an open, over `/n0`; the length is the answer's, a seek forward reads on and a seek back asks again. A connect waits 2 s; a peer that did not answer is passed over for 60 s, one that refused is asked three times. A module read from here must be signed by a key in `/f0/trust` even when it holds none. Built with `/n0`. |
+| `/peer/NAME/…` | `peerfm` | `peer` | Another machine's files, as its `httpd` serves them: `/peer/p4/catalog`, `/peer/p4/cmd/listen.mod`, `/peer/p4/files/pico.rv9m`; `/peer/p4/cmd` as a directory is the catalog. Peers are named in `/f0/peers`, one a line, `<name> <host>[:<port>]` (8080), read at every open. One GET an open, over `/n0`; the length is the answer's, a seek forward reads on and a seek back asks again. A connect waits 2 s; a peer that did not answer is passed over for 60 s, one that refused is asked three times. A module read from here must be signed by a key in `/f0/trust` even when it holds none. Built with `/n0`. |
 | `/pub0/NAME` | `pfm` | `pubmem` | Published cells. |
 | `/pipe/NAME` | `pipe` | `pipemem` | Pipes. |
 | `/m0/NAME` | `mfm` | `moddir` | The modules this machine holds, as read-only files: the store's and any `load` brought in, byte for byte, signature included. `dir /m0` lists them, `copy /m0/pubs /sd0/cmd/pubs.mod` puts one on the card, and `httpd` serves them to peers. A module found on the module path is not listed: it is a file somewhere already. Always built. |
@@ -448,6 +454,26 @@ yet. If nothing on the path can run, the first found is still the answer,
 so `can` and the fork say why rather than "not found". The header and
 manifest are kept from the search, so admission and `can` read the needs
 without fetching the module again.
+
+**Pins**, in `/f0/pins`, say where a name may come from and which build it
+must be, one name a line:
+
+```
+listen   p4                  only from /peer/p4/
+detect   /sd0/cmd/           only from path entries starting so
+whistle  p4 1efb72c7         from the P4, and only that build
+```
+
+A place is a peer's name or a prefix of path entries, and narrows the
+search; nothing outside it is tried. A hash is 8 to 64 hex digits of the
+SHA-256 of the module's file, as `sha256sum` prints it, and refuses any
+other build where the place finds one (`not the build /f0/pins names`),
+with the hash it found in the log. The file is read at every search, as
+`/f0/path` is. A pin does not reach the store, which always wins a name.
+
+A command found on the path is found again when `/f0/path` or `/f0/pins`
+has changed since, at its next start, so a change applies to names already
+used as well as new ones. One that is running keeps what it was found as.
 
 **The fork pays for the read** on the forking program's stack: the
 shell's went from 1,440 bytes at its deepest to 2,568, and its stack from

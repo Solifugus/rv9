@@ -1861,6 +1861,7 @@ typedef struct rv9_mod_entry {
     /* Its header, name and manifest, kept from when it was found, so that
        what it needs is read without fetching it again from a peer. */
     void                 *head;
+    uint32_t              path_crc;     /* of /f0/path and /f0/pins, when found */
 
     /* The deepest any process running it has gone, measured at its end --
        RV-9's own work on that stack included. Since boot; not stored. */
@@ -1882,6 +1883,7 @@ typedef enum {
     RV9_MOD_ERR_INVAL,
     RV9_MOD_ERR_CONTRACT,   /* the manifest demands something unknown here */
     RV9_MOD_ERR_SIGNATURE,  /* not signed by a key this machine trusts */
+    RV9_MOD_ERR_PINNED,     /* not the build /f0/pins names for it */
 } rv9_mod_err_t;
 
 const char *rv9_mod_strerror(rv9_mod_err_t err);

@@ -1172,7 +1172,9 @@ a peer as it finds one on its card, and runs it if it can. In steps:
      from a peer always signed, a peer that is off passed over.
    - **3d, needs on the path — done**: a module built for instructions or
      devices this machine lacks is passed over, and the next tried.
-   - 3e, catalogs in `dir`, and pins in `/f0/pins` by peer or hash.
+   - **3e, catalogs and pins — done**: `dir /peer/p4/cmd` lists a peer's
+     catalog; `/f0/pins` holds a name to a peer or place and to a build by
+     SHA-256; a change to the path or pins applies at the next start.
    - Packaging on the same layout: `tools/mkrepo.py` makes a release a PC
      serves, `get <command>` installs a copy, and data files gain hashes
      in their `file` tags.

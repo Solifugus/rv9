@@ -114,3 +114,34 @@ int rv9_sig_verify(const void *image, uint32_t len, const uint8_t pub[65],
              (unsigned long)j.stack_used, SIG_STACK);
     return j.result;
 }
+
+/* A file's SHA-256, for /f0/pins: in a task of its own, as a verify is,
+   since it is asked for on the stack of whoever is starting a module. */
+typedef struct {
+    const uint8_t *data;
+    uint32_t       len;
+    uint8_t       *out;
+    volatile int   state;
+    int            result;
+} hash_job_t;
+
+static void hash_worker(void *arg)
+{
+    hash_job_t *j = (hash_job_t *)arg;
+    size_t n = 0;
+    j->result = psa_crypto_init() == PSA_SUCCESS &&
+                psa_hash_compute(PSA_ALG_SHA_256, j->data, j->len, j->out, 32, &n) == PSA_SUCCESS &&
+                n == 32 ? 0 : -1;
+    j->state = DONE;
+    rv9_task_delete(NULL);
+}
+
+int rv9_sha256(const void *data, uint32_t len, uint8_t out[32])
+{
+    hash_job_t j = { .data = data, .len = len, .out = out, .state = QUEUED };
+    if (rv9_task_create_background(hash_worker, "rv9-sha", SIG_STACK, &j) != RV9_OK) {
+        return -1;
+    }
+    while (j.state != DONE) rv9_task_delay_ms(1);
+    return j.result;
+}

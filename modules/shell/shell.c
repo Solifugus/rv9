@@ -1041,6 +1041,10 @@ static int split_pipeline(char *raw, char *seg[], int max)
     seg[n++] = p;
     while (*p && n < max) {
         if (*p == '|') {
+            /* The space before the bar is not part of the argument:
+               `dir /peer/p4/cmd | count` lists /peer/p4/cmd, not
+               "/peer/p4/cmd ", which a peer is sent as it stands. */
+            for (char *q = p; q > raw && (q[-1] == ' ' || q[-1] == '\t'); q--) q[-1] = '\0';
             *p = '\0';
             seg[n++] = p + 1;
         }

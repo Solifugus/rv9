@@ -871,7 +871,13 @@ listen, from /peer/p4/cmd/listen.mod
 A command this board does not hold is now looked for on the P4 too, and
 run here if it can run here. A copy built for another CPU, or needing a
 device this board lacks, is passed over and the path searched on, so with
-two peers the one whose copy can run here is the one used. It must be signed by a key in `/f0/trust`,
+two peers the one whose copy can run here is the one used. `dir
+/peer/p4/cmd` lists what the P4 offers, and a line in `/f0/pins` holds a
+command to one peer, or to one build of it:
+
+```
+rv9> echo listen p4 > /f0/pins
+``` It must be signed by a key in `/f0/trust`,
 even on a board that otherwise takes unsigned modules. A PC serving a
 directory with `cmd/<name>.mod` in it (`python3 -m http.server`) is a peer
 the same way.

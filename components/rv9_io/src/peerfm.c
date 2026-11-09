@@ -2,6 +2,7 @@
  * PEERFM -- another machine's modules, as files.
  *
  *     /peer                  the peers /f0/peers names, as a directory
+ *     /peer/<name>/.../cmd   its modules, as a directory: GET .../catalog
  *     /peer/<name>/<rest>    GET /<rest> from that peer
  *
  * so that /peer/p4/catalog is what the P4's httpd serves at /catalog, and
@@ -59,6 +60,11 @@ static const char *TAG = "rv9-peer";
 
 typedef struct {
     bool       is_dir;
+    bool       is_cat;             /* /cmd: the catalog, read as a directory */
+    char       line[64];           /* the catalog line being put together */
+    uint32_t   line_len;
+    char       pend[64];           /* catalog bytes read and not yet used */
+    uint32_t   pend_n, pend_at;
     rv9_path_t *conn;
     char       peer[PEER_NAME_MAX];
     char       endpoint[48];       /* "/n0/<host>/<port>/<connect ms>" */
@@ -264,12 +270,21 @@ static rv9_io_err_t peer_open(rv9_path_t *path, const char *rest)
     const char *slash = strchr(rest, '/');
     size_t pl = slash ? (size_t)(slash - rest) : strlen(rest);
     if (pl == 0 || pl >= PEER_NAME_MAX || slash == NULL || slash[1] == '\0' ||
-        strlen(slash) >= sizeof(st->url)) {
+        strlen(slash) >= sizeof(st->url) || strpbrk(slash, " \t\r\n") != NULL) {
         rv9_free(st);
         return RV9_IO_ERR_NOTFOUND;
     }
     memcpy(st->peer, rest, pl);
     strcpy(st->url, slash);
+    /* <...>/cmd: the directory the module path searches, listed by what the
+       peer says it holds, the catalog beside it: httpd's at /catalog, or a
+       release's. */
+    size_t ul = strlen(st->url);
+    if (st->url[ul - 1] == '/') st->url[--ul] = '\0';
+    if (ul >= 4 && strcmp(st->url + ul - 4, "/cmd") == 0 && ul - 4 + 9 < sizeof(st->url)) {
+        st->is_cat = true;
+        strcpy(st->url + ul - 4, "/catalog");
+    }
 
     char *peers = rv9_alloc(PEERS_MAX_LEN + 1);
     if (peers == NULL) { rv9_free(st); return RV9_IO_ERR_NOMEM; }
@@ -344,11 +359,74 @@ static rv9_io_err_t body_read(peer_path_t *st, void *buf, size_t len, size_t *do
     return e;
 }
 
+/*
+ * The catalog as directory entries: from each line, "name revision size
+ * type signer", the entry <name>.mod of that size, as the file the module
+ * path would open. Lines too long to be a catalog's are dropped.
+ */
+static void cat_entry(peer_path_t *st, rv9_dirent_t *d)
+{
+    st->line[st->line_len] = '\0';
+    char name[32];
+    unsigned long rev = 0, size = 0;
+    memset(d, 0, sizeof(*d));
+    if (sscanf(st->line, "%31s %lu %lu", name, &rev, &size) == 3) {
+        snprintf(d->name, sizeof(d->name), "%.23s.mod", name);
+        d->size = (uint32_t)size;
+    }
+}
+
+static rv9_io_err_t cat_read(rv9_path_t *path, peer_path_t *st, void *buf, size_t len,
+                             size_t *done)
+{
+    size_t room = len / sizeof(rv9_dirent_t), n = 0;
+    rv9_dirent_t *out = (rv9_dirent_t *)buf;
+    *done = 0;
+    while (n < room) {
+        /* What was read and not yet used goes first: a read may end with
+           more lines in hand than the caller had room for. */
+        if (st->pend_at == st->pend_n) {
+            size_t got = 0;
+            rv9_io_err_t e = body_read(st, st->pend, sizeof(st->pend), &got);
+            if (e != RV9_IO_OK) {
+                if (n) break;
+                return e;
+            }
+            st->pend_at = 0;
+            st->pend_n = (uint32_t)got;
+            if (got == 0) {
+                if (st->line_len > 0 && st->line_len < sizeof(st->line)) {
+                    cat_entry(st, &out[n]);      /* a last line with no newline */
+                    if (out[n].name[0]) n++;
+                }
+                st->line_len = 0;
+                break;
+            }
+        }
+        char c = st->pend[st->pend_at++];
+        if (c == '\n') {
+            if (st->line_len < sizeof(st->line)) {
+                cat_entry(st, &out[n]);
+                if (out[n].name[0]) n++;
+            }
+            st->line_len = 0;
+        } else if (st->line_len < sizeof(st->line) - 1) {
+            st->line[st->line_len++] = c;
+        } else {
+            st->line_len = sizeof(st->line);    /* too long to be one: dropped */
+        }
+    }
+    path->pos += (int64_t)n;
+    *done = n * sizeof(rv9_dirent_t);
+    return RV9_IO_OK;
+}
+
 static rv9_io_err_t peer_read(rv9_path_t *path, void *buf, size_t len, size_t *done)
 {
     peer_path_t *st = (peer_path_t *)path->fm_state;
     if (st == NULL || done == NULL) return RV9_IO_ERR_INVAL;
     if (st->is_dir) return dir_read(path, buf, len, done);
+    if (st->is_cat) return cat_read(path, st, buf, len, done);
     rv9_io_err_t e = body_read(st, buf, len, done);
     if (e == RV9_IO_OK) path->pos = st->at;
     return e;

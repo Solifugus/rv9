@@ -90,6 +90,7 @@ const char *rv9_mod_strerror(rv9_mod_err_t err)
     case RV9_MOD_ERR_INVAL:    return "invalid module";
     case RV9_MOD_ERR_CONTRACT: return "requires something unsupported";
     case RV9_MOD_ERR_SIGNATURE: return "not signed by a key this machine trusts";
+    case RV9_MOD_ERR_PINNED:   return "not the build /f0/pins names";
     default:                   return "unknown error";
     }
 }
@@ -572,6 +573,35 @@ static const rv9_mod_proc_ops_t *s_proc_ops;
 #define PATH_MAX_LEN  256
 #define PATH_MOD_MAX  (256 * 1024)
 
+/*
+ * Pins: where a name may come from, and which build it must be. /f0/pins,
+ * one name a line, read as /f0/path is:
+ *
+ *     listen   p4                  only from /peer/p4/
+ *     detect   /sd0/cmd/           only from the card
+ *     whistle  p4 1efb72c7         from the P4, and only that build
+ *
+ * A place is a peer's name or a prefix of path entries; a hash is eight to
+ * sixty-four hex digits of the SHA-256 of the module's file, as
+ * `sha256sum` prints it, and the log prints it when a module is read. A
+ * place narrows the search; a hash refuses any other build where the place
+ * finds one, rather than looking further, since it names one thing. A pin
+ * does not reach the store, which always wins a name.
+ */
+#define PINS_FILE     "/f0/pins"
+#define PINS_MAX_LEN  512
+
+typedef struct {
+    char path[PATH_MAX_LEN];
+    char pins[PINS_MAX_LEN];
+    uint32_t crc;                    /* of both: has either changed? */
+} rules_t;
+
+typedef struct {
+    char place[48];                  /* a path prefix; empty for anywhere */
+    char hash[65];                   /* hex prefix; empty for any build */
+} pin_t;
+
 /* The whole of a small file, or nothing. */
 static int read_small(const char *file, char *buf, uint32_t cap)
 {
@@ -717,10 +747,73 @@ static rv9_mod_entry_t *path_entry(const char *name, const char *file,
     return e;
 }
 
+/* /f0/path and /f0/pins, as they are now. */
+static void read_rules(rules_t *r)
+{
+    int n = read_small(PATH_FILE, r->path, PATH_MAX_LEN - 1);
+    if (n <= 0) {
+        strcpy(r->path, PATH_DEFAULT);
+    } else {
+        r->path[n] = '\0';
+    }
+    n = read_small(PINS_FILE, r->pins, PINS_MAX_LEN - 1);
+    r->pins[n > 0 ? n : 0] = '\0';
+    r->crc = rv9_crc32(rv9_crc32(0, r->path, strlen(r->path)), r->pins, strlen(r->pins));
+}
+
+static bool is_hash(const char *w, size_t n)
+{
+    if (n < 8 || n > 64) return false;
+    for (size_t i = 0; i < n; i++) {
+        char c = w[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+    }
+    return true;
+}
+
+/* The pin for `name`, if /f0/pins has one. */
+static bool pin_for(const char *pins, const char *name, pin_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    size_t nl = strlen(name);
+    for (const char *line = pins; *line; ) {
+        const char *end = line;
+        while (*end && *end != '\n') end++;
+        const char *w[3] = { 0 };
+        size_t wl[3] = { 0 };
+        const char *c = line;
+        for (int k = 0; k < 3; k++) {
+            while (c < end && (*c == ' ' || *c == '\t' || *c == '\r')) c++;
+            w[k] = c;
+            while (c < end && *c != ' ' && *c != '\t' && *c != '\r') c++;
+            wl[k] = (size_t)(c - w[k]);
+        }
+        if (wl[0] == nl && w[0][0] != '#' && memcmp(w[0], name, nl) == 0 && wl[1] > 0) {
+            for (int k = 1; k < 3; k++) {
+                if (wl[k] == 0) break;
+                if (w[k][0] == '/') {
+                    snprintf(out->place, sizeof(out->place), "%.*s", (int)wl[k], w[k]);
+                } else if (is_hash(w[k], wl[k])) {
+                    for (size_t i = 0; i < wl[k]; i++) {
+                        char h = w[k][i];
+                        out->hash[i] = (h >= 'A' && h <= 'F') ? (char)(h - 'A' + 'a') : h;
+                    }
+                    out->hash[wl[k]] = '\0';
+                } else {
+                    snprintf(out->place, sizeof(out->place), "/peer/%.*s/", (int)wl[k], w[k]);
+                }
+            }
+            return true;
+        }
+        line = *end ? end + 1 : end;
+    }
+    return false;
+}
+
 /* The first <dir><name>.mod on the path that is a module of that name and
    can run here, as a directory entry that is not loaded yet; else the first
    that is a module of that name; else NULL. */
-static rv9_mod_entry_t *path_find(const char *name)
+static rv9_mod_entry_t *path_find(const char *name, uint32_t *rules_crc)
 {
     if (s_io_ops == NULL || strlen(name) >= sizeof(((rv9_mod_entry_t *)0)->name))
         return NULL;
@@ -728,16 +821,14 @@ static rv9_mod_entry_t *path_find(const char *name)
     /* On the heap, not the stack: this runs inside whoever is forking, on
        their stack, with the I/O manager's open below it -- the shell's is
        2.5 KB, and a search made from stack buffers ran it off the end. */
-    struct { char list[PATH_MAX_LEN]; char file[64]; char why[40]; } *b = rv9_alloc(sizeof(*b));
+    struct { rules_t r; pin_t pin; char file[64]; char why[40]; } *b = rv9_alloc(sizeof(*b));
     if (b == NULL) return NULL;
-    char *list = b->list, *file = b->file;
+    char *list = b->r.path, *file = b->file;
     rv9_mod_entry_t *found = NULL, *first = NULL;
-    int n = read_small(PATH_FILE, list, PATH_MAX_LEN - 1);
-    if (n <= 0) {
-        strcpy(list, PATH_DEFAULT);
-    } else {
-        list[n] = '\0';
-    }
+    read_rules(&b->r);
+    *rules_crc = b->r.crc;
+    bool pinned = pin_for(b->r.pins, name, &b->pin);
+    size_t place_len = pinned ? strlen(b->pin.place) : 0;
 
     for (char *d = list; *d && found == NULL; ) {
         while (*d == ' ' || *d == '\t' || *d == '\n' || *d == '\r') d++;
@@ -745,7 +836,9 @@ static rv9_mod_entry_t *path_find(const char *name)
         char *end = d;
         while (*end && *end != ' ' && *end != '\t' && *end != '\n' && *end != '\r') end++;
         size_t dl = (size_t)(end - d), nl = strlen(name);
-        if (dl + nl + 5 <= sizeof(b->file)) {
+        bool placed = place_len == 0 ||
+                      (dl >= place_len && memcmp(d, b->pin.place, place_len) == 0);
+        if (placed && dl + nl + 5 <= sizeof(b->file)) {
             memcpy(file, d, dl);
             memcpy(file + dl, name, nl);
             memcpy(file + dl + nl, ".mod", 5);
@@ -771,6 +864,9 @@ static rv9_mod_entry_t *path_find(const char *name)
             }
         }
         d = end;
+    }
+    if (found == NULL && first == NULL && place_len > 0) {
+        ESP_LOGW(TAG, "'%s' is pinned to %s, and nothing there has it", name, b->pin.place);
     }
     rv9_free(b);
     if (found != NULL) {
@@ -910,6 +1006,43 @@ static rv9_mod_err_t trust_check(const uint8_t *image, uint32_t len, const char 
     return RV9_MOD_OK;
 }
 
+/*
+ * Is it the build /f0/pins says it must be, if it says? The file's hash is
+ * taken either way, and its first sixteen digits go in `hex` for the log,
+ * which is where a person finds the hash to pin.
+ */
+static rv9_mod_err_t pin_check(const uint8_t *image, uint32_t len,
+                               const rv9_mod_entry_t *e, char hex[17])
+{
+    struct { char pins[PINS_MAX_LEN]; pin_t pin; uint8_t sum[32]; char full[65]; } *b =
+        rv9_alloc(sizeof(*b));
+    if (b == NULL) return RV9_MOD_ERR_NOMEM;
+    int n = read_small(PINS_FILE, b->pins, PINS_MAX_LEN - 1);
+    b->pins[n > 0 ? n : 0] = '\0';
+    bool pinned = pin_for(b->pins, e->name, &b->pin) && b->pin.hash[0];
+
+    rv9_mod_err_t err = RV9_MOD_OK;
+    if (rv9_sha256(image, len, b->sum) == 0) {
+        for (int i = 0; i < 32; i++) {
+            b->full[2 * i] = "0123456789abcdef"[b->sum[i] >> 4];
+            b->full[2 * i + 1] = "0123456789abcdef"[b->sum[i] & 15];
+        }
+        b->full[64] = '\0';
+        memcpy(hex, b->full, 16);
+        hex[16] = '\0';
+        if (pinned && strncmp(b->full, b->pin.hash, strlen(b->pin.hash)) != 0) {
+            ESP_LOGE(TAG, "%s: is %s, and %s pins '%s' to %s", e->path, hex,
+                     PINS_FILE, e->name, b->pin.hash);
+            err = RV9_MOD_ERR_PINNED;
+        }
+    } else if (pinned) {
+        ESP_LOGE(TAG, "%s: could not be hashed to check its pin", e->path);
+        err = RV9_MOD_ERR_PINNED;
+    }
+    rv9_free(b);
+    return err;
+}
+
 /* A path entry's image, read whole into executable memory and verified. */
 static rv9_mod_err_t path_read(rv9_mod_entry_t *e, void **out)
 {
@@ -946,6 +1079,8 @@ static rv9_mod_err_t path_read(rv9_mod_entry_t *e, void **out)
     if (err == RV9_MOD_OK && strcmp((const char *)image + h->name_offset, e->name) != 0) {
         err = RV9_MOD_ERR_INVAL;
     }
+    char hex[17] = "";
+    if (err == RV9_MOD_OK) err = pin_check(image, got, e, hex);
     if (err == RV9_MOD_OK) err = trust_check(image, got, e->path);
     if (err != RV9_MOD_OK) {
         rv9_free(image);
@@ -954,10 +1089,22 @@ static rv9_mod_err_t path_read(rv9_mod_entry_t *e, void **out)
     }
     e->size     = h->module_len;
     e->revision = h->revision;
-    ESP_LOGI(TAG, "read '%s' from %s: %lu bytes in %lu us", e->name, e->path,
-             (unsigned long)e->size, (unsigned long)(rv9_time_us() - t0));
+    ESP_LOGI(TAG, "read '%s' from %s: %lu bytes in %lu us, sha256 %s", e->name, e->path,
+             (unsigned long)e->size, (unsigned long)(rv9_time_us() - t0), hex);
     *out = image;
     return RV9_MOD_OK;
+}
+
+/* /f0/path and /f0/pins as they are now, summed, to see whether a module
+   found on the path was found by the rules in force. */
+static uint32_t rules_crc(void)
+{
+    rules_t *r = rv9_alloc(sizeof(*r));
+    if (r == NULL) return 0;
+    read_rules(r);
+    uint32_t crc = r->crc;
+    rv9_free(r);
+    return crc;
 }
 
 const rv9_mod_entry_t *rv9_mod_find(const char *name)
@@ -965,28 +1112,70 @@ const rv9_mod_entry_t *rv9_mod_find(const char *name)
     if (name == NULL) return NULL;
 
     /* Highest revision wins when names collide -- OS-9 behaviour, and it
-       makes replacing a module a matter of loading a newer one. */
+       makes replacing a module a matter of loading a newer one. One found
+       on the path that is no longer there (no head) is not a candidate. */
     const rv9_mod_entry_t *best = NULL;
     for (rv9_mod_entry_t *e = s_dir; e; e = e->next) {
         if (strcmp(e->name, name) != 0) continue;
+        if (e->path[0] && e->head == NULL) continue;
         if (best == NULL || e->revision > best->revision) best = e;
     }
-    if (best != NULL) return best;
+    if (best != NULL && best->path[0] == '\0') return best;
+
+    /* Found on the path before: still the answer while the rules it was
+       found by hold, or while something runs it. A change to /f0/path or
+       /f0/pins takes effect at the next start, as it does for a name not
+       found yet. */
+    if (best != NULL && (best->link_count > 0 || best->image != NULL ||
+                         best->path_crc == rules_crc())) {
+        return best;
+    }
 
     /* Not on the machine: perhaps on the path. Looked for outside the lock
        -- it is file reads -- and added under it, unless somebody else got
        there first. */
-    rv9_mod_entry_t *e = path_find(name);
-    if (e == NULL) return NULL;
+    uint32_t crc = 0;
+    rv9_mod_entry_t *e = path_find(name, &crc);
     rv9_lock_acquire(s_lock);
+    rv9_mod_entry_t *old = NULL;
     for (rv9_mod_entry_t *o = s_dir; o; o = o->next) {
-        if (strcmp(o->name, name) == 0) {
+        if (strcmp(o->name, name) != 0) continue;
+        if (o->path[0] == '\0' || o->link_count > 0 || o->image != NULL) {
+            /* The store's, `load`'s, or one in use: that, not this. */
             rv9_lock_release(s_lock);
-            rv9_free(e->head);
+            if (e) rv9_free(e->head);
             rv9_free(e);
             return o;
         }
+        old = o;
     }
+    if (old != NULL) {
+        /* The entry found before, by older rules: kept, as others may hold a
+           pointer to it, and made what the search found now -- or nothing. */
+        bool moved = e == NULL || strcmp(old->path, e->path) != 0;
+        rv9_free(old->head);
+        old->head = NULL;
+        old->path_crc = crc;
+        if (e != NULL) {
+            old->type     = e->type;
+            old->revision = e->revision;
+            old->size     = e->size;
+            old->head     = e->head;
+            memcpy(old->path, e->path, sizeof(old->path));
+            rv9_free(e);
+            e = old;
+        }
+        rv9_lock_release(s_lock);
+        if (moved) {
+            ESP_LOGI(TAG, "'%s' under the rules as changed: %s", name, e ? e->path : "not found");
+        }
+        return e;
+    }
+    if (e == NULL) {
+        rv9_lock_release(s_lock);
+        return NULL;
+    }
+    e->path_crc = crc;
     dir_append(e);
     rv9_lock_release(s_lock);
     ESP_LOGI(TAG, "found '%s' rev %u on the path: %s", e->name, e->revision, e->path);
