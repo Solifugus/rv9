@@ -837,6 +837,23 @@ signed by it, and one that is not, or was changed after it was signed, is
 refused. The store is trusted as it is. `trust remove matthew` goes back to
 accepting anything with a warning.
 
+### Serving modules to other boards
+
+```
+rv9> echo 8080 > /f0/serve
+```
+
+and within ten seconds the board serves what it holds, which any machine
+can read:
+
+```sh
+curl http://<board>:8080/catalog            # name revision size type signer
+curl -O http://<board>:8080/cmd/listen.mod  # the module, as in its store
+```
+
+`/m0` is the same thing on the board itself: `dir /m0` lists the modules,
+and `copy /m0/pubs /sd0/cmd/pubs.mod` puts one on the card.
+
 So there are three places a command can live, and they cost different
 things: the store, which costs nothing to start and is reflashed to change;
 a volume's top level, `/f0/thing.mod`, read at every boot and held from

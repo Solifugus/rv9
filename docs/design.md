@@ -7995,6 +7995,64 @@ puts the key back. The first boot with a key also refused the old unsigned
 - `can` and `mdir` do not show the signer yet; `tools/modinfo.py` does,
   and checks the signature against your key.
 
+## 74. A peer's modules as a directory
+
+Step 3 towards a module path across a federation, designed as one piece
+with packaging, because a board serving its modules and a PC serving a
+release want the same thing: a catalog, the modules, and the files they
+read. The module path already works by opening files, so the least new
+machinery is to make a peer's modules files too: `/f0/path` saying
+`/sd0/cmd/ /peer/p4/cmd/ /f0/cmd/`, and path order, needs, signatures and
+`can` all apply to a peer unchanged. A release is then just another peer.
+
+Agreed: HTTP/1.0 GET as the protocol, since `fetch` speaks it, a PC serves
+it with anything and `curl` debugs it; peers listed by hand in `/f0/peers`
+first, with discovery later; fetched at every run, with `get` for a copy
+that outlives the peer; modules from a peer always signed; and running on
+the peer, where the work must move, left for step 4.
+
+### 3a: /m0
+
+The modules a machine holds, as read-only files: `mfm`, a file manager,
+over `moddir`, a driver with nothing to drive, since the module manager is
+the source. `/m0/pubs` reads `pubs` byte for byte from wherever it is (the
+mapped store, the store partition, or the copy `load` made), through a new
+`rv9_mod_read_at`; `dir /m0` lists what the machine holds, and not what it
+found on its path, which is a file somewhere already. Always built, like
+the console and pipes. Useful alone: `copy /m0/pubs /sd0/cmd/pubs.mod`.
+
+### 3b: httpd
+
+| request | answer |
+|---|---|
+| `/catalog` | a line per module: name, revision, size, type, signer's key id |
+| `/cmd/<name>.mod` | the module from `/m0` |
+| `/files/<name>` | `/sd0/<name>`, if a module held here declares that it reads it |
+| anything else | 404 |
+
+**What it will not serve is the design.** A data file is served only when a
+module this machine holds names it in a `file` tag: the models and the
+voice, which are published work, and never `/sd0/faces.db`, which is the
+faces `detect` enrolled and lives on the same card. Names are checked
+before they are looked up, so `..%2Ff0%2Ftrust` is a 404, not a path. No
+authentication, because nothing served is secret: modules are signed, and
+it is the fetching machine that checks.
+
+It is a service like `rshd`, started by init, but only where it is asked
+for: a service may now name a file that must exist for it to run, and init
+looks for `/f0/serve` every ten seconds, quietly. A board not told to serve
+spends nothing on it. The port is the number in the file, else 8080.
+
+Measured on the P4: the catalog of 125 modules, `listen.mod` (35 KB) in
+0.1 s and byte-identical to the build, `pico.rv9m` (412 KB) in 1.2 s,
+`slt.flitevox` (2.5 MB) in 5.9 s and `whistle.cact` (17 MB) in 38 s, about
+450 KB/s, all identical. Undeclared files, an escape and an unknown module
+are 404s in 0.05 s, a POST a 400. `httpd` used 1,632 bytes of stack serving
+all of it. Once, right after the 2.5 MB file, one request had no answer in
+ten seconds; it did not happen again in thirty requests back to back, nor
+after two more large transfers, and is not explained. `httpd` takes one
+connection at a time, so the client side (3c) retries.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

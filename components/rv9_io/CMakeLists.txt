@@ -1,9 +1,10 @@
 # Everything that does not depend on which chip this is, and that the
-# system uses itself: the console, /f0, publication and pipes.
+# system uses itself: the console, /f0, publication, pipes, and /m0, the
+# modules it holds as files.
 set(RV9_IO_SRCS "src/io.c" "src/claim.c" "src/scf.c" "src/drv_uart.c"
                 "src/rbf.c" "src/drv_flashdisk.c" "src/console.c"
                 "src/pfm.c" "src/drv_pubmem.c"
-                "src/pipefm.c" "src/drv_pipemem.c")
+                "src/pipefm.c" "src/drv_pipemem.c" "src/mfm.c")
 
 #
 # The rest is chosen, one device at a time (Kconfig, "RV-9 devices"): a

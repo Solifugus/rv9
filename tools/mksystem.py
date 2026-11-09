@@ -55,7 +55,7 @@ P4_ONLY = {"audio", "camera", "tts"}
 TARGET_ISA = {"esp32p4": {"fpu", "pie"}}
 
 # The drivers every firmware has, whose devices nothing declares.
-CORE_DRIVERS = {"uart", "flashdisk", "pubmem", "pipemem"}
+CORE_DRIVERS = {"uart", "flashdisk", "pubmem", "pipemem", "moddir"}
 
 
 def fail(msg):

@@ -1164,10 +1164,17 @@ a peer as it finds one on its card, and runs it if it can. In steps:
    end of the module, `tools/mkkey.py`, signed builds by default,
    `/f0/trust` and `trust`. A module from a file must be signed by a
    trusted key once one is trusted; the store is trusted as flashed.
-3. **Path entries on a peer, where the code moves**: a peer publishes a
-   catalog (name, revision, hash, needs, size), the first entry on the path
-   whose needs this machine meets wins, and `/f0/path` can pin a command to
-   a peer or a hash.
+3. **Path entries on a peer, where the code moves** (design §74):
+   - **3a, `/m0` — done**: the modules a machine holds, as files.
+   - **3b, `httpd` — done**: `/catalog`, `/cmd/<name>.mod`, declared
+     `/files/`, started when `/f0/serve` exists.
+   - 3c, `/peer`: a peer's modules as a directory, peers in `/f0/peers`,
+     always signed.
+   - 3d, a path search that passes over what cannot run here.
+   - 3e, catalogs in `dir`, and pins in `/f0/pins` by peer or hash.
+   - Packaging on the same layout: `tools/mkrepo.py` makes a release a PC
+     serves, `get <command>` installs a copy, and data files gain hashes
+     in their `file` tags.
 4. **Running on a peer, where the work must move**: `listen` asked for on a
    C3 runs on the P4, which has the microphone, the FPU and the memory.
 

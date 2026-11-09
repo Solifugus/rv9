@@ -54,7 +54,7 @@ fi
 cfg_on() { [[ -n "$CFG" ]] && grep -q "^CONFIG_$1=y" "$CFG"; }
 
 # The drivers a firmware always has (components/rv9_io/CMakeLists.txt).
-CORE_DRIVERS=" uart flashdisk pubmem pipemem "
+CORE_DRIVERS=" uart flashdisk pubmem pipemem moddir "
 
 # Every group any module declares, so that a word in --store that is
 # neither a group nor a module is caught rather than quietly selecting

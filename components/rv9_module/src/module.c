@@ -514,6 +514,35 @@ const rv9_mod_entry_t *rv9_mod_dir_next(const rv9_mod_entry_t *prev)
     return prev ? prev->next : s_dir;
 }
 
+bool rv9_mod_held(const rv9_mod_entry_t *e)
+{
+    return e != NULL && e->path[0] == '\0';
+}
+
+rv9_mod_err_t rv9_mod_read_at(const rv9_mod_entry_t *e, uint32_t off,
+                              void *buf, uint32_t len, uint32_t *got)
+{
+    if (got) *got = 0;
+    if (!rv9_mod_held(e) || buf == NULL) return RV9_MOD_ERR_INVAL;
+    if (off >= e->size) return RV9_MOD_OK;
+    if (len > e->size - off) len = e->size - off;
+
+    rv9_mod_err_t err = RV9_MOD_OK;
+    rv9_lock_acquire(s_lock);
+    if (e->resident && e->image != NULL) {
+        /* Loaded from bytes: the copy is the only one there is. */
+        memcpy(buf, (const uint8_t *)e->image + off, len);
+    } else if (s_xip) {
+        memcpy(buf, (const uint8_t *)s_store_map + e->store_offset + off, len);
+    } else if (s_store == NULL ||
+               esp_partition_read(s_store, e->store_offset + off, buf, len) != ESP_OK) {
+        err = RV9_MOD_ERR_IO;
+    }
+    rv9_lock_release(s_lock);
+    if (err == RV9_MOD_OK && got) *got = len;
+    return err;
+}
+
 static const rv9_mod_io_ops_t *s_io_ops;
 
 /* ---- the module path ---- */

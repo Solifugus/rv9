@@ -897,6 +897,11 @@
       "write_rt": false
     },
     {
+      "name": "mfm",
+      "read_rt": false,
+      "write_rt": false
+    },
+    {
       "name": "nfm",
       "read_rt": false,
       "write_rt": false
@@ -974,6 +979,13 @@
       "name": "lcdcon",
       "read_rt": null,
       "write_rt": false,
+      "retains": false,
+      "sessions": false
+    },
+    {
+      "name": "moddir",
+      "read_rt": null,
+      "write_rt": null,
       "retains": false,
       "sessions": false
     },

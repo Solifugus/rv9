@@ -1,6 +1,6 @@
 menu "RV-9 devices"
 
-    comment "Always built: the console (/uart0), /f0, /pub0 and pipes. The system uses them itself."
+    comment "Always built: the console (/uart0), /f0, /pub0, pipes and /m0. The system uses them itself."
 
     config RV9_DRV_LCDCON
         bool "/term: the panel as a text console"

@@ -81,6 +81,7 @@ the one place the limit is worth remembering.
 | `nfm` | `host/port`, split at the *last* slash; `listen/PORT` to accept | the device, for `getstat` |
 | `pfm` | a cell name | the directory of cells; **read-only** |
 | `pipe` | a pipe name | refused: an unnamed pipe has no other end to find |
+| `mfm` | a module name | the directory of modules; **read-only** throughout |
 
 `ifm` taking both `0x68` and `104` is deliberate. A datasheet says the first
 and a shell script usually says the second, and refusing either would be a
@@ -154,6 +155,7 @@ one.
 | `nfm` | a stream, from a connection | no | no | no |
 | `pfm` | a published cell, whole | no | **yes** | **yes** |
 | `pipe` | characters, between processes | no | no | no |
+| `mfm` | a module, byte for byte | yes | no | no |
 
 Only `pio` and `pfm` are real-time safe in both directions, and that is the
 whole reason a control loop reads a pin and publishes a cell rather than
@@ -271,6 +273,7 @@ the firmware.
 | `/n0/…` | `nfm` | `net` | TCP, out and in. |
 | `/pub0/NAME` | `pfm` | `pubmem` | Published cells. |
 | `/pipe/NAME` | `pipe` | `pipemem` | Pipes. |
+| `/m0/NAME` | `mfm` | `moddir` | The modules this machine holds, as read-only files: the store's and any `load` brought in, byte for byte, signature included. `dir /m0` lists them, `copy /m0/pubs /sd0/cmd/pubs.mod` puts one on the card, and `httpd` serves them to peers. A module found on the module path is not listed: it is a file somewhere already. Always built. |
 
 Two behaviours that differ deliberately and will bite if assumed uniform:
 **`/gpio` holds its level when the last path closes**, because an enable line

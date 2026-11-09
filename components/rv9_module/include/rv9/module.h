@@ -1899,6 +1899,21 @@ int rv9_mod_dir_init(void);
 /* Walk the directory. Pass NULL to start. */
 const rv9_mod_entry_t *rv9_mod_dir_next(const rv9_mod_entry_t *prev);
 
+/*
+ * Is this a module the machine holds itself -- in the store, or loaded --
+ * rather than one found on the module path, which is a file somewhere
+ * already? What /m0 lists and serves.
+ */
+bool rv9_mod_held(const rv9_mod_entry_t *e);
+
+/*
+ * Bytes of a held module, exactly as they are in the store or in memory:
+ * up to `len` from `off`, the count in *got. What lets /m0 present a
+ * module as a file, and so lets it be copied, served or compared.
+ */
+rv9_mod_err_t rv9_mod_read_at(const rv9_mod_entry_t *e, uint32_t off,
+                              void *buf, uint32_t len, uint32_t *got);
+
 const rv9_mod_entry_t *rv9_mod_find(const char *name);
 
 /*

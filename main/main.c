@@ -259,6 +259,7 @@ static void io_bringup(void)
 #endif
     REGISTER(rv9_pfm_register());
     REGISTER(rv9_pipefm_register());
+    REGISTER(rv9_mfm_register());
 #if CONFIG_RV9_DRV_I2C
     REGISTER(rv9_ifm_register());
 #endif
@@ -305,6 +306,7 @@ static void io_bringup(void)
 #endif
     REGISTER(rv9_drv_pubmem_register());
     REGISTER(rv9_drv_pipemem_register());
+    REGISTER(rv9_drv_moddir_register());
 #if CONFIG_RV9_DRV_I2C
     REGISTER(rv9_drv_i2c_register());
 #endif
@@ -555,6 +557,7 @@ typedef struct {
     const char *name;
     int         priority;
     const char *says;           /* logged when it starts, the first time */
+    const char *wanted;         /* a file that must exist for it to run, or NULL */
     rv9_pid_t   pid;
     uint32_t    backoff_ms;
     uint64_t    next_ms;
@@ -566,6 +569,7 @@ typedef struct {
 #define SERVICE_BACKOFF_MS  1000
 #define SERVICE_BACKOFF_MAX 60000
 #define SERVICE_STAYED_UP   60000  /* this long and a failure is a new one */
+#define SERVICE_UNWANTED_MS 10000  /* how often to look for a service's file */
 
 /* The network's two only where there is a network to listen on. */
 static service_t s_services[] = {
@@ -576,6 +580,12 @@ static service_t s_services[] = {
 #if CONFIG_RV9_DRV_SSH
     { .name = "sshd",  .priority = RV9_PRIO_LOW,
       .says = "sshd listening on port 22 (ssh <user>@<ip>)" },
+#endif
+#if CONFIG_RV9_DRV_NET
+    /* Serving this machine's modules to its peers, when it is asked to:
+       a board that has not been told to serve costs nothing for it. */
+    { .name = "httpd", .priority = RV9_PRIO_LOW, .wanted = "/f0/serve",
+      .says = "httpd serving /m0 to peers (port in /f0/serve, else 8080)" },
 #endif
     { .name = "shell", .priority = RV9_PRIO_NORMAL,
       .says = "shell on /uart0 (log quiet while it runs)" },
@@ -625,6 +635,15 @@ static void init_shell_loop(void)
             }
 
             if (now < s->next_ms) continue;
+
+            if (s->wanted != NULL) {
+                int f = rv9_io_open(s->wanted, RV9_MODE_READ);
+                if (f < 0) {
+                    s->next_ms = now + SERVICE_UNWANTED_MS;
+                    continue;
+                }
+                rv9_io_close(f);
+            }
 
             rv9_pid_t pid = 0;
             if (rv9_proc_fork(s->name, s->priority, NULL, &pid) == RV9_PROC_OK) {
