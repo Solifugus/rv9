@@ -8093,6 +8093,38 @@ lookup 2 s and the next none; 20 lookups in a row all answered. Once, just
 after boot, the P4 itself did not answer a connect in 2 s, behind the dead
 peer; it did not happen again.
 
+### 3d: needs on the path
+
+The conflict rule agreed for a path across peers: path order wins, and a
+candidate this machine cannot meet the needs of is skipped. `path_find`
+now reads each `<name>.mod`'s header, name and manifest in one read from
+the start of the file (they follow the header in every module), and passes
+over one whose `isa` this CPU lacks or whose `device` or `exclusive` names
+a device this machine was not built with, logging why. The test is only
+what is fixed about the machine. A device somebody holds or a cell nobody
+publishes yet is admission's to refuse, when it is asked: it may be
+different in a minute, and a search that skipped on it would find a
+different module depending on what else was running.
+
+When every candidate is passed over, the first is the answer, as before.
+The fork then refuses it for its own reason, and `can` lists all of them,
+which is more use than "not found" for something that is plainly there.
+
+What the search read is kept on the entry, the manifest's end entry and
+no more (tens of bytes for most modules), and refreshed from the image each
+time the module is read. Before, every admission that asked who publishes
+a cell scanned every entry's manifest, and an entry from the path was a
+file read each time: from a peer, a GET under the module manager's lock.
+Now a command from a peer costs one GET for each candidate tried and one to
+read it, which the PC's server log shows exactly.
+
+Measured on the C5 with a PC serving two directories, `/peer/pc/a/cmd/`
+ahead of `/peer/pc/b/cmd/`: `twin`, built for the FPU in `a` and plain in
+`b`, ran from `b`; `needcam`, needing `/cam0` in `a`, ran from `b`;
+`onlyfpu`, only in `a`, was refused for the FPU; `bothbad`, needing `/cam0`
+in `a` and the vector unit in `b`, was refused for `/cam0`, and `can bothbad`
+named `a`. `listen` from the P4 is passed over and refused as before.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

@@ -437,6 +437,18 @@ always wins a name: a card can add commands, not replace the machine's;
 `load`, by revision, can. A program the path finds is admitted like any
 other, its manifest read from the file.
 
+**A module that cannot run here is passed over.** Every board is built
+every module, so on a path that names peers the first `<name>.mod` may be
+built for another CPU. One that declares instructions this CPU lacks
+(`isa`) or a `device` or `exclusive` this machine does not have is passed
+over with a warning, `/peer/p4/cmd/listen.mod: passed over: it needs the
+FPU and the vector unit`, and the search goes on. What changes by the
+minute is not considered: a device someone holds, a cell nobody publishes
+yet. If nothing on the path can run, the first found is still the answer,
+so `can` and the fork say why rather than "not found". The header and
+manifest are kept from the search, so admission and `can` read the needs
+without fetching the module again.
+
 **The fork pays for the read** on the forking program's stack: the
 shell's went from 1,440 bytes at its deepest to 2,568, and its stack from
 2,560 to 3,584. Other programs that fork modules by a name a person gave

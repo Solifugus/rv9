@@ -10,6 +10,7 @@
 #include "rv9/module.h"
 #include "rv9/kal.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -227,7 +228,6 @@ void rv9_mod_note_stack(rv9_mod_entry_t *entry, uint32_t given, uint32_t used)
  * `out_unit` may be NULL. When it is not, it receives the declared unit of
  * the *first* matching declaration, empty if it declared none.
  */
-static void *path_head(const struct rv9_mod_entry *e);   /* below */
 
 /*
  * A module's header and manifest, wherever it is: its image when it is
@@ -242,10 +242,7 @@ static const void *entry_head(rv9_mod_entry_t *e, uint8_t **buf)
     *buf = NULL;
     if (e->image != NULL) return e->image;
 
-    if (e->path[0]) {
-        *buf = path_head(e);
-        return *buf;
-    }
+    if (e->path[0]) return e->head;
     if (s_store == NULL) return NULL;
 
     rv9_mod_header_t h;
@@ -544,6 +541,7 @@ rv9_mod_err_t rv9_mod_read_at(const rv9_mod_entry_t *e, uint32_t off,
 }
 
 static const rv9_mod_io_ops_t *s_io_ops;
+static const rv9_mod_proc_ops_t *s_proc_ops;
 
 /* ---- the module path ---- */
 
@@ -558,10 +556,16 @@ static const rv9_mod_io_ops_t *s_io_ops;
  * one the machine was built with, which a person at the board did not ask
  * for. `load` can, by revision, because then somebody did.
  *
- * Only local volumes, for now. A peer's files over the network would make
- * a board without storage able to run anything -- and would run whatever
- * answered. The CRC catches damage, not tampering; that waits for modules
- * to be signed.
+ * A directory may be a peer's (/peer/p4/cmd/, design §74), and every board
+ * is built every module, so the first <name>.mod found may be one this
+ * machine cannot run: listen, built for the P4's FPU, on a C3. Such a one
+ * is passed over and the search goes on, so that a path naming two peers
+ * finds the copy that runs here. What is fixed about this machine decides
+ * it -- the instructions it has and the devices it was built with -- and
+ * not what changes by the minute, a device someone holds or a cell nobody
+ * publishes yet, which admission says when it is asked. When nothing on
+ * the path can run, the first found is still the answer, so that fork
+ * refuses it for its reason and `can` says why, rather than "not found".
  */
 #define PATH_FILE     "/f0/path"
 #define PATH_DEFAULT  "/sd0/cmd/ /f0/cmd/"
@@ -583,8 +587,139 @@ static int read_small(const char *file, char *buf, uint32_t cap)
     return (int)got;
 }
 
-/* The first <dir><name>.mod on the path that is a module of that name, as
-   a directory entry that is not loaded yet. NULL if there is none. */
+/* How much of an image up to `avail` its name and manifest take, the
+   manifest's end entry included: what is kept of a module found on the
+   path, so that its needs can be read without fetching it again. */
+static uint32_t head_extent(const uint8_t *img, uint32_t avail)
+{
+    const rv9_mod_header_t *h = (const rv9_mod_header_t *)img;
+    uint32_t end = h->header_len;
+    if (h->name_offset < avail) {
+        end = h->name_offset + (uint32_t)strnlen((const char *)img + h->name_offset,
+                                                 avail - h->name_offset) + 1;
+    }
+    uint32_t off = h->manifest_offset;
+    if (off == 0 || off < h->header_len || off >= avail) return end < avail ? end : avail;
+    while (off + sizeof(rv9_mod_tlv_t) <= avail) {
+        rv9_mod_tlv_t t;
+        memcpy(&t, img + off, sizeof(t));
+        uint32_t next = off + sizeof(t) + t.len;
+        if (RV9_MTAG_NUMBER(t.tag) == RV9_MTAG_END || next > avail) {
+            off = RV9_MTAG_NUMBER(t.tag) == RV9_MTAG_END ? off + sizeof(t) : avail;
+            break;
+        }
+        off = next + (4 - (next % 4)) % 4;
+    }
+    if (off > avail) off = avail;
+    return off > end ? off : end;
+}
+
+/* A copy of that much, with its header saying so, so that a walk bounded by
+   the header stops there. */
+static uint8_t *head_copy(const uint8_t *img, uint32_t avail)
+{
+    uint32_t n = head_extent(img, avail);
+    uint8_t *c = rv9_alloc(n);
+    if (c == NULL) return NULL;
+    memcpy(c, img, n);
+    ((rv9_mod_header_t *)c)->module_len = n;
+    return c;
+}
+
+/* The head of the open file `p`, if it is a module called `name`. */
+static uint8_t *read_head(int p, const char *name, size_t nl, uint32_t *size)
+{
+    rv9_mod_header_t h;
+    if (s_io_ops->read(p, &h, sizeof(h)) != (int)sizeof(h) ||
+        h.magic != RV9_MODULE_MAGIC || h.header_len != sizeof(h) ||
+        h.module_len > PATH_MOD_MAX || h.name_offset < sizeof(h) ||
+        h.name_offset + nl >= h.module_len) return NULL;
+
+    /* The name and manifest follow the header in every module mkmodule
+       writes; one that puts them further off is read up to a bound. */
+    uint32_t n = h.name_offset + (uint32_t)nl + 1;
+    if (h.manifest_offset >= sizeof(h) && h.manifest_offset < h.module_len &&
+        h.manifest_offset + MANIFEST_SCAN_MAX > n) n = h.manifest_offset + MANIFEST_SCAN_MAX;
+    if (n > h.module_len) n = h.module_len;
+    if (n > 2 * MANIFEST_SCAN_MAX) return NULL;
+
+    uint8_t *buf = rv9_alloc(n);
+    if (buf == NULL) return NULL;
+    memcpy(buf, &h, sizeof(h));
+    uint32_t got = sizeof(h);
+    while (got < n) {
+        int r = s_io_ops->read(p, buf + got, n - got);
+        if (r <= 0) break;
+        got += (uint32_t)r;
+    }
+    uint8_t *head = NULL;
+    if (got == n && memcmp(buf + h.name_offset, name, nl + 1) == 0) {
+        *size = h.module_len;
+        ((rv9_mod_header_t *)buf)->module_len = n;
+        head = head_copy(buf, n);
+    }
+    rv9_free(buf);
+    return head;
+}
+
+/* Could it run on this machine, as far as the machine is fixed? If not,
+   what it lacks, in `why`. */
+static bool runs_here(const uint8_t *head, char *why, size_t cap)
+{
+    uint32_t isa = 0;
+    rv9_sys_limits_t l;
+    if (rv9_mod_manifest_u32(head, RV9_MTAG_ISA, &isa) && isa != 0 &&
+        s_proc_ops && s_proc_ops->limits && s_proc_ops->limits(&l, sizeof(l)) == 1 &&
+        (isa & ~l.isa) != 0) {
+        uint32_t lack = isa & ~l.isa;
+        snprintf(why, cap, "%s", lack == (RV9_ISA_FPU | RV9_ISA_PIE) ? "the FPU and the vector unit"
+                 : (lack & RV9_ISA_FPU) ? "the FPU" : "the vector unit");
+        return false;
+    }
+
+    static const uint16_t must[] = { RV9_MTAG_DEVICE, RV9_MTAG_EXCLUSIVE };
+    for (unsigned k = 0; k < sizeof(must) / sizeof(must[0]) && s_io_ops && s_io_ops->have; k++) {
+        const void *v = NULL;
+        uint16_t len = 0;
+        while ((v = rv9_mod_manifest_find(head, must[k], v, &len)) != NULL) {
+            /* The device is the part up to a second slash: /pwm0 of /pwm0/3. */
+            const char *d = (const char *)v;
+            uint16_t dl = 1;
+            while (dl < len && d[dl] != '/' && d[dl] != ':') dl++;
+            if (len == 0 || d[0] != '/' || dl >= 16) continue;
+            union { char name[16]; rv9_sys_device_t rec; } q;
+            memcpy(q.name, d, dl);
+            q.name[dl] = '\0';
+            if (s_io_ops->have(&q, sizeof(q)) == 0) {
+                snprintf(why, cap, "%.*s", (int)dl, d);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static rv9_mod_entry_t *path_entry(const char *name, const char *file,
+                                   uint8_t *head, uint32_t size)
+{
+    rv9_mod_entry_t *e = rv9_calloc(1, sizeof(*e));
+    if (e == NULL) {
+        rv9_free(head);
+        return NULL;
+    }
+    const rv9_mod_header_t *h = (const rv9_mod_header_t *)head;
+    strncpy(e->name, name, sizeof(e->name) - 1);
+    e->type     = h->type;
+    e->revision = h->revision;
+    e->size     = size;
+    strncpy(e->path, file, sizeof(e->path) - 1);
+    e->head     = head;
+    return e;
+}
+
+/* The first <dir><name>.mod on the path that is a module of that name and
+   can run here, as a directory entry that is not loaded yet; else the first
+   that is a module of that name; else NULL. */
 static rv9_mod_entry_t *path_find(const char *name)
 {
     if (s_io_ops == NULL || strlen(name) >= sizeof(((rv9_mod_entry_t *)0)->name))
@@ -593,10 +728,10 @@ static rv9_mod_entry_t *path_find(const char *name)
     /* On the heap, not the stack: this runs inside whoever is forking, on
        their stack, with the I/O manager's open below it -- the shell's is
        2.5 KB, and a search made from stack buffers ran it off the end. */
-    struct { char list[PATH_MAX_LEN]; char file[64]; char nm[32]; } *b = rv9_alloc(sizeof(*b));
+    struct { char list[PATH_MAX_LEN]; char file[64]; char why[40]; } *b = rv9_alloc(sizeof(*b));
     if (b == NULL) return NULL;
     char *list = b->list, *file = b->file;
-    rv9_mod_entry_t *found = NULL;
+    rv9_mod_entry_t *found = NULL, *first = NULL;
     int n = read_small(PATH_FILE, list, PATH_MAX_LEN - 1);
     if (n <= 0) {
         strcpy(list, PATH_DEFAULT);
@@ -615,73 +750,37 @@ static rv9_mod_entry_t *path_find(const char *name)
             memcpy(file + dl, name, nl);
             memcpy(file + dl + nl, ".mod", 5);
 
-            rv9_mod_header_t h;
             int p = s_io_ops->open(file, RV9_MODE_READ);
             if (p >= 0) {
-                int got = s_io_ops->read(p, &h, sizeof(h));
-                char *nm = b->nm;
-                int ok = got == (int)sizeof(h) && h.magic == RV9_MODULE_MAGIC &&
-                         h.module_len <= PATH_MOD_MAX &&
-                         h.name_offset + nl < h.module_len &&
-                         s_io_ops->seek(p, (int32_t)h.name_offset, RV9_SEEK_SET) >= 0 &&
-                         s_io_ops->read(p, nm, (uint32_t)nl + 1) == (int)nl + 1 &&
-                         memcmp(nm, name, nl + 1) == 0;
+                uint32_t size = 0;
+                uint8_t *head = read_head(p, name, nl, &size);
                 s_io_ops->close(p);
-                if (ok) {
-                    found = rv9_calloc(1, sizeof(*found));
-                    if (found != NULL) {
-                        memcpy(found->name, name, nl + 1);
-                        found->type     = h.type;
-                        found->revision = h.revision;
-                        found->size     = h.module_len;
-                        memcpy(found->path, file, dl + nl + 5);
-                    }
+                if (head == NULL) {
+                    ESP_LOGW(TAG, "%s is not the module '%s'", file, name);
+                } else if (runs_here(head, b->why, sizeof(b->why))) {
+                    found = path_entry(name, file, head, size);
                     break;
+                } else {
+                    ESP_LOGW(TAG, "%s: passed over: it needs %s", file, b->why);
+                    if (first == NULL) {
+                        first = path_entry(name, file, head, size);
+                    } else {
+                        rv9_free(head);
+                    }
                 }
-                ESP_LOGW(TAG, "%s is not the module '%s'", file, name);
             }
         }
         d = end;
     }
     rv9_free(b);
-    return found;
-}
-
-/* The start of a path entry's file, up to its manifest and a kilobyte past
-   it, with the header saying that much: enough for the manifest to be read
-   without loading the module. NULL if the file will not give it. */
-static void *path_head(const rv9_mod_entry_t *e)
-{
-    if (s_io_ops == NULL) return NULL;
-    int p = s_io_ops->open(e->path, RV9_MODE_READ);
-    if (p < 0) return NULL;
-    rv9_mod_header_t h;
-    uint8_t *buf = NULL;
-    if (s_io_ops->read(p, &h, sizeof(h)) == (int)sizeof(h) &&
-        h.manifest_offset != 0 && h.manifest_offset < h.module_len &&
-        h.module_len <= PATH_MOD_MAX) {
-        uint32_t n = h.module_len;
-        if (n > h.manifest_offset + MANIFEST_SCAN_MAX) n = h.manifest_offset + MANIFEST_SCAN_MAX;
-        buf = rv9_alloc(n);
-        if (buf != NULL) {
-            uint32_t got = 0;
-            if (s_io_ops->seek(p, 0, RV9_SEEK_SET) >= 0) {
-                while (got < n) {
-                    int r = s_io_ops->read(p, buf + got, n - got);
-                    if (r <= 0) break;
-                    got += (uint32_t)r;
-                }
-            }
-            if (got == n) {
-                ((rv9_mod_header_t *)buf)->module_len = n;
-            } else {
-                rv9_free(buf);
-                buf = NULL;
-            }
+    if (found != NULL) {
+        if (first != NULL) {
+            rv9_free(first->head);
+            rv9_free(first);
         }
+        return found;
     }
-    s_io_ops->close(p);
-    return buf;
+    return first;
 }
 
 /*
@@ -883,6 +982,7 @@ const rv9_mod_entry_t *rv9_mod_find(const char *name)
     for (rv9_mod_entry_t *o = s_dir; o; o = o->next) {
         if (strcmp(o->name, name) == 0) {
             rv9_lock_release(s_lock);
+            rv9_free(e->head);
             rv9_free(e);
             return o;
         }
@@ -972,6 +1072,13 @@ rv9_mod_err_t rv9_mod_link(const char *name, rv9_mod_entry_t **out_entry)
             rv9_free(image);
             *out_entry = e;
             return RV9_MOD_OK;
+        }
+        /* The file may have changed since it was found: keep what these
+           bytes say they need, not what the first ones did. */
+        uint8_t *fresh = head_copy(image, e->size);
+        if (fresh != NULL) {
+            rv9_free(e->head);
+            e->head = fresh;
         }
     } else if (s_xip) {
         /*
@@ -1125,8 +1232,6 @@ static uint32_t env_no_signals(void)
 }
 
 void rv9_mod_set_io_ops(const rv9_mod_io_ops_t *ops) { s_io_ops = ops; }
-
-static const rv9_mod_proc_ops_t *s_proc_ops;
 
 void rv9_mod_set_proc_ops(const rv9_mod_proc_ops_t *ops) { s_proc_ops = ops; }
 

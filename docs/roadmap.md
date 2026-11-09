@@ -1170,7 +1170,8 @@ a peer as it finds one on its card, and runs it if it can. In steps:
      `/files/`, started when `/f0/serve` exists.
    - **3c, `/peer` — done**: a peer's files, peers in `/f0/peers`, modules
      from a peer always signed, a peer that is off passed over.
-   - 3d, a path search that passes over what cannot run here.
+   - **3d, needs on the path — done**: a module built for instructions or
+     devices this machine lacks is passed over, and the next tried.
    - 3e, catalogs in `dir`, and pins in `/f0/pins` by peer or hash.
    - Packaging on the same layout: `tools/mkrepo.py` makes a release a PC
      serves, `get <command>` installs a copy, and data files gain hashes

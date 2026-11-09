@@ -1858,6 +1858,9 @@ typedef struct rv9_mod_entry {
        it is read from each time it is linked, and freed from when the last
        link goes. Empty for the store's and for `load`'s. */
     char                  path[64];
+    /* Its header, name and manifest, kept from when it was found, so that
+       what it needs is read without fetching it again from a peer. */
+    void                 *head;
 
     /* The deepest any process running it has gone, measured at its end --
        RV-9's own work on that stack included. Since boot; not stored. */
