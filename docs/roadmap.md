@@ -1175,9 +1175,11 @@ a peer as it finds one on its card, and runs it if it can. In steps:
    - **3e, catalogs and pins — done**: `dir /peer/p4/cmd` lists a peer's
      catalog; `/f0/pins` holds a name to a peer or place and to a build by
      SHA-256; a change to the path or pins applies at the next start.
-   - Packaging on the same layout: `tools/mkrepo.py` makes a release a PC
-     serves, `get <command>` installs a copy, and data files gain hashes
-     in their `file` tags.
+   - **Packaging — done** (design §75): `tools/mkrepo.py` makes a release
+     a PC serves, with a SHA-256 in each catalog line; `get <command>`
+     keeps a checked copy and fetches the files it reads; `file` tags carry
+     the SHA-256 of the build, checked by `get`, `mksystem.py` and
+     `mkrepo.py`.
 4. **Running on a peer, where the work must move**: `listen` asked for on a
    C3 runs on the P4, which has the microphone, the FPU and the memory.
 

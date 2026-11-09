@@ -4,7 +4,7 @@
   "generated_by": "tools/mkprofile.py -- regenerate, do not edit",
   "module": {
     "magic": 1295603282,
-    "abi": 16,
+    "abi": 17,
     "header_bytes": 40,
     "types": {
       "PROGRAM": 1,
@@ -333,7 +333,8 @@
     "LOG": 12,
     "CLOCK": 13,
     "HAVE": 14,
-    "NEEDS": 15
+    "NEEDS": 15,
+    "CHECK": 16
   },
   "calls": [
     {

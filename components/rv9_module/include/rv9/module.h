@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     16
+#define RV9_MODULE_ABI     17
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -1445,6 +1445,37 @@ typedef struct __attribute__((packed)) {
     uint16_t len;           /* bytes of manifest entries that follow */
     uint8_t  manifest[];    /* tag, len, value, padded to four; ends at END */
 } rv9_sys_needs_t;
+
+/*
+ * Is this file what it ought to be? For `get`, which copies a module and
+ * the files it reads from another machine, and must not keep what this one
+ * would refuse.
+ *
+ * On entry `path` names the file and `flags` says how far to go. Its
+ * SHA-256 is always taken, of the whole file as `sha256sum` takes it, read
+ * a piece at a time, so a voice of megabytes is hashed on a board that
+ * could not hold it. With RV9_CHECK_MODULE the file is also read whole and
+ * judged as a module from a peer is: it verifies, it is signed by a key in
+ * /f0/trust (a key must be there, bench or not), and it could run on this
+ * machine. Returns 1 when it passes, 0 when it does not, and `err` says
+ * why: an rv9_mod_err_t, or RV9_MOD_ERR_IO for a file it could not read.
+ * -1 for a bad call.
+ */
+#define RV9_SYS_CHECK   16
+
+#define RV9_CHECK_MODULE 1u
+
+typedef struct __attribute__((packed)) {
+    char     path[64];      /* in */
+    uint32_t flags;         /* in: RV9_CHECK_* */
+    uint8_t  sha256[32];
+    int32_t  err;           /* rv9_mod_err_t; 0 when it passed */
+    uint32_t size;          /* of the file */
+    uint16_t revision;      /* a module's */
+    uint16_t reserved;
+    char     signer[24];    /* its key's name in /f0/trust, or "" */
+    char     lacks[40];     /* what it needs this machine lacks, or "" */
+} rv9_sys_check_t;
 
 /*
  * What time it is, as opposed to how long the machine has been up.

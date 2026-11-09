@@ -2,7 +2,7 @@
  * httpd -- this machine's modules, served to its peers.
  *
  *   GET /catalog           one line per module /m0 holds:
- *                          name revision size type signer
+ *                          name revision size type signer sha256
  *   GET /cmd/<name>.mod    the module, byte for byte from /m0
  *   GET /files/<name>      /sd0/<name>, if a module here declares it
  *
@@ -37,6 +37,7 @@ typedef struct {
     char listen[32];
     rv9_sys_needs_t n;
     uint8_t more[NEEDS_MAX];
+    rv9_sys_check_t ck;
     uint32_t served;
 } httpd_statics_t;
 
@@ -142,8 +143,24 @@ static void catalog_line(const rv9_mod_env_t *env, httpd_statics_t *st, int c,
     } else {
         put(env, c, "-");
     }
-    put(env, c, "\n");
     env->close(p);
+
+    /* The file's SHA-256, which is what /f0/pins names a build by. */
+    put(env, c, " ");
+    copy_str(st->ck.path, sizeof(st->ck.path), st->path, NULL);
+    st->ck.flags = 0;
+    if (env->sysinfo(RV9_SYS_CHECK, &st->ck, sizeof(st->ck)) == 1) {
+        char hex[65];
+        for (int i = 0; i < 32; i++) {
+            hex[2 * i] = "0123456789abcdef"[st->ck.sha256[i] >> 4];
+            hex[2 * i + 1] = "0123456789abcdef"[st->ck.sha256[i] & 15];
+        }
+        hex[64] = '\0';
+        put(env, c, hex);
+    } else {
+        put(env, c, "-");
+    }
+    put(env, c, "\n");
 }
 
 static void catalog(const rv9_mod_env_t *env, httpd_statics_t *st, int c)
@@ -182,7 +199,9 @@ static bool declared(const rv9_mod_env_t *env, httpd_statics_t *st, const char *
                 uint16_t tag = (uint16_t)(m[off] | (m[off + 1] << 8));
                 uint16_t len = (uint16_t)(m[off + 2] | (m[off + 3] << 8));
                 if (RV9_MTAG_NUMBER(tag) == RV9_MTAG_END || off + 4 + len > st->n.len) break;
-                if (RV9_MTAG_NUMBER(tag) == RV9_MTAG_FILE && len == want) {
+                /* "/sd0/whistle.cact", or with its hash after an '=' */
+                if (RV9_MTAG_NUMBER(tag) == RV9_MTAG_FILE &&
+                    (len == want || (len > want && m[off + 4 + want] == '='))) {
                     bool same = true;
                     for (uint32_t k = 0; k < want && same; k++) same = m[off + 4 + k] == (uint8_t)file[k];
                     if (same) found = true;
@@ -252,7 +271,7 @@ static void serve(const rv9_mod_env_t *env, httpd_statics_t *st, int c)
 __attribute__((section(".text.entry")))
 int rv9_module_entry(const rv9_mod_env_t *env)
 {
-    if (env == NULL || env->abi_version < 16) return 2;   /* RV9_SYS_NEEDS */
+    if (env == NULL || env->abi_version < 17) return 2;   /* RV9_SYS_CHECK */
 
     httpd_statics_t *st = (httpd_statics_t *)env->statics;
     if (st == NULL || env->statics_size < sizeof(*st)) return 2;

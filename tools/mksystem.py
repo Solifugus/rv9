@@ -192,8 +192,10 @@ def modules():
         text = open(conf).read()
 
         def key(k):
-            m = re.search(rf'^{k}="?([^"\n#]*)"?', text, re.M)
-            return m[1].split() if m else []
+            # A quoted value may go on over lines, as bash reads it.
+            m = (re.search(rf'^{k}="([^"]*)"', text, re.M)
+                 or re.search(rf'^{k}=([^\n#]*)', text, re.M))
+            return m[1].replace("\\\n", " ").split() if m else []
         name = os.path.basename(os.path.dirname(conf))
         mods[name] = (set(key("groups")), key("files"))
         needs[name] = {"devices": key("devices") + key("exclusives"),
@@ -254,6 +256,16 @@ def select(words, mods, what):
     return {n for n, (gs, _) in mods.items() if "all" in w or n in w or gs & w}
 
 
+@functools.lru_cache(maxsize=None)
+def sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for piece in iter(lambda: f.read(1 << 20), b""):
+            h.update(piece)
+    return h.hexdigest()
+
+
 def card_plan(build, sysdef, drivers, files_dir):
     """What goes on the card: [(name on the card, file here)], and what is
     missing here. The store's contents are read from its build log."""
@@ -273,14 +285,21 @@ def card_plan(build, sysdef, drivers, files_dir):
     for n in sorted(commands):
         plan.append((f"cmd/{n}.mod", os.path.join(ROOT, "build", "modules", n + ".mod")))
     if "sdcard" in drivers:
-        wanted = sorted({f[len("/sd0/"):] for n in stored | commands
-                         for f in mods[n][1] if f.startswith("/sd0/")})
-        for f in wanted:
+        # "/sd0/whistle.cact=<sha256>": the file, and the build it must be.
+        wanted = {}
+        for n in stored | commands:
+            for f in mods[n][1]:
+                path, _, digest = f.partition("=")
+                if path.startswith("/sd0/"):
+                    wanted[path[len("/sd0/"):]] = digest
+        for f, digest in sorted(wanted.items()):
             src = os.path.join(files_dir, f)
-            if os.path.exists(src):
-                plan.append((f, src))
-            else:
+            if not os.path.exists(src):
                 missing.append(f)
+            elif digest and sha256(src) != digest:
+                fail(f"{src} is not the build its module names (sha256 {digest[:16]}...)")
+            else:
+                plan.append((f, src))
     return (plan, missing, left - commands, int(count[2]) if count else 0,
             (stored | commands) & set(mods))
 

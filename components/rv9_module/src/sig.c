@@ -145,3 +145,35 @@ int rv9_sha256(const void *data, uint32_t len, uint8_t out[32])
     while (j.state != DONE) rv9_task_delay_ms(1);
     return j.result;
 }
+
+/* A file's SHA-256 a piece at a time, for one too big to hold: on the
+   caller's stack, as a hash is shallow and each piece is short. */
+struct rv9_sha256_ctx { psa_hash_operation_t op; };
+
+rv9_sha256_ctx_t *rv9_sha256_begin(void)
+{
+    if (psa_crypto_init() != PSA_SUCCESS) return NULL;
+    rv9_sha256_ctx_t *c = rv9_alloc(sizeof(*c));
+    if (c == NULL) return NULL;
+    c->op = (psa_hash_operation_t)PSA_HASH_OPERATION_INIT;
+    if (psa_hash_setup(&c->op, PSA_ALG_SHA_256) != PSA_SUCCESS) {
+        rv9_free(c);
+        return NULL;
+    }
+    return c;
+}
+
+int rv9_sha256_update(rv9_sha256_ctx_t *c, const void *data, uint32_t len)
+{
+    return psa_hash_update(&c->op, data, len) == PSA_SUCCESS ? 0 : -1;
+}
+
+int rv9_sha256_end(rv9_sha256_ctx_t *c, uint8_t out[32])
+{
+    size_t n = 0;
+    int r = out != NULL && psa_hash_finish(&c->op, out, 32, &n) == PSA_SUCCESS &&
+            n == 32 ? 0 : -1;
+    if (r != 0) psa_hash_abort(&c->op);
+    rv9_free(c);
+    return r;
+}

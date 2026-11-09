@@ -239,7 +239,9 @@ manager's lock held and `rv9_io_close_path` would wait on it.
 
 `/peer/p4/cmd` opened as a directory is the peer's catalog, `GET /catalog`,
 one entry per line, `<name>.mod` and its size: `dir /peer/p4/cmd` lists
-what the module path would find there. Any path ending in `/cmd` reads the
+what the module path would find there. A catalog line is `name revision
+size type signer sha256`; only the first three are read, so a later
+catalog may add fields. Any path ending in `/cmd` reads the
 `catalog` beside it, so a PC serving `a/cmd/` and `a/catalog` is listed as
 `dir /peer/pc/a/cmd`. A path with a space in it is not asked for.
 
@@ -471,9 +473,51 @@ other build where the place finds one (`not the build /f0/pins names`),
 with the hash it found in the log. The file is read at every search, as
 `/f0/path` is. A pin does not reach the store, which always wins a name.
 
-A command found on the path is found again when `/f0/path` or `/f0/pins`
-has changed since, at its next start, so a change applies to names already
-used as well as new ones. One that is running keeps what it was found as.
+A command found on the path is found again at its next start when
+`/f0/path` or `/f0/pins` has changed since, when the file here it was
+found in is gone, or when a copy has appeared here at a place searched
+before it, which is what `get` makes. So a change applies to names already
+used as well as new ones. Only places on this machine are looked at for
+that; a peer is asked again when the rules change. One that is running
+keeps what it was found as.
+
+**Keeping a copy: `get`.** `get <command>` copies a module the path finds
+on a peer to the first place on the path that is this machine's own
+(`/sd0/cmd/`, or `/f0/cmd/` with no card), where the next start finds it
+first, and it runs with the peer switched off. It is found as a fork finds
+it, so `/f0/pins` says which peer and which build. Nothing is kept that
+this machine would refuse: the copy is made as `cmd/<name>.new`, which the
+path never finds, and checked there by `RV9_SYS_CHECK` — it must verify,
+be signed by a key in `/f0/trust` (one must be there), and be able to run
+here — before it takes its name.
+
+```
+rv9> get fhello
+fhello: /peer/pc/cmd/fhello.mod, 460 bytes
+  signed by solifugus; kept as /sd0/cmd/fhello.mod
+  /sd0/fdata.bin: fetched 50,000 bytes, the build it names
+rv9> get listen                   (on a C5)
+listen: /peer/pc/cmd/listen.mod, 35,380 bytes
+  refused, and not kept: it needs the FPU and the vector unit
+```
+
+Then the files it reads, its `file` tags, from `files/` beside the `cmd/`
+it came from, as `httpd` and `tools/mkrepo.py` lay them out. Each is read
+from the manifest of the copy just checked, and must hash to the SHA-256
+its tag names: the signature covers the tag, so a model fetched from a
+server nobody vouches for is the build the signer made the module for. A
+file already here that hashes right is not fetched again; one whose tag
+names no hash is fetched if absent and left alone if present; one here
+that is another build is left alone and said, since something else may
+read it. Only files on `/sd0` are fetched. The status is 0 when the module
+and every file it reads are here.
+
+**A release** is a directory any web server can serve, laid out as
+`httpd` serves a board: `catalog`, `cmd/<name>.mod`, `files/<name>`.
+`tools/mkrepo.py rel [groups or names] --files DIR` writes one from
+`build/modules`, refusing a file that is not the build its module names,
+and `--serve PORT` serves it. Named in `/f0/peers` and put on `/f0/path`,
+it is one more peer: `pc 192.168.1.12:8099` and `/peer/pc/cmd/`.
 
 **The fork pays for the read** on the forking program's stack: the
 shell's went from 1,440 bytes at its deepest to 2,568, and its stack from
@@ -585,7 +629,7 @@ means it is recorded and passed on but nothing checks it.
 | `isa` | **yes** | Instructions it cannot run without, as `RV9_ISA_*` bits: `isa="fpu pie"` in `build.conf`. Refused with `RV9_PE_ISA` on a CPU that lacks one. A module that only *prefers* them (`detect`) asks `RV9_SYS_LIMITS` instead and declares nothing. |
 | `uses` | advisory | A device only some of what it does needs: `detect` opens `/cam0` unless given a file. Said so that `can` and `tools/mksystem.py` can report it; never refused on. |
 | `module` | advisory | A module it starts. Not refused on, because it may be on a card put in later, or (one day) on a peer. |
-| `file` | advisory | A file it reads, by path: `/sd0/whistle.cact`. The same reasoning; `tools/mksystem.py` puts the card's on the card. |
+| `file` | advisory | A file it reads, by path, and after an `=` the SHA-256 of the build it was made for: `/sd0/whistle.cact=b6e02f04…` (all 64 digits). The same reasoning; `tools/mksystem.py` puts the card's on the card and refuses a file of another build, and `get` checks what it fetches. |
 | `mandatory` | — | Not a tag but a bitmask over them. See below. |
 
 ### Mandatory tags, and unknown ones
@@ -849,6 +893,7 @@ and why `RV9_SYS_MEM_MIN` exists to mark the part that may never move.
 | `RV9_SYS_CLOCK` | one `rv9_sys_clock_t` | Wall-clock time and whether it has ever been set. UTC only. It says *false* rather than lying when the network has never been asked. |
 | `RV9_SYS_HAVE` | one `rv9_sys_device_t` | **A question, not an enumeration.** Name in, device record out, returns 1 or 0. See §18. |
 | `RV9_SYS_NEEDS` | one `rv9_sys_needs_t` | A module's manifest, wherever a fork would find it. Module name in; where it was found, its revision and its manifest entries out. Returns 1, or 0 when there is no such module. What `can` reads. See §18. |
+| `RV9_SYS_CHECK` | one `rv9_sys_check_t` | Is this file what it ought to be? `path` and `flags` in; the file's SHA-256 (read a kilobyte at a time, so any size), its size, and `err` out. With `RV9_CHECK_MODULE` it is also judged as a module from a peer: it verifies, is signed by a key in `/f0/trust` (`signer` names it), and could run here (`lacks` says what it needs, from its head, before the rest is read). Returns 1 when it passes, 0 when not. What `get` keeps by and `httpd`'s catalog hashes with. |
 
 ## 9. Device settings: getstat and setstat
 
@@ -1778,7 +1823,7 @@ same quantity.
 
 | profile | value | |
 |---|---|---|
-| `abi` | 16 | What this firmware implements. See §7 on `abi_version`. |
+| `abi` | 17 | What this firmware implements. See §7 on `abi_version`. |
 | `header_bytes` | 40 | The fixed header before the manifest (§5). |
 
 Two of these are worth a sentence, because the number is not the interesting

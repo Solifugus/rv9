@@ -61,7 +61,7 @@ static const char *TAG = "rv9-peer";
 typedef struct {
     bool       is_dir;
     bool       is_cat;             /* /cmd: the catalog, read as a directory */
-    char       line[64];           /* the catalog line being put together */
+    char       line[64];           /* the start of the catalog line being read */
     uint32_t   line_len;
     char       pend[64];           /* catalog bytes read and not yet used */
     uint32_t   pend_n, pend_at;
@@ -361,8 +361,10 @@ static rv9_io_err_t body_read(peer_path_t *st, void *buf, size_t len, size_t *do
 
 /*
  * The catalog as directory entries: from each line, "name revision size
- * type signer", the entry <name>.mod of that size, as the file the module
- * path would open. Lines too long to be a catalog's are dropped.
+ * type signer sha256", the entry <name>.mod of that size, as the file the
+ * module path would open. Only the first three are read, so only the
+ * start of a line is kept; what a later catalog adds after them is no
+ * concern of a directory listing.
  */
 static void cat_entry(peer_path_t *st, rv9_dirent_t *d)
 {
@@ -395,7 +397,7 @@ static rv9_io_err_t cat_read(rv9_path_t *path, peer_path_t *st, void *buf, size_
             st->pend_at = 0;
             st->pend_n = (uint32_t)got;
             if (got == 0) {
-                if (st->line_len > 0 && st->line_len < sizeof(st->line)) {
+                if (st->line_len > 0) {
                     cat_entry(st, &out[n]);      /* a last line with no newline */
                     if (out[n].name[0]) n++;
                 }
@@ -405,15 +407,11 @@ static rv9_io_err_t cat_read(rv9_path_t *path, peer_path_t *st, void *buf, size_
         }
         char c = st->pend[st->pend_at++];
         if (c == '\n') {
-            if (st->line_len < sizeof(st->line)) {
-                cat_entry(st, &out[n]);
-                if (out[n].name[0]) n++;
-            }
+            cat_entry(st, &out[n]);
+            if (out[n].name[0]) n++;
             st->line_len = 0;
         } else if (st->line_len < sizeof(st->line) - 1) {
             st->line[st->line_len++] = c;
-        } else {
-            st->line_len = sizeof(st->line);    /* too long to be one: dropped */
         }
     }
     path->pos += (int64_t)n;

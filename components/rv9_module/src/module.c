@@ -656,7 +656,8 @@ static uint8_t *head_copy(const uint8_t *img, uint32_t avail)
     return c;
 }
 
-/* The head of the open file `p`, if it is a module called `name`. */
+/* The head of the open file `p`, if it is a module called `name` -- or of
+   any name, when `name` is NULL. */
 static uint8_t *read_head(int p, const char *name, size_t nl, uint32_t *size)
 {
     rv9_mod_header_t h;
@@ -683,7 +684,7 @@ static uint8_t *read_head(int p, const char *name, size_t nl, uint32_t *size)
         got += (uint32_t)r;
     }
     uint8_t *head = NULL;
-    if (got == n && memcmp(buf + h.name_offset, name, nl + 1) == 0) {
+    if (got == n && (name == NULL || memcmp(buf + h.name_offset, name, nl + 1) == 0)) {
         *size = h.module_len;
         ((rv9_mod_header_t *)buf)->module_len = n;
         head = head_copy(buf, n);
@@ -891,9 +892,9 @@ static rv9_mod_entry_t *path_find(const char *name, uint32_t *rules_crc)
  * is the bench. With one, a module must be signed by one of them. Read at
  * every check, like /f0/path, so a change is immediate.
  *
- * A module from another machine (/peer/...) gets no bench: it must be
- * signed by a key here whether or not there are others. Nobody at this
- * machine put it there.
+ * A module from another machine (/peer/..., or one `get` is about to keep,
+ * through RV9_SYS_CHECK) gets no bench: it must be signed by a key here
+ * whether or not there are others. Nobody at this machine put it there.
  */
 #define TRUST_FILE "/f0/trust"
 #define TRUST_MAX  2048
@@ -916,7 +917,8 @@ static bool hex_bytes(const char *s, uint8_t *out, size_t n)
     return true;
 }
 
-static rv9_mod_err_t trust_check(const uint8_t *image, uint32_t len, const char *from)
+static rv9_mod_err_t trust_check(const uint8_t *image, uint32_t len, const char *from,
+                                 bool remote, char signer[24])
 {
     const rv9_mod_header_t *h = (const rv9_mod_header_t *)image;
     bool is_signed = (h->attr & RV9_MOD_ATTR_SIGNED) && len >= h->header_len + sizeof(rv9_mod_sig_t);
@@ -963,7 +965,7 @@ static rv9_mod_err_t trust_check(const uint8_t *image, uint32_t len, const char 
     }
     rv9_free(text);
 
-    if (keys == 0 && strncmp(from, "/peer/", 6) == 0) {
+    if (keys == 0 && remote) {
         ESP_LOGE(TAG, "%s: from a peer, and %s holds no key to check it with",
                  from, TRUST_FILE);
         return RV9_MOD_ERR_SIGNATURE;
@@ -1003,6 +1005,7 @@ static rv9_mod_err_t trust_check(const uint8_t *image, uint32_t len, const char 
         return RV9_MOD_ERR_SIGNATURE;
     }
     ESP_LOGI(TAG, "%s: signed by %s, checked in %lu us", from, who, (unsigned long)us);
+    if (signer != NULL) memcpy(signer, who, sizeof(who));
     return RV9_MOD_OK;
 }
 
@@ -1081,7 +1084,8 @@ static rv9_mod_err_t path_read(rv9_mod_entry_t *e, void **out)
     }
     char hex[17] = "";
     if (err == RV9_MOD_OK) err = pin_check(image, got, e, hex);
-    if (err == RV9_MOD_OK) err = trust_check(image, got, e->path);
+    if (err == RV9_MOD_OK) err = trust_check(image, got, e->path,
+                                                  strncmp(e->path, "/peer/", 6) == 0, NULL);
     if (err != RV9_MOD_OK) {
         rv9_free(image);
         ESP_LOGE(TAG, "%s: %s", e->path, rv9_mod_strerror(err));
@@ -1095,16 +1099,56 @@ static rv9_mod_err_t path_read(rv9_mod_entry_t *e, void **out)
     return RV9_MOD_OK;
 }
 
-/* /f0/path and /f0/pins as they are now, summed, to see whether a module
-   found on the path was found by the rules in force. */
-static uint32_t rules_crc(void)
+/*
+ * Is a module found on the path still what the path finds? Not when the
+ * rules have changed; nor when the file here it was found in is gone,
+ * deleted or its card taken out; nor when a copy has since appeared here
+ * at a place searched before it -- what `get` makes, or anyone copying one
+ * onto the card -- which would win a search now. Only places on this
+ * machine are looked at: asking a peer again at every start would cost a
+ * request each, and a peer's copy appearing earlier is a rare thing that
+ * the rules changing, or a restart, will find.
+ */
+static bool still_found(const rv9_mod_entry_t *e)
 {
-    rules_t *r = rv9_alloc(sizeof(*r));
-    if (r == NULL) return 0;
-    read_rules(r);
-    uint32_t crc = r->crc;
-    rv9_free(r);
-    return crc;
+    struct { rules_t r; pin_t pin; char file[64]; } *b = rv9_alloc(sizeof(*b));
+    if (b == NULL) return true;
+    read_rules(&b->r);
+    bool same = b->r.crc == e->path_crc;
+    size_t nl = strlen(e->name);
+    size_t place_len = pin_for(b->r.pins, e->name, &b->pin) ? strlen(b->pin.place) : 0;
+    for (char *d = b->r.path; same && *d; ) {
+        while (*d == ' ' || *d == '\t' || *d == '\n' || *d == '\r') d++;
+        char *end = d;
+        while (*end && *end != ' ' && *end != '\t' && *end != '\n' && *end != '\r') end++;
+        size_t dl = (size_t)(end - d);
+        if (dl == 0) break;
+        if (strncmp(e->path, d, dl) == 0 &&
+            strncmp(e->path + dl, e->name, nl) == 0 && strcmp(e->path + dl + nl, ".mod") == 0) {
+            /* Where it was found: still there, if it is here to look at. */
+            if (strncmp(d, "/peer/", 6) != 0) {
+                int p = s_io_ops->open(e->path, RV9_MODE_READ);
+                if (p >= 0) s_io_ops->close(p);
+                same = p >= 0;
+            }
+            break;
+        }
+        bool placed = place_len == 0 ||
+                      (dl >= place_len && memcmp(d, b->pin.place, place_len) == 0);
+        if (placed && strncmp(d, "/peer/", 6) != 0 && dl + nl + 5 <= sizeof(b->file)) {
+            memcpy(b->file, d, dl);
+            memcpy(b->file + dl, e->name, nl);
+            memcpy(b->file + dl + nl, ".mod", 5);
+            int p = s_io_ops->open(b->file, RV9_MODE_READ);
+            if (p >= 0) {
+                s_io_ops->close(p);
+                same = false;
+            }
+        }
+        d = end;
+    }
+    rv9_free(b);
+    return same;
 }
 
 const rv9_mod_entry_t *rv9_mod_find(const char *name)
@@ -1122,12 +1166,12 @@ const rv9_mod_entry_t *rv9_mod_find(const char *name)
     }
     if (best != NULL && best->path[0] == '\0') return best;
 
-    /* Found on the path before: still the answer while the rules it was
-       found by hold, or while something runs it. A change to /f0/path or
-       /f0/pins takes effect at the next start, as it does for a name not
-       found yet. */
+    /* Found on the path before: still the answer while the search would
+       find it again, or while something runs it. A change to /f0/path or
+       /f0/pins, or a copy put before it, takes effect at the next start,
+       as it does for a name not found yet. */
     if (best != NULL && (best->link_count > 0 || best->image != NULL ||
-                         best->path_crc == rules_crc())) {
+                         still_found(best))) {
         return best;
     }
 
@@ -1542,6 +1586,90 @@ static int needs_op(void *buf, uint32_t len)
     return 1;
 }
 
+/*
+ * RV9_SYS_CHECK. The hash is taken as the file is read, a kilobyte at a
+ * time; a module is also kept whole, as path_read keeps one, for the checks
+ * that need all of it. Nothing is cached: this is asked once per file `get`
+ * copies, and it is the copy on this machine's card that is judged.
+ */
+#define CHECK_PIECE 1024
+
+static int check_op(void *buf, uint32_t len)
+{
+    if (len < sizeof(rv9_sys_check_t) || s_io_ops == NULL) return -1;
+    rv9_sys_check_t *c = (rv9_sys_check_t *)buf;
+    if (strnlen(c->path, sizeof(c->path)) == sizeof(c->path)) return -1;
+    bool module = (c->flags & RV9_CHECK_MODULE) != 0;
+    memset(c->sha256, 0, sizeof(*c) - offsetof(rv9_sys_check_t, sha256));
+    c->err = RV9_MOD_ERR_IO;
+
+    int p = s_io_ops->open(c->path, RV9_MODE_READ);
+    if (p < 0) {
+        c->err = RV9_MOD_ERR_NOTFOUND;
+        return 0;
+    }
+    uint64_t size = 0;
+    if (s_io_ops->getstat(p, RV9_GS_SIZE, &size) < 0 || size > UINT32_MAX ||
+        (module && (size == 0 || size > PATH_MOD_MAX))) {
+        s_io_ops->close(p);
+        c->err = RV9_MOD_ERR_INVAL;
+        return 0;
+    }
+    c->size = (uint32_t)size;
+
+    /* What it needs first, from its head: a module this machine could not
+       run is refused for that, not for the memory to hold all of it. */
+    if (module) {
+        uint32_t full = 0;
+        uint8_t *head = read_head(p, NULL, 0, &full);
+        bool runs = head != NULL && runs_here(head, c->lacks, sizeof(c->lacks));
+        rv9_free(head);
+        if (!runs || s_io_ops->seek(p, 0, RV9_SEEK_SET) < 0) {
+            s_io_ops->close(p);
+            c->err = RV9_MOD_ERR_INVAL;
+            return 0;
+        }
+    }
+
+    uint8_t *image = module ? rv9_alloc((size_t)size) : NULL;
+    uint8_t *piece = module ? NULL : rv9_alloc(CHECK_PIECE);
+    rv9_sha256_ctx_t *h = rv9_sha256_begin();
+    if ((module ? image : piece) == NULL || h == NULL) {
+        s_io_ops->close(p);
+        rv9_free(image);
+        rv9_free(piece);
+        if (h) rv9_sha256_end(h, NULL);
+        c->err = RV9_MOD_ERR_NOMEM;
+        return 0;
+    }
+    uint32_t got = 0;
+    bool ok = true;
+    while (got < size && ok) {
+        uint8_t *at = module ? image + got : piece;
+        uint32_t want = (uint32_t)size - got;
+        if (want > CHECK_PIECE) want = CHECK_PIECE;
+        int n = s_io_ops->read(p, at, want);
+        if (n <= 0) break;
+        ok = rv9_sha256_update(h, at, (uint32_t)n) == 0;
+        got += (uint32_t)n;
+    }
+    s_io_ops->close(p);
+    rv9_free(piece);
+    ok = rv9_sha256_end(h, c->sha256) == 0 && ok && got == size;
+
+    rv9_mod_err_t err = ok ? RV9_MOD_OK : RV9_MOD_ERR_IO;
+    if (module && err == RV9_MOD_OK) {
+        err = rv9_mod_verify(image, got);
+        if (err == RV9_MOD_OK) {
+            c->revision = ((const rv9_mod_header_t *)image)->revision;
+            err = trust_check(image, got, c->path, true, c->signer);
+        }
+    }
+    rv9_free(image);
+    c->err = err;
+    return err == RV9_MOD_OK ? 1 : 0;
+}
+
 static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
 {
     if (buf == NULL) return -1;
@@ -1599,6 +1727,9 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
 
     case RV9_SYS_NEEDS:
         return needs_op(buf, len);
+
+    case RV9_SYS_CHECK:
+        return check_op(buf, len);
 
     case RV9_SYS_LIMITS:
         if (s_proc_ops == NULL || s_proc_ops->limits == NULL) return -1;
@@ -1793,7 +1924,8 @@ rv9_mod_err_t rv9_mod_load_path(const char *path)
     s_io_ops->close(p);
 
     rv9_mod_err_t err = (got == size) ? rv9_mod_verify(buf, got) : RV9_MOD_ERR_IO;
-    if (err == RV9_MOD_OK) err = trust_check(buf, got, path);
+    if (err == RV9_MOD_OK) err = trust_check(buf, got, path,
+                                                  strncmp(path, "/peer/", 6) == 0, NULL);
     if (err == RV9_MOD_OK) err = rv9_mod_register_image(buf, got);
     if (err != RV9_MOD_OK) {
         ESP_LOGE(TAG, "load '%s': %s", path, rv9_mod_strerror(err));

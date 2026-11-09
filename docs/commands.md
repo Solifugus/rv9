@@ -68,6 +68,7 @@ The habit this machine rewards: ask it, do not guess. All of these read
 | `pubs` | What is being published, by whom, how often, how long ago, and how many snapshots were abandoned (`torn`). |
 | `date` | Acquired from the network, and **unknown until it answers** — this board has no clock that survives power. It says so rather than printing 1970. |
 | `netstat` | The link: state, SSID, address. |
+| `get <command>` | A command from another machine, kept on this one: the module the path finds on a peer, copied to the first place on the path that is this machine's (`/sd0/cmd/`), and the files it reads from `files/` beside it. Kept only if it verifies, is signed by a key in `/f0/trust` and can run here; each file only if it hashes to what the module's `file` tag names. A file here of another build is left alone and said. |
 | `have` | Does this machine have it? `have /i2c0` by name, `have svgwin` by driver, `have scf` by file manager. `have` alone lists what a program would usually ask about. |
 | `can <command>` | Could this machine run it, and if not, why not. Every need its manifest declares, met or not: the devices and instructions it cannot run without, devices it only uses for some of what it does, the modules it starts, the files it reads, external memory for its arena. Ends `yes`, `no: it would be refused` or `no: it would start, and lack what it needs`; the status is 0 for yes. Finds the command as running it would, in the store or on the module path. |
 | `profile` | What *this board* offers a program, as JSON. The other half — what every RV-9 offers — is `docs/target/rv9-profile.json`. |
@@ -200,7 +201,7 @@ rasteriser out of its own — see `modules/pic/build.conf` and
 | `trust` / `trust add [line]` / `trust remove <name or id>` | The keys whose signed modules this machine runs from a file (`/f0/trust`). `add` takes the line `tools/mkkey.py` prints, as an argument or pasted. With no key, a module from the card, `/f0` or `load` runs signed or not, with a warning; with one, it must be signed by a key here. The store is trusted either way. |
 | `authkey` / `authkey list` / `authkey clear` | Trust a public key, read from stdin because a key line is longer than an argument should be. No Ed25519 in mbedTLS as shipped — use ECDSA P-256 or RSA. |
 | `sshd` | A shell over SSH. |
-| `httpd` | This machine's modules, served to its peers over HTTP/1.0: `GET /catalog` (one line per module: name, revision, size, type, signer), `/cmd/<name>.mod` (from `/m0`) and `/files/<name>` (`/sd0/<name>`, only when a module here declares that it reads it, so `/sd0/faces.db` is never served). Read-only, one connection at a time. Started by init when `/f0/serve` exists, on the port written in it, else 8080: `echo 8080 > /f0/serve`. |
+| `httpd` | This machine's modules, served to its peers over HTTP/1.0: `GET /catalog` (one line per module: name, revision, size, type, signer, SHA-256), `/cmd/<name>.mod` (from `/m0`) and `/files/<name>` (`/sd0/<name>`, only when a module here declares that it reads it, so `/sd0/faces.db` is never served). Read-only, one connection at a time. Started by init when `/f0/serve` exists, on the port written in it, else 8080: `echo 8080 > /f0/serve`. |
 | `rshd` | The same over a plain socket, on port 2300. `sshd` is this with one string changed, which is the argument for where the protocol was put. |
 
 ---

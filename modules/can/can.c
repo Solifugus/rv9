@@ -174,7 +174,10 @@ int rv9_module_entry(const rv9_mod_env_t *env)
             break;
         }
         case RV9_MTAG_FILE: {
-            copy_value(st->word, sizeof(st->word), v, len);
+            /* "/sd0/whistle.cact=<sha256>": the file, and the build it must be */
+            uint16_t fl = 0;
+            while (fl < len && v[fl] != '=') fl++;
+            copy_value(st->word, sizeof(st->word), v, fl);
             int p = env->open(st->word, RV9_MODE_READ);
             if (p >= 0) env->close(p);
             if (p < 0) missing = true;

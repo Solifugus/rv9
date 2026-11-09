@@ -7991,7 +7991,7 @@ puts the key back. The first boot with a key also refused the old unsigned
 - **Revocation** is `trust remove`, and **rollback** is not prevented: an
   old signed module with a bug still verifies. The highest-revision rule
   narrows it; pinning by hash belongs to step 3.
-- **Data files** (models, the voice) are not modules and are not signed.
+- **Data files** (models, the voice) are not modules and are not signed. (§75: the module that reads one now names its SHA-256 in a signed `file` tag.)
 - `can` and `mdir` do not show the signer yet; `tools/modinfo.py` does,
   and checks the signature against your key.
 
@@ -8170,6 +8170,91 @@ pinned to `pc`, it ran from `b` again. `needcam` pinned to its hash ran;
 pinned to another, it was refused with its own hash named. `rec` pinned
 to a peer that is not listed was "no such module". Each start from a peer
 was one GET per candidate tried and one to read.
+
+## 75. Packaging: releases, `get`, and hashes for data files
+
+The end of step 3. §74 made a peer's modules files on the module path, and
+said a release on a PC would be just another peer. This makes that so, and
+adds the two things a peer alone does not give: a copy that outlives the
+peer, and a way to trust the data files a module reads, which §73 left
+unsigned.
+
+**A release** is `tools/mkrepo.py OUT [groups or names]`: `OUT/catalog`,
+`OUT/cmd/<name>.mod` from `build/modules`, and `OUT/files/<name>` for the
+files the chosen modules declare, taken from `--files`. It is the layout
+`httpd` serves from a board, so `/peer/pc/cmd/` on the path and
+`dir /peer/pc/cmd` work on it unchanged; `--serve PORT` serves it. The
+catalog gains a sixth field, the module file's SHA-256, written by
+`mkrepo.py` and by `httpd` alike, which is what `/f0/pins` names a build
+by and what a person reads to write one. `peerfm` reads only the first
+three fields and keeps only the start of a line, so a catalog may grow
+more without a board's 64-byte line buffer growing with it.
+
+**Hashes in `file` tags.** A data file is not a module and has no
+signature block, and a voice of 2.5 MB is a poor thing to sign on its own.
+But the module that reads it is signed, so the module says which build it
+reads: `files="/sd0/whistle.cact=b6e02f04…"` in `build.conf`, the full
+SHA-256 after an `=`, in the manifest as written. The signature covers the
+tag, so the hash is the signer's word, and a file fetched from a server
+nobody vouches for is checked against it. `can` and `httpd` read the path
+up to the `=`; `mksystem.py` refuses to put a file of another build on a
+card, and `mkrepo.py` to publish one. The hashes in the tree were taken
+from the files on the bench, and the P4's card's `whistle.cact`, fetched
+from its `httpd`, has the one `listen` names.
+
+**`get <command>`** keeps a copy of what the path finds on a peer at the
+first place on the path that is this machine's, so the next search finds
+it before the peer. Three choices:
+
+- *Found as a fork finds it.* `RV9_SYS_NEEDS` says where, so pins choose
+  the peer and build, and `get` has no rules of its own.
+- *Checked where the path cannot see it.* The copy is `cmd/<name>.new`,
+  checked by a new call, `RV9_SYS_CHECK`, as a peer's module is checked
+  at a start: it verifies, it is signed by a key in `/f0/trust` (a key must
+  be there, bench or not), and it could run here. Only then is it copied
+  to its name. RBF has no rename, so that is a second copy, of a module
+  only; a model is fetched in place. What it lacks is read from its head
+  before the rest is held, so `listen` on a C5 is refused for the FPU and
+  not for the 35 KB it would take to hold it, which was the first result.
+- *Files from the copy that was checked.* The search's manifest came from
+  the peer unchecked; the hashes worth believing are in the signed copy,
+  so `get` asks `RV9_SYS_NEEDS` again once it is kept, which now finds the
+  copy here.
+
+A file here that is another build is left alone and said rather than
+replaced: the first version replaced it, so `get fbad`, whose tag names
+another build of `fhello`'s file, removed the file `fhello` reads when
+the fetch did not match. Two modules wanting two builds of one file is a
+person's choice.
+
+**The path, again.** A module found on a peer was the answer until the
+rules changed, so a copy `get` had just kept would not have been run until
+a restart. A cached path entry is now found again also when the file here
+it was found in is gone, and when a copy has appeared here at a place
+searched before it. Only this machine's places are opened for that, a
+cheap open each at a start; asking peers at every start would be a request
+each.
+
+**`RV9_SYS_CHECK`**, ABI 17: a path and flags in, the SHA-256 of the whole
+file out, read a kilobyte at a time through a streaming hash on the
+caller's stack, so the hash of a file larger than this machine's memory
+can be taken. A hash is shallow, unlike a signature check, which still goes
+to its own task. `httpd`'s stack peak with the catalog hashing every
+module was 1,600 bytes on the C5, against 1,632 before; `get`'s was 2,368.
+
+Measured on the C5, with `mkrepo.py` serving a release from the PC: `get
+fhello` kept it as `/sd0/cmd/fhello.mod` and fetched its 50,000-byte file,
+the build it names; `can fhello` then found it on the card. Again, "here
+already". `get funs`, unsigned, and a signed module with one byte changed
+and its CRC mended were refused and not kept. `get fbad` kept the module,
+and left `fhello`'s file alone. `get listen` was refused for the FPU and
+the vector unit. With the copy deleted, the next search found the peer's
+again. The C5's `httpd` served its 115-line catalog in 0.39 to 0.58 s, and
+every hash in it matched `sha256sum` of the built module.
+
+Still to do: `get` does not fetch the files of a module already here, and
+`can` says a file is present without checking its hash, which would read
+megabytes. Discovery of peers, and running on one (step 4), are next.
 
 ## 9. Migration to a native kernel
 

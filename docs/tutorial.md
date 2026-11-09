@@ -847,7 +847,7 @@ and within ten seconds the board serves what it holds, which any machine
 can read:
 
 ```sh
-curl http://<board>:8080/catalog            # name revision size type signer
+curl http://<board>:8080/catalog            # name revision size type signer sha256
 curl -O http://<board>:8080/cmd/listen.mod  # the module, as in its store
 ```
 
@@ -877,10 +877,32 @@ command to one peer, or to one build of it:
 
 ```
 rv9> echo listen p4 > /f0/pins
-``` It must be signed by a key in `/f0/trust`,
-even on a board that otherwise takes unsigned modules. A PC serving a
-directory with `cmd/<name>.mod` in it (`python3 -m http.server`) is a peer
-the same way.
+```
+
+A module from a peer must be signed by a key in `/f0/trust`, even on a
+board that otherwise takes unsigned modules.
+
+A PC is a peer the same way. `tools/mkrepo.py` writes a release in the
+layout a board serves, the files the modules read included, and serves it:
+
+```sh
+tools/mkrepo.py rel net greet --files out --serve 8099
+```
+
+and on the board, `echo pc 192.168.1.12:8099 >> /f0/peers` and
+`/peer/pc/cmd/` on the path. To keep a command after its peer is gone,
+`get` it:
+
+```
+rv9> get fhello
+fhello: /peer/pc/cmd/fhello.mod, 460 bytes
+  signed by solifugus; kept as /sd0/cmd/fhello.mod
+  /sd0/fdata.bin: fetched 50,000 bytes, the build it names
+```
+
+It is kept only if this board would run it, and each file only if it is
+the build the module names in its `file` tag; the next start finds the
+copy on the card first.
 
 So there are three places a command can live, and they cost different
 things: the store, which costs nothing to start and is reflashed to change;
