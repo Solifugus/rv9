@@ -4,6 +4,6 @@
 # still uses the C5's pin assignments until its own wiring is decided.
 
 target="esp32c3"
-drivers="ramdisk net ssh gpio pwm adc tsens i2c"
+drivers="ramdisk net peer ssh gpio pwm adc tsens i2c"
 selftest="yes"
 store="base net pins rt"

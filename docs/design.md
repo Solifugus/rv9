@@ -8053,6 +8053,46 @@ ten seconds; it did not happen again in thirty requests back to back, nor
 after two more large transfers, and is not explained. `httpd` takes one
 connection at a time, so the client side (3c) retries.
 
+### 3c: /peer
+
+The client: `peerfm` over `peer`, a driver with nothing of its own, since
+the network is `/n0`'s. `/peer/<name>/<rest>` is a GET of `/<rest>` from the
+peer `/f0/peers` names (`p4 192.168.1.178:8080`), so `/peer/p4/cmd/` on the
+module path searches the P4's modules by the rule the path already has, and
+`can`, the instruction-set check and admission apply to them unchanged. A
+PC serving a directory of `cmd/<name>.mod` is a peer the same way.
+
+**A module from a peer is always signed.** `trust_check` refuses one from
+`/peer/` when `/f0/trust` holds no key, where a module from the card is
+accepted with a warning: nobody at this machine put it there.
+
+**A peer that is off must not cost a wait at every command.** Every name the
+shell does not know is looked for along the path, so `/n0` gained a connect
+timeout in the path (`/n0/<host>/<port>/<ms>`, fifteen seconds without it)
+and `/peer` asks with two; a peer that times out is passed over for a minute,
+one that refuses is asked three times 300 ms apart, since `httpd` serves one
+connection at a time. A read that gets nothing for ten seconds fails rather
+than waiting as a socket read otherwise does.
+
+A seek forward reads on and a seek back asks again, unless it lands in what
+came with the headers: the module manager reads a header and then seeks to
+the start, which costs nothing. One thing in the I/O manager had to change:
+a file manager's close runs with its lock held, so the first `/peer` hung
+at the end of every file, closing its `/n0` path through a call that takes
+the same lock. `rv9_io_close_below` releases a stacked path from inside a
+close, and the device below's last close runs when the outer close lets go.
+
+Measured on the C5 against the P4: the P4's catalog of 125 modules through
+`/peer`; `can listen` reading its needs from the P4 and saying no for the
+FPU, `listen` refused for its instruction set and `play` for `/au0`;
+`pico.rv9m`, 412 KB, read whole in 3.5 s; `faces.db` not served. From a PC
+serving a release: a signed module ran, one unsigned and one altered after
+signing were refused, and the signed one was refused once `/f0/trust` was
+emptied. A switched-off peer ahead of the P4 on the path cost the first
+lookup 2 s and the next none; 20 lookups in a row all answered. Once, just
+after boot, the P4 itself did not answer a connect in 2 s, behind the dead
+peer; it did not happen again.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

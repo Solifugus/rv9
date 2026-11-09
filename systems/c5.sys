@@ -5,7 +5,7 @@
 # /tts0, and no programs for them in the store.
 
 target="esp32c5"
-drivers="lcdcon svgwin sdcard ramdisk net ssh gpio pwm adc tsens i2c"
+drivers="lcdcon svgwin sdcard ramdisk net peer ssh gpio pwm adc tsens i2c"
 selftest="yes"
 store="base net pins rt screen"
 card=""

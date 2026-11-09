@@ -446,6 +446,22 @@ static void dev_last_close(rv9_dev_t *dev)
     if (dev->drv->close) dev->drv->close(dev);
 }
 
+/*
+ * A device whose last path went in a file manager's close -- a stacked path,
+ * released by rv9_io_close_below with the lock held -- and whose own close
+ * is therefore owed. Run by whoever lets go of the lock next on the way out
+ * of a close. One is enough: a stacked close releases one path below it.
+ */
+static rv9_dev_t *s_idle_below;
+
+/* With the lock held: the device owed a last close, if any, now taken. */
+static rv9_dev_t *take_idle_below(void)
+{
+    rv9_dev_t *d = s_idle_below;
+    s_idle_below = NULL;
+    return d;
+}
+
 /* ---- sessions ---- */
 
 /*
@@ -697,10 +713,12 @@ rv9_io_err_t rv9_io_close(int num)
     rv9_dev_t *idle = NULL;
     path_release(t->paths[num], &idle);
     t->paths[num] = NULL;
+    rv9_dev_t *below = take_idle_below();
 
     rv9_lock_release(s_lock);
 
     if (idle) dev_last_close(idle);
+    if (below) dev_last_close(below);
     return RV9_IO_OK;
 }
 
@@ -777,10 +795,12 @@ rv9_io_err_t rv9_io_dup2(int from, int to)
 
     t->paths[from]->refs++;
     t->paths[to] = t->paths[from];
+    rv9_dev_t *below = take_idle_below();
 
     rv9_lock_release(s_lock);
 
     if (idle) dev_last_close(idle);
+    if (below) dev_last_close(below);
     return RV9_IO_OK;
 }
 
@@ -957,9 +977,25 @@ void rv9_io_close_path(rv9_path_t *p)
     rv9_dev_t *idle = NULL;
     rv9_lock_acquire(s_lock);
     path_release(p, &idle);
+    rv9_dev_t *below = take_idle_below();
     rv9_lock_release(s_lock);
 
     if (idle) dev_last_close(idle);
+    if (below) dev_last_close(below);
+}
+
+void rv9_io_close_below(rv9_path_t *p)
+{
+    if (p == NULL) return;
+    rv9_dev_t *idle = NULL;
+    path_release(p, &idle);
+    if (idle) {
+        if (s_idle_below != NULL && s_idle_below != idle) {
+            ESP_LOGW(TAG, "%s: its last close is not run", idle->name);
+        } else {
+            s_idle_below = idle;
+        }
+    }
 }
 
 /* ---- process lifecycle ---- */
@@ -1099,7 +1135,7 @@ static void io_on_exit(rv9_pid_t pid)
 {
     /* Devices this process was the last user of. Told after the lock goes,
        because a driver being told may close a path of its own. */
-    rv9_dev_t *idle[RV9_MAX_PATHS];
+    rv9_dev_t *idle[RV9_MAX_PATHS + 1];      /* and one owed from below */
     int nidle = 0;
 
     /* Taken before anything is released, because releasing is what frees
@@ -1130,6 +1166,8 @@ static void io_on_exit(rv9_pid_t pid)
 
         rv9_free(t);
     }
+    rv9_dev_t *below = take_idle_below();
+    if (below) idle[nidle++] = below;
 
     rv9_lock_release(s_lock);
 

@@ -1168,8 +1168,8 @@ a peer as it finds one on its card, and runs it if it can. In steps:
    - **3a, `/m0` — done**: the modules a machine holds, as files.
    - **3b, `httpd` — done**: `/catalog`, `/cmd/<name>.mod`, declared
      `/files/`, started when `/f0/serve` exists.
-   - 3c, `/peer`: a peer's modules as a directory, peers in `/f0/peers`,
-     always signed.
+   - **3c, `/peer` — done**: a peer's files, peers in `/f0/peers`, modules
+     from a peer always signed, a peer that is off passed over.
    - 3d, a path search that passes over what cannot run here.
    - 3e, catalogs in `dir`, and pins in `/f0/pins` by peer or hash.
    - Packaging on the same layout: `tools/mkrepo.py` makes a release a PC

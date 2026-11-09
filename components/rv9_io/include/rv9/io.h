@@ -500,6 +500,15 @@ rv9_io_err_t rv9_io_write_path(rv9_path_t *p, const void *buf, size_t len,
 rv9_io_err_t rv9_io_setstat_path(rv9_path_t *p, uint32_t code, void *arg);
 void         rv9_io_close_path(rv9_path_t *p);
 
+/*
+ * The same, from inside a file manager's close, which the I/O manager calls
+ * with its lock held: a file manager stacked on another device (PEERFM on
+ * /n0) lets go of the path below it here, and rv9_io_close_path would wait
+ * on the lock its own caller holds. The device below's last close, if that
+ * was its last path, runs as the outer close lets go of the lock.
+ */
+void         rv9_io_close_below(rv9_path_t *p);
+
 /* Remove a file, e.g. "/r0/notes". */
 rv9_io_err_t rv9_io_remove(const char *name);
 rv9_io_err_t rv9_io_puts(int path, const char *s);

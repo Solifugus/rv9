@@ -254,6 +254,9 @@ static void io_bringup(void)
 #if CONFIG_RV9_DRV_NET
     REGISTER(rv9_nfm_register());
 #endif
+#if CONFIG_RV9_DRV_PEER
+    REGISTER(rv9_peerfm_register());
+#endif
 #if CONFIG_RV9_DRV_GPIO || CONFIG_RV9_DRV_PWM || CONFIG_RV9_DRV_ADC || CONFIG_RV9_DRV_TSENS
     REGISTER(rv9_pio_register());
 #endif
@@ -276,6 +279,9 @@ static void io_bringup(void)
 #endif
 #if CONFIG_RV9_DRV_NET
     REGISTER(rv9_drv_net_register());
+#endif
+#if CONFIG_RV9_DRV_PEER
+    REGISTER(rv9_drv_peer_register());
 #endif
 #if CONFIG_RV9_DRV_GPIO
     REGISTER(rv9_drv_gpio_register());

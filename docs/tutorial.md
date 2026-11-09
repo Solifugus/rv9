@@ -854,6 +854,26 @@ curl -O http://<board>:8080/cmd/listen.mod  # the module, as in its store
 `/m0` is the same thing on the board itself: `dir /m0` lists the modules,
 and `copy /m0/pubs /sd0/cmd/pubs.mod` puts one on the card.
 
+Another board reads them through `/peer`. Name the server in `/f0/peers`
+and put it on the module path:
+
+```
+rv9> echo p4 192.168.1.178:8080 > /f0/peers
+rv9> echo /sd0/cmd/ /f0/cmd/ /peer/p4/cmd/ > /f0/path
+rv9> cat /peer/p4/catalog | count
+125 lines, 625 words, 4828 bytes
+rv9> can listen
+listen, from /peer/p4/cmd/listen.mod
+  no   isa fpu pie            this CPU has neither
+...
+```
+
+A command this board does not hold is now looked for on the P4 too, and
+run here if it can run here. It must be signed by a key in `/f0/trust`,
+even on a board that otherwise takes unsigned modules. A PC serving a
+directory with `cmd/<name>.mod` in it (`python3 -m http.server`) is a peer
+the same way.
+
 So there are three places a command can live, and they cost different
 things: the store, which costs nothing to start and is reflashed to change;
 a volume's top level, `/f0/thing.mod`, read at every boot and held from

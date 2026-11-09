@@ -907,6 +907,11 @@
       "write_rt": false
     },
     {
+      "name": "peerfm",
+      "read_rt": false,
+      "write_rt": false
+    },
+    {
       "name": "pfm",
       "read_rt": true,
       "write_rt": true
@@ -991,6 +996,13 @@
     },
     {
       "name": "net",
+      "read_rt": null,
+      "write_rt": null,
+      "retains": false,
+      "sessions": false
+    },
+    {
+      "name": "peer",
       "read_rt": null,
       "write_rt": null,
       "retains": false,

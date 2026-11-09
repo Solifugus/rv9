@@ -30,6 +30,15 @@ menu "RV-9 devices"
             it there is no SSH, no rshd, no clock from the network and no
             fetch.
 
+    config RV9_DRV_PEER
+        bool "/peer: other machines' modules"
+        default y
+        depends on RV9_DRV_NET
+        help
+            Another board's modules as files, fetched from its httpd over
+            /n0: /peer/<name>/cmd/<command>.mod, peers named in /f0/peers.
+            A module path entry of /peer/p4/cmd/ runs what the P4 holds.
+
     config RV9_DRV_GPIO
         bool "/gpio: pins"
         default y

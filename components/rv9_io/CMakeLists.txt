@@ -62,6 +62,7 @@ set(RV9_IO_REQ rv9_kal rv9_module rv9_proc driver esp_driver_i2c
 # driver, no device, and `have net` says no.
 #
 rv9_if(CONFIG_RV9_DRV_NET "src/nfm.c" "src/drv_net.c")
+rv9_if(CONFIG_RV9_DRV_PEER "src/peerfm.c")
 list(APPEND RV9_IO_REQ lwip esp_netif esp_wifi esp_event)
 
 #

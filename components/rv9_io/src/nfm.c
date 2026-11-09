@@ -11,6 +11,7 @@
  *
  *   /n0                     the device itself: status and configuration
  *   /n0/<host>/<port>       connect outbound, e.g. /n0/127.0.0.1/8080
+ *   /n0/<host>/<port>/<ms>  the same, giving up on the connect after <ms>
  *   /n0/listen/<port>       wait for one inbound connection
  *
  * Opening a listener blocks until someone connects, which is the same
@@ -109,7 +110,8 @@ static bool split_endpoint(const char *rest, char *host, size_t host_len,
     return true;
 }
 
-static rv9_io_err_t connect_out(const char *host, uint16_t port, int *out_fd)
+static rv9_io_err_t connect_out(const char *host, uint16_t port, uint32_t wait_ms,
+                                int *out_fd)
 {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -140,7 +142,7 @@ static rv9_io_err_t connect_out(const char *host, uint16_t port, int *out_fd)
 
     /* Wait for the handshake by asking whether the socket has become
        writable, sleeping in between so other threads run. */
-    for (uint32_t waited = 0; waited < CONNECT_TIMEOUT_MS; waited += POLL_MS) {
+    for (uint32_t waited = 0; waited < wait_ms; waited += POLL_MS) {
         fd_set wfds;
         FD_ZERO(&wfds);
         FD_SET(fd, &wfds);
@@ -360,9 +362,31 @@ static rv9_io_err_t nfm_open(rv9_path_t *path, const char *rest)
         return RV9_IO_OK;
     }
 
+    /*
+     * A third part is how long to wait for the connect. Fifteen seconds is
+     * right for a host on the far side of the internet and wrong for a
+     * board on this network that is switched off: /peer asks with two, so
+     * a peer that is not there costs a looked-for command two seconds.
+     */
+    char ep[80];
+    uint32_t wait_ms = CONNECT_TIMEOUT_MS;
+    strncpy(ep, rest, sizeof(ep) - 1);
+    ep[sizeof(ep) - 1] = '\0';
+    char *first = strchr(ep, '/');
+    char *last = strrchr(ep, '/');
+    if (first && last != first && strncmp(ep, "listen/", 7) != 0) {
+        int ms = atoi(last + 1);
+        if (ms <= 0) {
+            rv9_free(st);
+            return RV9_IO_ERR_INVAL;
+        }
+        wait_ms = (uint32_t)ms;
+        *last = '\0';
+    }
+
     char host[64];
     uint16_t port = 0;
-    if (!split_endpoint(rest, host, sizeof(host), &port)) {
+    if (!split_endpoint(ep, host, sizeof(host), &port)) {
         rv9_free(st);
         return RV9_IO_ERR_INVAL;
     }
@@ -372,7 +396,7 @@ static rv9_io_err_t nfm_open(rv9_path_t *path, const char *rest)
         err = accept_in(port, &st->fd, &st->listen_slot);
     } else {
         ESP_LOGI(TAG, "connecting to %s:%u", host, (unsigned)port);
-        err = connect_out(host, port, &st->fd);
+        err = connect_out(host, port, wait_ms, &st->fd);
     }
 
     if (err != RV9_IO_OK) {

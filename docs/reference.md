@@ -78,10 +78,11 @@ the one place the limit is worth remembering.
 | `rbf` | a file name | **the directory** — read it for `rv9_dirent_t` records |
 | `pio` | a unit number, decimal | refused: a pin has to be said |
 | `ifm` | an address, decimal **or** `0x`-hex | refused |
-| `nfm` | `host/port`, split at the *last* slash; `listen/PORT` to accept | the device, for `getstat` |
+| `nfm` | `host/port`, split at the *last* slash; `host/port/MS` to give up on the connect after MS; `listen/PORT` to accept | the device, for `getstat` |
 | `pfm` | a cell name | the directory of cells; **read-only** |
 | `pipe` | a pipe name | refused: an unnamed pipe has no other end to find |
 | `mfm` | a module name | the directory of modules; **read-only** throughout |
+| `peerfm` | `PEER/what`, GET `/what` from that peer | the peers `/f0/peers` names; **read-only** throughout |
 
 `ifm` taking both `0x68` and `104` is deliberate. A datasheet says the first
 and a shell script usually says the second, and refusing either would be a
@@ -156,6 +157,7 @@ one.
 | `pfm` | a published cell, whole | no | **yes** | **yes** |
 | `pipe` | characters, between processes | no | no | no |
 | `mfm` | a module, byte for byte | yes | no | no |
+| `peerfm` | a file from a peer, as its server sends it | yes, by reading again | no | no |
 
 Only `pio` and `pfm` are real-time safe in both directions, and that is the
 whole reason a control loop reads a pin and publishes a cell rather than
@@ -223,7 +225,17 @@ other. Set it to `RV9_IFM_REG_NONE` and a read is a plain read.
 
 The path *is* the connection. `/n0/host/port` opens an outbound TCP
 connection; `/n0/listen/port` accepts an inbound one. After that it is a
-stream, so `cat` works on a socket.
+stream, so `cat` works on a socket. `/n0/host/port/ms` gives up on the
+connect after `ms` instead of fifteen seconds.
+
+### `peerfm` — another machine's files
+
+`/peer/p4/cmd/listen.mod` is `GET /cmd/listen.mod` from the peer `/f0/peers`
+calls `p4`, so a module path entry of `/peer/p4/cmd/` searches what the P4
+serves exactly as `/sd0/cmd/` searches the card. It is stacked on `/n0` by
+a detached path, and lets go of it from its close with
+`rv9_io_close_below`, because a file manager's close runs with the I/O
+manager's lock held and `rv9_io_close_path` would wait on it.
 
 ### `pfm` — the publication file manager
 
@@ -271,6 +283,7 @@ the firmware.
 | `/touch` | `scf` | `touch` | The touch panel, as a stream of 12-byte events. Reads block; records are never split. The queue is emptied on first open, so a program gets fingers from now rather than a backlog. Only where there is one. **Flashing the P4 leaves the controller not scanning; an ordinary reset does not. Its reset line is not wired, so take the board's power away.** The driver says so when it sees it. |
 | `/i2c0/ADDR` | `ifm` | `i2c` | The two-wire bus. The pins are the board's; the only option is kHz (100). Shared with the touch controller. A register number above `0xff` is sent as two bytes, high first. |
 | `/n0/…` | `nfm` | `net` | TCP, out and in. |
+| `/peer/NAME/…` | `peerfm` | `peer` | Another machine's files, as its `httpd` serves them: `/peer/p4/catalog`, `/peer/p4/cmd/listen.mod`, `/peer/p4/files/pico.rv9m`. Peers are named in `/f0/peers`, one a line, `<name> <host>[:<port>]` (8080), read at every open. One GET an open, over `/n0`; the length is the answer's, a seek forward reads on and a seek back asks again. A connect waits 2 s; a peer that did not answer is passed over for 60 s, one that refused is asked three times. A module read from here must be signed by a key in `/f0/trust` even when it holds none. Built with `/n0`. |
 | `/pub0/NAME` | `pfm` | `pubmem` | Published cells. |
 | `/pipe/NAME` | `pipe` | `pipemem` | Pipes. |
 | `/m0/NAME` | `mfm` | `moddir` | The modules this machine holds, as read-only files: the store's and any `load` brought in, byte for byte, signature included. `dir /m0` lists them, `copy /m0/pubs /sd0/cmd/pubs.mod` puts one on the card, and `httpd` serves them to peers. A module found on the module path is not listed: it is a file somewhere already. Always built. |
@@ -361,7 +374,8 @@ module give the same bytes.
 file (the module path, `load`, a volume's top level at boot) must be signed
 by a key in `/f0/trust` once that file holds any key, and is refused with
 `RV9_MOD_ERR_SIGNATURE` otherwise. With no key there, it is accepted with a
-warning. The store is trusted as it is, because writing it is flashing the
+warning -- except from `/peer`, where a module is refused unless a key here
+checks it. The store is trusted as it is, because writing it is flashing the
 board. Built-in images the self-tests register are not files and are not
 checked.
 

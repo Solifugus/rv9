@@ -7,7 +7,7 @@ target="esp32p4"
 
 # CONFIG_RV9_DRV_<NAME>, by name. Every driver not named is left out; the
 # console, /f0, /pub0 and pipes are always there.
-drivers="lcdcon svgwin touch sdcard ramdisk net ssh gpio pwm adc tsens i2c audio camera tts"
+drivers="lcdcon svgwin touch sdcard ramdisk net peer ssh gpio pwm adc tsens i2c audio camera tts"
 
 # The self-tests, run when /f0/selftest asks. "yes" puts the `tests` group
 # in the store as well, because the suites fork those.

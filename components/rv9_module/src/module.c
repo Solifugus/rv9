@@ -695,6 +695,10 @@ static void *path_head(const rv9_mod_entry_t *e)
  * anything is accepted as it was before signatures, with a warning, which
  * is the bench. With one, a module must be signed by one of them. Read at
  * every check, like /f0/path, so a change is immediate.
+ *
+ * A module from another machine (/peer/...) gets no bench: it must be
+ * signed by a key here whether or not there are others. Nobody at this
+ * machine put it there.
  */
 #define TRUST_FILE "/f0/trust"
 #define TRUST_MAX  2048
@@ -764,6 +768,11 @@ static rv9_mod_err_t trust_check(const uint8_t *image, uint32_t len, const char 
     }
     rv9_free(text);
 
+    if (keys == 0 && strncmp(from, "/peer/", 6) == 0) {
+        ESP_LOGE(TAG, "%s: from a peer, and %s holds no key to check it with",
+                 from, TRUST_FILE);
+        return RV9_MOD_ERR_SIGNATURE;
+    }
     if (b == NULL) {
         if (keys == 0) {
             ESP_LOGW(TAG, "%s: not signed; accepted, as %s holds no key", from, TRUST_FILE);

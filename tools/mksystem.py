@@ -465,6 +465,8 @@ def main():
     unknown = drivers - known_drivers()
     if unknown:
         fail(f"no such driver: {' '.join(sorted(unknown))}")
+    if "peer" in drivers and "net" not in drivers:
+        fail("peer needs net: /peer is fetched over /n0")
     if "ssh" in drivers and "net" not in drivers:
         fail("ssh needs net")
 
