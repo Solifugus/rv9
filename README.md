@@ -354,10 +354,11 @@ code cannot: `listen` typed on a C5 runs on the P4, which has the FPU and
 the microphone, for the boards its `/f0/callers` names, each proving who it
 is with its own key (`on`, `execd`; design §76).
 
-Verified as mechanisms but not yet against real parts: **I²C** has only
-talked to an empty bus, and the **sonic ranger** command has only been
-measured against a generator on a pin (exact to 2 µs, see design §51). Both
-are waiting on a chip to answer.
+**I²C** answers real parts on the P4: `i2c scan` finds the board's four
+chips, and `i2c 0x18 0xfd` reads the codec's ID, 0x83. Verified as a
+mechanism but not yet against a real part: the **sonic ranger** command has
+only been measured against a generator on a pin (exact to 2 µs, see design
+§51).
 
 Still to come:
 - **The kernel owning the CPU from reset**, with its own trap vector and

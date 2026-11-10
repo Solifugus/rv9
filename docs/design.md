@@ -7972,7 +7972,8 @@ on the stack of whoever is starting it, which `can` had just shown can
 overflow, and the C3 does its arithmetic in software while every RV-9 thread
 shares one host task. On the C5 a check takes **19.6 ms and 1.2 KB of
 stack**, the same three times running; the task has 3 KB. The C3 is still to
-be measured: it has no network to fetch a module with yet.
+be measured: it has no network to fetch a module with yet. (Since measured:
+406 ms for `listen`'s 35 KB, §79.)
 
 Tested on the C5 with modules its store does not carry, so that they came
 off the card: with no key, signed and unsigned run with a warning; with the
@@ -8434,6 +8435,49 @@ said. The P4 had `hold` killed between 3 and 6 s later (the samples were 3
 s apart), against its own 30 s, and `/gpio/2` read 0 with both its devices
 released. The other way, resetting the P4 under `on p4 sleep 60` ended the
 C5's `on` with "the connection ended before it did".
+
+## 79. The C3 on the network
+
+The C3 SuperMini had waited since §73 for its WiFi. Setting it turned up
+four things, and the C3 is now a peer like the others.
+
+**Its antenna cannot take full power.** It associated and was never
+authenticated: disconnect reason 2 (authentication expired), now and then
+15, five times and a pause, while the C5 and the P4 joined the same access
+point at once. This is a fault widely reported for the SuperMini, whose
+small antenna and layout misbehave at the chip's full 20 dBm, and the
+usual cure worked first time: at most 8.5 dBm, and it joined on the first
+try. `CONFIG_RV9_NET_TX_QDBM` (quarter dBm, 0 for the chip's own) is set
+from a system file's new `wifi_dbm`, and `systems/c3.sys` says `8.5`, since
+it is the board that needs it, not the chip.
+
+**`wifi <ssid>` asks for the password**, with the echo off, as was expected
+when it did not; `wifi <ssid> <password>` still works for a script.
+
+**Two warnings at every boot that were not.** `sshd` on a board with no
+login password said so every five seconds, which buried the C3's prompt;
+it says so once now. And every board warned that band mode 3 was
+unavailable, the C3 because it has one band and the P4 because its radio is
+a companion with one: band selection is now made only on a chip with 5 GHz.
+
+**A signature check on the C3 takes 406 ms** for `listen`'s 35 KB, against
+19.6 ms on the C5: the C3 does P-256 in software. Measured at boot, from a
+copy at the top of `/f0`, since the shell turns the log down to warnings and
+the check is logged as information. It is paid at every start of a module
+from a peer, so a command used often on a C3 is worth keeping with `get`,
+or in its store.
+
+On the C3, with `/peer/p4/cmd/` on its path and its id in the P4's
+`/f0/callers`: `dir /peer/p4/cmd` lists 131 modules; `listen -f
+/sd0/clip.raw` was passed over for the FPU and ran on the P4, the same words
+in 7.9 s; `on` peaked at 1,728 bytes of stack.
+
+**And the P4 had no `/i2c0`.** Its boot said "no room for file manager
+'ifm': 8 already registered", and had since `/peer` and `/m0` made nine.
+The table is sixteen now. With it, `/i2c0` answers real chips for the first
+time: `i2c scan` finds 0x18, 0x36, 0x40 and 0x5d (the ES8311, the camera,
+the ES7210 and the touch controller), and `i2c 0x18 0xfd` and `i2c 0x40
+0x3d` read 0x83 and 0x72, the IDs their datasheets give.
 
 ## 9. Migration to a native kernel
 

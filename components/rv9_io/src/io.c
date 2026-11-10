@@ -44,8 +44,11 @@ static const char *TAG = "rv9-io";
    pushed off the end by `audio`, so nothing failed until somebody tried
    to log in. A limit that is only ever found by exceeding it needs a test
    rather than a bigger number, so refusals are counted and io-test checks
-   the count; the bigger number is as well. */
-#define MAX_FILEMGRS 8
+   the count; the bigger number is as well. Eight again ran out on the P4
+   once /peer and /m0 had come: nine file managers, `ifm` the one left out,
+   so the P4 had no /i2c0 and said so only at boot. Pointers: 16 is 64
+   bytes. */
+#define MAX_FILEMGRS 16
 #define MAX_DRIVERS  32
 
 static uint32_t s_refused_registrations;

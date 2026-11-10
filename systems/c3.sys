@@ -7,3 +7,7 @@ target="esp32c3"
 drivers="ramdisk net peer ssh gpio pwm adc tsens i2c"
 selftest="yes"
 store="base net pins rt"
+
+# The SuperMini's antenna cannot take the chip's full 20 dBm: at full power
+# the access point never finished authenticating it (reason 2).
+wifi_dbm="8.5"

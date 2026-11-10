@@ -46,7 +46,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 KEYS = {"target", "drivers", "selftest", "store"}
-OPTIONAL = {"card": ""}
+OPTIONAL = {"card": "", "wifi_dbm": ""}
 
 # Drivers that are built anywhere but attach only on the P4 (the #if in each).
 P4_ONLY = {"audio", "camera", "tts"}
@@ -101,6 +101,8 @@ def write_defaults(build, sysdef, drivers):
             lines.append(f"CONFIG_RV9_DRV_{d.upper()}=y")
         else:
             lines.append(f"# CONFIG_RV9_DRV_{d.upper()} is not set")
+    if sysdef["wifi_dbm"]:
+        lines.append(f"CONFIG_RV9_NET_TX_QDBM={round(float(sysdef['wifi_dbm']) * 4)}")
     if sysdef["selftest"] == "yes":
         lines.append("CONFIG_RV9_SELFTEST=y")
     else:

@@ -428,8 +428,11 @@ control layer is late if it is late.
   write-then-read with a repeated start that datasheets describe and
   several devices require. `i2c scan` walks the bus; addresses are
   accepted in hex as a datasheet writes them or decimal as a script does.
-  **Verified only against an empty bus** — the manager, the driver, the
-  probe and the scan all work; nothing has yet talked to a real chip.
+  **Talking to real chips on the P4** (design §79): `i2c scan` finds the
+  ES8311, the camera, the ES7210 and the touch controller, and their ID
+  registers read 0x83 and 0x72 as the datasheets say. For long it found
+  nothing because the P4 had no `/i2c0` at all: its ninth file manager
+  did not fit the table.
 - Not done: SPI as a device. IFM was built for both — a chip select is an
   address — so this is a driver, not a discipline.
 - **Interrupt-driven inputs — done.** `setstat(path, RV9_PIO_SS_EDGE, ...)`

@@ -30,6 +30,19 @@ menu "RV-9 devices"
             it there is no SSH, no rshd, no clock from the network and no
             fetch.
 
+    config RV9_NET_TX_QDBM
+        int "Most the radio may transmit, in quarter dBm (0: the chip's own)"
+        range 0 84
+        default 0
+        depends on RV9_DRV_NET
+        help
+            A ceiling on transmit power, for a board whose antenna cannot
+            take the chip's full 20 dBm. The ESP32-C3 SuperMini is the case
+            that asked: at full power its access point never finished
+            authenticating it (disconnect reason 2), a fault widely reported
+            for that board and cured by 8.5 dBm (34 here). Set by a system
+            file's wifi_dbm.
+
     config RV9_DRV_PEER
         bool "/peer: other machines' modules"
         default y

@@ -22,6 +22,7 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "soc/soc_caps.h"
 
 static const char *TAG = "rv9-net";
 
@@ -451,7 +452,19 @@ static rv9_io_err_t net_wifi_up(net_t *n)
 
         TRY(esp_wifi_start());
 
-        /* Band selection only takes once the radio is running. */
+#if CONFIG_RV9_NET_TX_QDBM > 0
+        /* A ceiling the board needs (Kconfig, from the system file's
+           wifi_dbm): only once the radio is running, like the band. */
+        esp_err_t txe = esp_wifi_set_max_tx_power(CONFIG_RV9_NET_TX_QDBM);
+        if (txe != ESP_OK) ESP_LOGW(TAG, "transmit power: %s", esp_err_to_name(txe));
+        else ESP_LOGI(TAG, "transmit power at most %d.%02d dBm", CONFIG_RV9_NET_TX_QDBM / 4,
+                      (CONFIG_RV9_NET_TX_QDBM % 4) * 25);
+#endif
+
+#if SOC_WIFI_SUPPORT_5G
+        /* Band selection only takes once the radio is running. A chip with
+           one band (the C3) has nothing to choose, and said so as a warning
+           at every boot. */
         wifi_band_mode_t want = WIFI_BAND_MODE_AUTO;
         if (n->band_opt == 1) want = WIFI_BAND_MODE_2G_ONLY;
         else if (n->band_opt == 2) want = WIFI_BAND_MODE_5G_ONLY;
@@ -465,6 +478,7 @@ static rv9_io_err_t net_wifi_up(net_t *n)
                      want == WIFI_BAND_MODE_2G_ONLY ? "2.4 GHz only" :
                      want == WIFI_BAND_MODE_5G_ONLY ? "5 GHz only" : "both");
         }
+#endif
 
         n->wifi_started = true;
     }

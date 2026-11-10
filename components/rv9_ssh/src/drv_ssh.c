@@ -508,7 +508,13 @@ static rv9_io_err_t ssh_open(rv9_dev_t *dev, uint32_t mode)
     if (dev->opt[OPT_CONFIG]) return RV9_IO_OK;   /* /sshcfg waits for nobody */
 
     if (!ssh_password_set()) {
-        ESP_LOGE(TAG, "no login password set -- run `passwd` before sshd");
+        /* Once a boot. sshd asks again every few seconds, and a line each
+           time buried the prompt on a C3 nobody had set a password on. */
+        static bool said;
+        if (!said) {
+            said = true;
+            ESP_LOGW(TAG, "no login password set: sshd waits until `passwd` sets one");
+        }
         return RV9_IO_ERR_MODE;
     }
 
