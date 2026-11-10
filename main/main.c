@@ -630,6 +630,29 @@ static void say_last_reset(void)
     ESP_LOGW(TAG, "last reset: %s (%d)", why, (int)r);
 }
 
+/*
+ * /f0/startup: a script the board runs once, when its services are up.
+ * Whatever a board should do when it comes on -- a tune on the P4, a pin
+ * set on a C3 -- is a line in a file on that board, not a feature of the
+ * firmware, and `del /f0/startup` is how to stop it. Not waited on: a
+ * script that runs for ever is a service the board was asked for.
+ */
+#define STARTUP_FILE "/f0/startup"
+
+static void run_startup(void)
+{
+    rv9_path_t *p = NULL;
+    if (rv9_io_open_detached(STARTUP_FILE, RV9_MODE_READ, &p) != RV9_IO_OK) return;
+    rv9_io_close_path(p);
+
+    rv9_pid_t pid;
+    if (rv9_proc_fork("shell", RV9_PRIO_NORMAL, STARTUP_FILE, &pid) == RV9_PROC_OK) {
+        ESP_LOGW(TAG, "running " STARTUP_FILE " as pid %d", (int)pid);
+    } else {
+        ESP_LOGW(TAG, "could not run " STARTUP_FILE);
+    }
+}
+
 static void init_shell_loop(void)
 {
     const size_t n = sizeof(s_services) / sizeof(s_services[0]);
@@ -719,6 +742,7 @@ static void init_shell_loop(void)
         if (++settled == 5000 / SERVICE_POLL_MS) {
             heap_mark("services up");
             say_last_reset();
+            run_startup();
         }
 
         rv9_task_delay_ms(SERVICE_POLL_MS);

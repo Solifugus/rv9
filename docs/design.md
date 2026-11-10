@@ -8486,6 +8486,23 @@ time: `i2c scan` finds 0x18, 0x36, 0x40 and 0x5d (the ES8311, the camera,
 the ES7210 and the touch controller), and `i2c 0x18 0xfd` and `i2c 0x40
 0x3d` read 0x83 and 0x72, the IDs their datasheets give.
 
+## 80. Notes, and a tune at startup
+
+`play` had one tone, 440 Hz in whole seconds. It now has `tone <Hz> [ms]`
+and `notes`, a tune in a line: `C4 D#4 Eb4/8 G4/4. R T140`, octave and
+length carrying on from the note before. Each note is struck: a triangle
+with its octave above at a third, starting loud and losing a sixteenth of
+itself every 16 ms, rising over 2 ms and ending over 5 so no note clicks.
+It sounds like keys, not a buzzer, which was more than expected of it. No
+floating point and no 64-bit division at run time, which a module has no
+library for: the twelve phase steps of octave 4 are worked out by the
+compiler from millihertz, and other octaves are shifts.
+
+The P4 asked for a tune when it starts, *Für Elise*. That is not a feature
+of the firmware. A board now runs `/f0/startup` once as a shell script when
+its services have settled, so the tune is one line on the P4's `/f0` and
+another board can do something else, or nothing.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

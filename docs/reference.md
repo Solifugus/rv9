@@ -598,6 +598,12 @@ shell's went from 1,440 bytes at its deepest to 2,568, and its stack from
 2,560 to 3,584. Other programs that fork modules by a name a person gave
 them should allow a kilobyte and a half beyond their own measurement.
 
+**At startup.** `/f0/startup`, if it exists, is run once as a shell
+script (`shell /f0/startup`) when the services have settled, about nine
+seconds into a P4's boot. It is not waited on and not started again.
+Whatever a board should do when it comes on is a line there: the P4 plays a
+tune (`play notes ...`), a C3 might set a pin. `del /f0/startup` stops it.
+
 **Self-tests at boot.** `/f0/selftest` holding `once` runs the test suites
 at the next boot and is removed before they start; `always` runs them at
 every boot. With neither, a boot skips them (26 s on a P4). A firmware
