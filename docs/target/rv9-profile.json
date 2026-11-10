@@ -738,6 +738,13 @@
       "driver_relative": 7
     },
     {
+      "name": "RV9_NET_SS_KEEPALIVE",
+      "value": 264,
+      "direction": "set",
+      "discipline": "net",
+      "driver_relative": 8
+    },
+    {
       "name": "RV9_PUB_GS_WAIT",
       "value": 48,
       "direction": "get",
@@ -953,7 +960,7 @@
       "read_rt": false,
       "write_rt": false,
       "retains": false,
-      "sessions": false
+      "sessions": true
     },
     {
       "name": "camera",

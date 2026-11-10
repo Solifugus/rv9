@@ -1184,8 +1184,9 @@ a peer as it finds one on its card, and runs it if it can. In steps:
    `listen` asked for on a C5 runs on the P4, which has the microphone,
    the FPU and the memory. `on <peer> <command>` and `execd`; a peer runs
    commands only for the machines in its `/f0/callers`, each proving who it
-   is with its SSH host key (`ident`). Still to do: discovery of peers, a
-   protected stream, and noticing a caller that vanished.
+   is with its SSH host key (`ident`). A caller that vanishes has its
+   command killed and its failsafes applied within about five seconds
+   (§78). Still to do: discovery of peers, and a protected stream.
 
 ## Working with two boards attached
 

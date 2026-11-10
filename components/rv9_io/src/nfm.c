@@ -519,6 +519,19 @@ static rv9_io_err_t nfm_setstat(rv9_path_t *path, uint32_t code, void *arg)
         return RV9_IO_OK;
     }
 
+    if (code == RV9_NET_SS_KEEPALIVE) {
+        nfm_path_t *st = (nfm_path_t *)path->fm_state;
+        if (st == NULL || st->fd < 0 || arg == NULL) return RV9_IO_ERR_INVAL;
+        int idle = (int)*(uint32_t *)arg, on = idle > 0, intvl = 1, cnt = 3;
+        if (setsockopt(st->fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on)) != 0 ||
+            (on && (setsockopt(st->fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)) != 0 ||
+                    setsockopt(st->fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl)) != 0 ||
+                    setsockopt(st->fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt)) != 0))) {
+            return RV9_IO_ERR_IO;
+        }
+        return RV9_IO_OK;
+    }
+
     if (code == RV9_NET_SS_NOWAIT) {
         nfm_path_t *st = (nfm_path_t *)path->fm_state;
         if (st == NULL || arg == NULL) return RV9_IO_ERR_INVAL;

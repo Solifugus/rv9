@@ -40,6 +40,17 @@
 #define RV9_NET_SS_SHUTDOWN  (RV9_SS_DRIVER_BASE + 6)
 #define RV9_NET_SS_TRY       (RV9_SS_DRIVER_BASE + 7)   /* rv9_net_creds_t, not saved */
 
+/*
+ * Notice a far end that has gone without saying so. setstat, arg is a
+ * uint32_t: seconds of quiet before TCP asks whether it is still there, 0
+ * to stop asking. Three questions a second apart go unanswered and the
+ * connection fails, so a read waiting on it returns an error. A board
+ * switched off or reset sends nothing, and a connection with nothing to
+ * send would otherwise wait on it for ever; one only slow to read still
+ * answers, and is left alone. /peer's run connections ask after 2 s.
+ */
+#define RV9_NET_SS_KEEPALIVE (RV9_SS_DRIVER_BASE + 8)
+
 #define RV9_NET_MAX_APS 12
 
 typedef struct __attribute__((packed)) {

@@ -41,6 +41,12 @@
  * that the path is the connection, bytes both ways, as /n0's are, and the
  * caller's name in /f0/callers is PEER_GS_CALLER.
  *
+ * Both ends ask TCP to notice the other going without a word (keep-alive,
+ * RV9_NET_SS_KEEPALIVE): a caller switched off mid-command fails its
+ * session's read in about five seconds, and execd stops the command, so
+ * its failsafes are applied. Without that, nothing on a quiet connection
+ * would ever have said so.
+ *
  * What this proves is who connected. It does not protect what follows: the
  * stream is neither encrypted nor checked, so somebody able to take over a
  * TCP connection on this network can take over a session. A bench LAN, as
@@ -85,6 +91,7 @@ static const char *TAG = "rv9-peer";
 #define CHALLENGE     "rv9-run 1"           /* and what a caller signs begins with */
 #define NONCE_LEN     32
 #define CALLERS_MAX   1024
+#define KEEPALIVE_S   2                     /* then 3 x 1 s: gone in about 5 s */
 #define PEER_GS_CALLER (RV9_SS_DRIVER_BASE + 32)   /* char[16]: who called */
 
 typedef struct {
@@ -390,6 +397,8 @@ static rv9_io_err_t run_open(peer_path_t *st)
         hang_up(st);
         return RV9_IO_ERR_DENIED;
     }
+    uint32_t idle = KEEPALIVE_S;
+    rv9_io_setstat_path(st->conn, RV9_NET_SS_KEEPALIVE, &idle);
     rv9_io_setstat_path(st->conn, RV9_NET_SS_NOWAIT, &off);
     return RV9_IO_OK;
 }
@@ -475,6 +484,8 @@ static rv9_io_err_t listen_open(peer_path_t *st)
         return RV9_IO_ERR_DENIED;
     }
     if (!send_all(st, "ok\n", 3)) { hang_up(st); return RV9_IO_ERR_IO; }
+    uint32_t idle = KEEPALIVE_S;
+    rv9_io_setstat_path(st->conn, RV9_NET_SS_KEEPALIVE, &idle);
     rv9_io_setstat_path(st->conn, RV9_NET_SS_NOWAIT, &off);
     strncpy(st->peer, st->caller, PEER_NAME_MAX - 1);
 

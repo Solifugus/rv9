@@ -8372,7 +8372,7 @@ bytes of stack in a session, `on` at 2,124.
 
 Still to do: a caller that vanishes without hanging up (switched off,
 reset) leaves its command running on the peer until the command ends,
-since nothing here sends keep-alives; discovery of peers; the stream's
+since nothing here sends keep-alives (since done, §78); discovery of peers; the stream's
 protection; and the C3, which waits on its WiFi.
 
 ## 77. A click for a touch
@@ -8402,6 +8402,38 @@ program's volume back. `/f0/click` holds the level in dB, default −20, or
 `off`, read at each click, as `/f0/path` is read at each search.
 
 Heard on the P4 at −20 dB: "fairly quiet but audible".
+
+## 78. A caller that vanishes
+
+§76 left one hole: a caller switched off or reset says nothing, and its
+command ran on in the peer until it ended. For the C3s that matters most
+the other way round from how it was found. The P4 will be the one asking,
+`on c3 drive ...`, and a P4 that dies must not leave a motor running.
+
+**TCP's keep-alive, not a heartbeat of our own.** A heartbeat in the run
+protocol would notice a silent caller, and would also kill the command of
+one that was merely slow: `on`, writing into a pipe whose reader is busy,
+cannot send anything until the reader takes it. The network stack answers
+keep-alive probes whatever the program above it is doing, so only a
+machine that is gone stops answering. `/n0` gained `RV9_NET_SS_KEEPALIVE`
+(seconds of quiet, then three probes a second apart), and `/peer` turns it
+on at both ends of a run connection after the challenge, at 2 s. A rebooted
+caller answers a probe with a reset, which is faster still.
+
+A keep-alive is only sent on a quiet connection, so a command that keeps
+writing to a dead caller is noticed instead by the send: `nfm` gives up
+on a write that cannot go for fifteen seconds, and `execd` now treats a
+send that fails as the caller gone. Before, it only stopped carrying that
+pipe.
+
+**The failsafes do the rest.** `execd` kills the command, and the kernel
+applies what its manifest declared, as for any process that ends badly
+(§27). Measured with `hold`, which drives `/gpio/2` high and declares
+`/gpio/2=0`: `on p4 hold &` from the C5, then the C5 reset with nothing
+said. The P4 had `hold` killed between 3 and 6 s later (the samples were 3
+s apart), against its own 30 s, and `/gpio/2` read 0 with both its devices
+released. The other way, resetting the P4 under `on p4 sleep 60` ended the
+C5's `on` with "the connection ended before it did".
 
 ## 9. Migration to a native kernel
 

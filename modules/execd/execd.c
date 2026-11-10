@@ -17,6 +17,11 @@
  * does not listen for them. Proving who connected is peerfm's, in the
  * kernel, where this machine's key is; here there is only the plumbing.
  *
+ * A caller that hangs up, or goes silent without a word (switched off,
+ * reset: TCP's keep-alive notices in about five seconds, peerfm.c), has
+ * its command killed, so whatever the command declared as failsafes is
+ * applied: a motor a C3 was driving for the P4 stops when the P4 does.
+ *
  * What it runs is found here, by this machine's own path, and what that
  * starts runs here or nowhere: a process working for a peer is never moved
  * to a peer in turn, so two machines that each run the other's commands
@@ -79,14 +84,15 @@ static int take_input(const rv9_mod_env_t *env, void *ctx, char kind,
     return 0;
 }
 
-/* Send what is in a pipe now. 1 if something was, 0 if not, -1 at its end. */
+/* Send what is in a pipe now. 1 if something was, 0 if not, -1 at its end,
+   -2 when it could not be sent: the caller is gone. */
 static int carry(const rv9_mod_env_t *env, execd_statics_t *st, int from, char kind)
 {
     uint32_t ready = 0;
     if (env->getstat(from, RV9_GS_READY, &ready) < 0 || ready == 0) return 0;
     int n = env->read(from, st->buf, sizeof(st->buf));
     if (n <= 0) return -1;
-    if (run_send(env, RV9_STDOUT, kind, st->buf, (uint32_t)n) < 0) return -1;
+    if (run_send(env, RV9_STDOUT, kind, st->buf, (uint32_t)n) < 0) return -2;
     return 1;
 }
 
@@ -192,12 +198,15 @@ static int session(const rv9_mod_env_t *env, execd_statics_t *st, uint32_t seq)
         int c;
         if (out_open && (c = carry(env, st, out_r, RUN_OUT)) != 0) {
             busy = true;
+            if (c == -2) gone = true;
             if (c < 0) out_open = false;
         }
         if (err_open && (c = carry(env, st, err_r, RUN_ERR)) != 0) {
             busy = true;
+            if (c == -2) gone = true;
             if (c < 0) err_open = false;
         }
+        if (gone) break;
 
         /* Ended, and everything it wrote sent: what it said last arrives
            before its status. Something it started may hold its pipes for
@@ -211,7 +220,8 @@ static int session(const rv9_mod_env_t *env, execd_statics_t *st, uint32_t seq)
     if (gone) {
         env->kill(pid);
         env->wait_why(pid, &status, &fault, 2000);
-        log_say(env, st->ask, ": the caller hung up, so it was stopped, for ", st->who);
+        log_say(env, st->ask, ": the caller hung up or went silent, so it was stopped "
+                              "(its failsafes applied), for ", st->who);
     } else {
         run_put32(word, status);
         run_put32(word + 4, fault);

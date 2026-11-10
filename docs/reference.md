@@ -584,8 +584,13 @@ forth.
 Who connected is proved; what follows is not protected. The stream is
 neither encrypted nor checked, and the caller does not learn who answered,
 so this is for a network whose machines are trusted with each other's TCP,
-as `rshd` is. A caller that vanishes without hanging up (switched off)
-leaves its command running until it ends. A peer that does not answer
+as `rshd` is. A caller that vanishes without a word, switched off or
+reset, is noticed by TCP's keep-alive (`RV9_NET_SS_KEEPALIVE`, both ends,
+after 2 s of quiet and three unanswered probes) or by a send that fails,
+and `execd` kills its command, so the command's failsafes are applied:
+with `on p4 hold &` holding the P4's `/gpio/2` high, resetting the C5 had
+`hold` killed and the pin back at 0 within 3 to 6 s. The caller's `on`
+notices a peer gone the same way. A peer that does not answer
 costs about 4.6 s: two connects of two seconds and a pause.
 
 **The fork pays for the read** on the forking program's stack: the
@@ -1145,6 +1150,7 @@ Relative to `RV9_SS_DRIVER_BASE`, and meaningful only on that driver's paths.
 | `RV9_NET_SS_NOWAIT` | +5 | 0 blocks (the default); 1 returns `RV9_IO_ERR_WOULDBLOCK`. |
 | `RV9_NET_SS_SHUTDOWN` | +6 | Shut the connection both ways **without closing the path**. |
 | `RV9_NET_SS_TRY` | +7 | `rv9_net_creds_t`, not saved. |
+| `RV9_NET_SS_KEEPALIVE` | +8 | `uint32_t` seconds of quiet before TCP asks whether the far end is still there, 0 to stop; three unanswered a second apart and the connection fails. Notices a board switched off or reset, which says nothing; one only slow to read still answers. `/peer`'s run connections ask after 2 s. |
 | `RV9_SSH_SS_PASSWORD` | +16 | `rv9_ssh_pw_t`, on `/sshcfg`. |
 | `RV9_SSH_GS_INFO` | +17 | `rv9_ssh_info_t`: host key fingerprint and who is logged in. |
 | `RV9_RBF_SS_FORMAT` | +64 | Empty the volume this path is open on. A *file manager's* code. |
