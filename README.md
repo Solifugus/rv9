@@ -65,7 +65,9 @@ Programs, drivers, file managers and device descriptors are
 **position-independent memory modules**. Each is CRC-checked, versioned, and
 found by name in a module directory. A module can be fetched over WiFi,
 written to flash, and run after a reboot without the firmware ever being
-reflashed. Each module carries a TLV **manifest** that says what it needs:
+reflashed. It can be **signed**, and read when it is asked for from the
+card or from **another board**, along a module path; a command one board
+cannot run is run on a board that can. Each module carries a TLV **manifest** that says what it needs:
 stack, statics, period, deadline, worst-case execution time, exclusive
 devices, publications, failsafe states, and a memory budget.
 
@@ -338,7 +340,19 @@ On the P4, the senses: recording and playing sound, speech to text
 people and faces and says whose faces they are. The detectors are
 Espressif's ESP-DL models, read from the card by a plain-C module that gives
 ESP-DL's answers byte for byte, with nothing of ESP-DL in the firmware. And
-`mystify`, because a window that can animate should.
+`mystify`, because a window that can animate should. A touch on the glass
+clicks the speaker.
+
+Between boards: each board's firmware is built from a system file
+(`systems/*.sys`) with the drivers and commands it needs, and more commands
+come from the card when asked for. Modules are signed (ECDSA P-256) and
+checked against `/f0/trust`. One module path spans the boards: a board
+serves its modules over HTTP, another finds them at `/peer/<name>/cmd/`,
+passes over what it cannot run, and `get` keeps a checked copy; a PC serves
+a release the same way (`tools/mkrepo.py`). And the work moves where the
+code cannot: `listen` typed on a C5 runs on the P4, which has the FPU and
+the microphone, for the boards its `/f0/callers` names, each proving who it
+is with its own key (`on`, `execd`; design §76).
 
 Verified as mechanisms but not yet against real parts: **I²C** has only
 talked to an empty bus, and the **sonic ranger** command has only been

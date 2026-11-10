@@ -8254,7 +8254,8 @@ every hash in it matched `sha256sum` of the built module.
 
 Still to do: `get` does not fetch the files of a module already here, and
 `can` says a file is present without checking its hash, which would read
-megabytes. Discovery of peers, and running on one (step 4), are next.
+megabytes. Discovery of peers, and running on one (step 4), are next;
+running on one is §76.
 
 ## 76. Running on a peer, where the work must move
 
