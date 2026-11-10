@@ -34,6 +34,7 @@
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_log.h"
+#include "esp_system.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -604,6 +605,31 @@ static service_t s_services[] = {
       .says = "shell on /uart0 (log quiet while it runs)" },
 };
 
+/*
+ * Why the last run ended, said where `log` keeps it. A board that restarts
+ * on its own with nobody watching its serial port leaves nothing else
+ * behind: the panic's account goes to the port, and watching the port
+ * resets the board (the P4's bridge does it on open). Said with the
+ * services, the last thing a boot logs, since the 8 KB ring has let go of
+ * the start of the boot by then; a warning, so it is kept at any level.
+ */
+static void say_last_reset(void)
+{
+    esp_reset_reason_t r = esp_reset_reason();
+    const char *why =
+        r == ESP_RST_POWERON   ? "power on (or the serial bridge's reset)" :
+        r == ESP_RST_EXT       ? "the reset pin" :
+        r == ESP_RST_SW        ? "asked to (esp_restart)" :
+        r == ESP_RST_PANIC     ? "a PANIC -- an exception or abort" :
+        r == ESP_RST_INT_WDT   ? "the interrupt watchdog" :
+        r == ESP_RST_TASK_WDT  ? "the task watchdog" :
+        r == ESP_RST_WDT       ? "a watchdog" :
+        r == ESP_RST_DEEPSLEEP ? "waking from deep sleep" :
+        r == ESP_RST_BROWNOUT  ? "a brownout -- the supply sagged" :
+        r == ESP_RST_SDIO      ? "SDIO" : "unknown";
+    ESP_LOGW(TAG, "last reset: %s (%d)", why, (int)r);
+}
+
 static void init_shell_loop(void)
 {
     const size_t n = sizeof(s_services) / sizeof(s_services[0]);
@@ -690,7 +716,10 @@ static void init_shell_loop(void)
         /* Once, when the services have settled: the figure an operator
            logging in will actually have to work with. */
         static int settled;
-        if (++settled == 5000 / SERVICE_POLL_MS) heap_mark("services up");
+        if (++settled == 5000 / SERVICE_POLL_MS) {
+            heap_mark("services up");
+            say_last_reset();
+        }
 
         rv9_task_delay_ms(SERVICE_POLL_MS);
     }
@@ -1023,6 +1052,7 @@ static void rv9_init_task(void *arg)
     rv9_logring_start();
     rv9_mod_set_log_source(rv9_logring_read, rv9_logring_held);
     rv9_mod_set_clock_source(rv9_clock_read);
+
 
     /* The one test every boot runs: everything above it stands on the
        KAL, and a machine whose floor is unsound should not go on. */

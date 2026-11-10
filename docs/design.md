@@ -8397,9 +8397,16 @@ touch asks nobody.
 written out at boot, so it starts and ends at zero. The codec and the
 amplifier start only when `/au0` is used, so the first click starts them
 and they are kept running three seconds after the last, and a run of taps
-costs one start. Never while `/au0` is open: whatever has it may be
-recording, and the click would be in the recording; opening it puts that
-program's volume back. `/f0/click` holds the level in dB, default −20, or
+costs one start. Never while a program is reading or writing `/au0`:
+whatever has it may be recording, and the click would be in the recording;
+its first read or write takes the codec over and puts its volume back.
+
+*Corrected the next day.* The first version knew "open" by giving the audio
+driver an open hook, and a driver with one is a device of one opener at a
+time (`dev_open_refused` in `io.c`, for `/ssh0`'s sessions), so `rec &`
+beside `play`, the microphone test, would have been refused. The driver now
+tells a codec started for clicks from one a program is using, and has no
+open hook. `/f0/click` holds the level in dB, default −20, or
 `off`, read at each click, as `/f0/path` is read at each search.
 
 Heard on the P4 at −20 dB: "fairly quiet but audible".

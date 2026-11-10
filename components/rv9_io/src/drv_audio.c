@@ -32,8 +32,11 @@
  * is reading /touch, or none. The clicker, a task of this driver's, starts
  * the codec, plays 6 ms of a fading 2.5 kHz tone and keeps the codec warm
  * for three seconds, so a run of taps costs one start and one pop. Never
- * while /au0 is open: whatever has it is recording or playing, and a click
- * would be in the recording. /f0/click says how loud, in dB (default -20),
+ * while a program is using /au0: whatever has it is recording or playing,
+ * and a click would be in the recording. "Using" is reading or writing,
+ * not having it open -- a driver open hook would have said open, and made
+ * /au0 one opener at a time (io.c, dev_open_refused), which `rec &` beside
+ * `play` needs it not to be. /f0/click says how loud, in dB (default -20),
  * or "off"; read at each click, so a change takes at once.
  *
  * NOTHING HERE BLOCKS THE HOST TASK. Every RV-9 thread runs inside one
@@ -97,8 +100,7 @@ typedef struct {
     bool                    running;
     int32_t                 volume_db;
     uint32_t                gain_db;
-    bool                    open;           /* somebody has /au0 */
-    bool                    clicking;       /* running for a click, not for them */
+    bool                    clicking;       /* running for a click, nobody else */
     uint64_t                warm_until;
     rv9_sem_t               click_sem;
 } audio_t;
@@ -373,6 +375,12 @@ static void stop_locked(audio_t *a)
 static rv9_io_err_t ensure_running(audio_t *a)
 {
     rv9_lock_acquire(a->lock);
+    if (a->clicking) {
+        /* A program's now, warm from a click: its volume, and no click
+           stops it. */
+        a->clicking = false;
+        wr(a->dac, 0x32, volume_reg(a->volume_db));
+    }
     rv9_io_err_t err = start_locked(a);
     rv9_lock_release(a->lock);
     return err;
@@ -402,7 +410,9 @@ static bool click_level(int32_t *db)
 static void audio_click(void)
 {
     audio_t *a = s_audio;
-    if (a != NULL && !a->open) (void)rv9_sem_give(a->click_sem);   /* full: one is coming */
+    if (a != NULL && (!a->running || a->clicking)) {
+        (void)rv9_sem_give(a->click_sem);                         /* full: one is coming */
+    }
 }
 
 static void clicker(void *arg)
@@ -415,7 +425,7 @@ static void clicker(void *arg)
 
         rv9_lock_acquire(a->lock);
         uint64_t now = rv9_time_ms();
-        if (on && !a->open && start_locked(a) == RV9_IO_OK) {
+        if (on && (!a->running || a->clicking) && start_locked(a) == RV9_IO_OK) {
             wr(a->dac, 0x32, volume_reg(db));
             const uint8_t *p = (const uint8_t *)s_click;
             size_t left = sizeof(s_click);
@@ -429,7 +439,7 @@ static void clicker(void *arg)
             a->clicking = true;
             a->warm_until = now + CLICK_WARM_MS;
         }
-        if (a->clicking && !a->open && now >= a->warm_until) {
+        if (a->clicking && now >= a->warm_until) {
             stop_locked(a);
             a->clicking = false;
         }
@@ -516,27 +526,13 @@ static rv9_io_err_t audio_init(rv9_dev_t *dev)
     return RV9_IO_OK;
 }
 
-/* Somebody has it now: no more clicks, and their volume, not the click's. */
-static rv9_io_err_t audio_open(rv9_dev_t *dev, uint32_t mode)
-{
-    (void)mode;
-    audio_t *a = (audio_t *)dev->drv_state;
-    if (a == NULL) return RV9_IO_OK;
-    rv9_lock_acquire(a->lock);
-    a->open = true;
-    a->clicking = false;
-    if (a->running) wr(a->dac, 0x32, volume_reg(a->volume_db));
-    rv9_lock_release(a->lock);
-    return RV9_IO_OK;
-}
-
 /* The last path has closed: stop the clocks and the amplifier. */
 static rv9_io_err_t audio_close(rv9_dev_t *dev)
 {
     audio_t *a = (audio_t *)dev->drv_state;
     if (a == NULL) return RV9_IO_OK;
     rv9_lock_acquire(a->lock);
-    a->open = false;
+    a->clicking = false;
     stop_locked(a);
     rv9_lock_release(a->lock);
     return RV9_IO_OK;
@@ -634,7 +630,6 @@ static rv9_io_err_t audio_init(rv9_dev_t *dev)
     return RV9_IO_ERR_NOTFOUND;
 }
 
-#define audio_open    NULL
 #define audio_close   NULL
 #define audio_read    NULL
 #define audio_write   NULL
@@ -647,7 +642,6 @@ static const rv9_driver_t audio = {
     .name       = "audio",
     .raw_stream = true,       /* samples, not lines: see rv9/io.h */
     .init       = audio_init,
-    .open       = audio_open,
     .close      = audio_close,
     .read       = audio_read,
     .write      = audio_write,
