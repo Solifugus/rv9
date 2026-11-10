@@ -511,6 +511,16 @@ void         rv9_io_close_path(rv9_path_t *p);
  */
 void         rv9_io_close_below(rv9_path_t *p);
 
+/*
+ * A click, for a touch on the glass (design section 77): so a person
+ * pressing it hears that it was felt, whatever is reading /touch, or
+ * nothing. A driver that can make a sound registers one; the touch driver
+ * asks for it at each finger put down. Asking returns at once and never
+ * waits for the sound, and does nothing on a machine that registered none.
+ */
+void         rv9_io_set_click(void (*click)(void));
+void         rv9_io_click(void);
+
 /* Remove a file, e.g. "/r0/notes". */
 rv9_io_err_t rv9_io_remove(const char *name);
 rv9_io_err_t rv9_io_puts(int path, const char *s);

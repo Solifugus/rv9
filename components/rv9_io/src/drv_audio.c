@@ -26,6 +26,16 @@
  * duplicates it, which costs it a loop and keeps this driver honest about
  * what the hardware does.
  *
+ * A CLICK FOR A TOUCH (design section 77). This driver registers one with
+ * the I/O manager, and the touch driver asks for it at each finger put
+ * down, so a person pressing the glass hears it was felt whatever program
+ * is reading /touch, or none. The clicker, a task of this driver's, starts
+ * the codec, plays 6 ms of a fading 2.5 kHz tone and keeps the codec warm
+ * for three seconds, so a run of taps costs one start and one pop. Never
+ * while /au0 is open: whatever has it is recording or playing, and a click
+ * would be in the recording. /f0/click says how loud, in dB (default -20),
+ * or "off"; read at each click, so a change takes at once.
+ *
  * NOTHING HERE BLOCKS THE HOST TASK. Every RV-9 thread runs inside one
  * host task, so an I2S call that waited would stop all of them. Reads and
  * writes ask the DMA queue with a zero timeout; a read with nothing yet
@@ -39,6 +49,8 @@
 
 #include "i2c_bus.h"
 
+#include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -69,6 +81,12 @@ static const char *TAG = "rv9-audio";
 #define DMA_FRAMES  320
 
 #define DEFAULT_VOLUME_DB  -10   /* the speaker is small and close */
+
+#define CLICK_FILE      "/f0/click"
+#define CLICK_DB        -20      /* quiet: it is a tap, not an alarm */
+#define CLICK_HZ        2500
+#define CLICK_FRAMES    96       /* 6 ms */
+#define CLICK_WARM_MS   3000     /* the codec kept running after a click */
 #define DEFAULT_GAIN_DB     30   /* what Espressif's own driver starts at */
 
 typedef struct {
@@ -79,7 +97,14 @@ typedef struct {
     bool                    running;
     int32_t                 volume_db;
     uint32_t                gain_db;
+    bool                    open;           /* somebody has /au0 */
+    bool                    clicking;       /* running for a click, not for them */
+    uint64_t                warm_until;
+    rv9_sem_t               click_sem;
 } audio_t;
+
+static audio_t *s_audio;                    /* for the click, which has no device */
+static int16_t  s_click[CLICK_FRAMES * 2];
 
 /* ---- registers ---- */
 
@@ -353,6 +378,65 @@ static rv9_io_err_t ensure_running(audio_t *a)
     return err;
 }
 
+/* ---- the click ---- */
+
+/* How loud, from /f0/click: false for "off". */
+static bool click_level(int32_t *db)
+{
+    *db = CLICK_DB;
+    rv9_path_t *p = NULL;
+    if (rv9_io_open_detached(CLICK_FILE, RV9_MODE_READ, &p) != RV9_IO_OK) return true;
+    char b[16];
+    size_t n = 0;
+    if (rv9_io_read_path(p, b, sizeof(b) - 1, &n) != RV9_IO_OK) n = 0;
+    rv9_io_close_path(p);
+    b[n] = '\0';
+    if (strncmp(b, "off", 3) == 0) return false;
+    char *end = NULL;
+    long v = strtol(b, &end, 10);
+    if (end != b) *db = v < -95 ? -95 : v > 0 ? 0 : (int32_t)v;
+    return true;
+}
+
+/* Asked from the touch driver's ticker: wake the clicker and go. */
+static void audio_click(void)
+{
+    audio_t *a = s_audio;
+    if (a != NULL && !a->open) (void)rv9_sem_give(a->click_sem);   /* full: one is coming */
+}
+
+static void clicker(void *arg)
+{
+    audio_t *a = (audio_t *)arg;
+    for (;;) {
+        bool asked = rv9_sem_take(a->click_sem, 500) == RV9_OK;
+        int32_t db = CLICK_DB;
+        bool on = asked && click_level(&db);
+
+        rv9_lock_acquire(a->lock);
+        uint64_t now = rv9_time_ms();
+        if (on && !a->open && start_locked(a) == RV9_IO_OK) {
+            wr(a->dac, 0x32, volume_reg(db));
+            const uint8_t *p = (const uint8_t *)s_click;
+            size_t left = sizeof(s_click);
+            for (int tries = 0; left > 0 && tries < 50; tries++) {
+                size_t put = 0;
+                (void)i2s_channel_write(a->tx, p, left, &put, 0);
+                p += put;
+                left -= put;
+                if (left > 0 && put == 0) rv9_task_delay_ms(2);
+            }
+            a->clicking = true;
+            a->warm_until = now + CLICK_WARM_MS;
+        }
+        if (a->clicking && !a->open && now >= a->warm_until) {
+            stop_locked(a);
+            a->clicking = false;
+        }
+        rv9_lock_release(a->lock);
+    }
+}
+
 /* ---- the driver ---- */
 
 static rv9_io_err_t audio_init(rv9_dev_t *dev)
@@ -411,8 +495,38 @@ static rv9_io_err_t audio_init(rv9_dev_t *dev)
     a->gain_db    = DEFAULT_GAIN_DB;
     dev->drv_state = a;
 
+    /* The click: a tone that fades to nothing, so it starts and ends at
+       zero and does not pop, both channels alike. */
+    for (int i = 0; i < CLICK_FRAMES; i++) {
+        float fade = 1.0f - (float)i / CLICK_FRAMES;
+        int16_t v = (int16_t)(12000.0f * fade * fade *
+                              sinf(2.0f * (float)M_PI * CLICK_HZ * i / RATE));
+        s_click[2 * i] = s_click[2 * i + 1] = v;
+    }
+    if (rv9_sem_create(1, 0, &a->click_sem) == RV9_OK &&
+        rv9_task_create(clicker, "rv9-click", 3072, a, RV9_PRIO_HIGH, NULL) == RV9_OK) {
+        s_audio = a;
+        rv9_io_set_click(audio_click);
+    } else {
+        ESP_LOGW(TAG, "%s: no clicker, so a touch makes no sound", dev->name);
+    }
+
     ESP_LOGI(TAG, "%s: ES7210 microphones and ES8311 speaker, %d Hz, "
                   "2 x 16-bit", dev->name, RATE);
+    return RV9_IO_OK;
+}
+
+/* Somebody has it now: no more clicks, and their volume, not the click's. */
+static rv9_io_err_t audio_open(rv9_dev_t *dev, uint32_t mode)
+{
+    (void)mode;
+    audio_t *a = (audio_t *)dev->drv_state;
+    if (a == NULL) return RV9_IO_OK;
+    rv9_lock_acquire(a->lock);
+    a->open = true;
+    a->clicking = false;
+    if (a->running) wr(a->dac, 0x32, volume_reg(a->volume_db));
+    rv9_lock_release(a->lock);
     return RV9_IO_OK;
 }
 
@@ -422,6 +536,7 @@ static rv9_io_err_t audio_close(rv9_dev_t *dev)
     audio_t *a = (audio_t *)dev->drv_state;
     if (a == NULL) return RV9_IO_OK;
     rv9_lock_acquire(a->lock);
+    a->open = false;
     stop_locked(a);
     rv9_lock_release(a->lock);
     return RV9_IO_OK;
@@ -519,6 +634,7 @@ static rv9_io_err_t audio_init(rv9_dev_t *dev)
     return RV9_IO_ERR_NOTFOUND;
 }
 
+#define audio_open    NULL
 #define audio_close   NULL
 #define audio_read    NULL
 #define audio_write   NULL
@@ -531,6 +647,7 @@ static const rv9_driver_t audio = {
     .name       = "audio",
     .raw_stream = true,       /* samples, not lines: see rv9/io.h */
     .init       = audio_init,
+    .open       = audio_open,
     .close      = audio_close,
     .read       = audio_read,
     .write      = audio_write,

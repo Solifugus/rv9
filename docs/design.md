@@ -8374,6 +8374,34 @@ reset) leaves its command running on the peer until the command ends,
 since nothing here sends keep-alives; discovery of peers; the stream's
 protection; and the C3, which waits on its WiFi.
 
+## 77. A click for a touch
+
+Asked for after a power cycle: the glass was pressed and nothing showed it
+had been felt, since at the shell nothing reads `/touch`. So each finger put
+down clicks the speaker, whatever is reading `/touch`, or nothing, which also
+answers whether the glass is scanning at all, the question this board's
+touch controller makes worth asking (it stops scanning across a reflash and
+only a power cycle brings it back).
+
+**In the drivers, without one knowing the other.** The audio driver
+registers a click with the I/O manager (`rv9_io_set_click`), as `rv9_ssh`
+registers its key with the module layer, and the touch driver asks for one
+(`rv9_io_click`) at each DOWN. Asking gives a semaphore and returns, so the
+touch ticker never waits on a codec; the audio driver's own task, the
+clicker, does the work. A machine with no speaker registers nothing and a
+touch asks nobody.
+
+**What it plays and when.** 6 ms of a 2.5 kHz tone fading to nothing,
+written out at boot, so it starts and ends at zero. The codec and the
+amplifier start only when `/au0` is used, so the first click starts them
+and they are kept running three seconds after the last, and a run of taps
+costs one start. Never while `/au0` is open: whatever has it may be
+recording, and the click would be in the recording; opening it puts that
+program's volume back. `/f0/click` holds the level in dB, default −20, or
+`off`, read at each click, as `/f0/path` is read at each search.
+
+Heard on the P4 at −20 dB: "fairly quiet but audible".
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

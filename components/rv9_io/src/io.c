@@ -996,6 +996,17 @@ void rv9_io_close_path(rv9_path_t *p)
     if (below) dev_last_close(below);
 }
 
+/* The click (rv9/io.h): one driver's, called from another's. */
+static void (*volatile s_click)(void);
+
+void rv9_io_set_click(void (*click)(void)) { s_click = click; }
+
+void rv9_io_click(void)
+{
+    void (*c)(void) = s_click;
+    if (c) c();
+}
+
 void rv9_io_close_below(rv9_path_t *p)
 {
     if (p == NULL) return;

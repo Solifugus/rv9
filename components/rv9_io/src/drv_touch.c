@@ -335,6 +335,7 @@ static void poll_once(touch_t *t)
 
         if (is->down && !was->down) {
             emit(t, RV9_TOUCH_DOWN, id, is);
+            rv9_io_click();             /* felt: see rv9_io_set_click */
         } else if (is->down && was->down) {
             /* Only when it actually moved: a finger resting still would
                otherwise produce sixty identical events a second. */
