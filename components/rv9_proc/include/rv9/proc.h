@@ -186,6 +186,10 @@ typedef struct rv9_proc {
     char              chain_to[32];
     bool              chain_pending;
 
+    /* Working for a peer (rv9_proc_serve_peer), and so is everything it
+       starts: what such a process forks runs here or nowhere. */
+    bool              for_peer;
+
     struct rv9_proc  *next;
 
     /* What fork was given, for env->arg: at its own length, so the record
@@ -424,6 +428,15 @@ bool rv9_proc_aging_get(void);
 /* The pid of the calling task, or RV9_PID_NONE if the caller is not a
    process (the boot task, the ager, a driver's own task). */
 rv9_pid_t rv9_proc_current_pid(void);
+
+/*
+ * The calling process works for a peer from now on: it has opened
+ * /peer/listen, and what it starts was asked for by another machine. A
+ * fork from such a process, or from anything it started, is never moved
+ * to a peer in turn (design section 76), so two machines that each run
+ * the other's commands cannot hand one back and forth.
+ */
+void rv9_proc_serve_peer(void);
 
 /*
  * Hooks, so that the I/O manager can hang per-process state off processes

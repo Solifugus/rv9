@@ -44,6 +44,10 @@ _Static_assert(RV9_TASK_FAULT_KILLED == RV9_FAULT_KILLED, "ABI drift");
 
 static const char *TAG = "rv9-proc";
 
+/* What runs a command on a peer (modules/on): forked in its place when the
+   work must move. */
+#define ON_MODULE "on"
+
 /* Aging parameters.
  *
  * A process at RV9_PRIO_LOW (4) must be able to climb past one at
@@ -1441,6 +1445,25 @@ rv9_proc_err_t rv9_proc_init(void)
     return RV9_PROC_OK;
 }
 
+void rv9_proc_serve_peer(void)
+{
+    if (s_lock == NULL) return;
+    rv9_lock_acquire(s_lock);
+    rv9_proc_t *p = current_locked();
+    if (p != NULL) p->for_peer = true;
+    rv9_lock_release(s_lock);
+}
+
+static bool for_peer(void)
+{
+    if (s_lock == NULL) return false;
+    rv9_lock_acquire(s_lock);
+    rv9_proc_t *p = current_locked();
+    bool f = p != NULL && p->for_peer;
+    rv9_lock_release(s_lock);
+    return f;
+}
+
 rv9_pid_t rv9_proc_current_pid(void)
 {
     if (s_lock == NULL) return RV9_PID_NONE;
@@ -1957,6 +1980,36 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
         return RV9_PROC_ERR_TOOLONG;
     }
 
+    /*
+     * Where the work must move (design section 76). The path found this
+     * name on a peer, and this machine lacks what it needs: the CPU, or a
+     * device. Then `on` runs it there, with this fork's paths, so whoever
+     * asked -- a shell, a pipeline, a program -- has a process to wait on
+     * as for any other. The code moves when it can and the work when it
+     * must: a peer's module this machine can run is fetched and run here.
+     * Never a real-time one, whose deadlines a network would not keep.
+     */
+    char peer[16], why[40];
+    if (cls != RV9_CLASS_REALTIME && strcmp(module_name, ON_MODULE) != 0 && !for_peer() &&
+        rv9_mod_elsewhere(module_name, peer, why, sizeof(why))) {
+        char *moved = rv9_alloc(CONFIG_RV9_ARG_MAX + 1);
+        if (moved == NULL) return RV9_PROC_ERR_NOMEM;
+        int n = snprintf(moved, CONFIG_RV9_ARG_MAX + 1, "%s %s%s%s", peer, module_name,
+                         arg_len ? " " : "", arg_len ? arg : "");
+        rv9_proc_err_t err;
+        if (n < 0 || n > CONFIG_RV9_ARG_MAX) {
+            ESP_LOGE(TAG, "fork '%s': this machine lacks %s, and \"%s %s\" is "
+                          "too long an argument to ask %s with", module_name, why,
+                     module_name, arg_len ? arg : "", peer);
+            err = RV9_PROC_ERR_TOOLONG;
+        } else {
+            ESP_LOGI(TAG, "'%s' runs on %s: this machine lacks %s", module_name, peer, why);
+            err = fork_inner(ON_MODULE, priority, moved, cls, period_us, out_pid);
+        }
+        rv9_free(moved);
+        return err;
+    }
+
     /* The instructions it said it cannot do without, read before it is
        linked: from the card, linking is reading the whole module into
        memory, and a refusal for want of an FPU should not first be one
@@ -2212,6 +2265,8 @@ static rv9_proc_err_t fork_inner(const char *module_name, int priority,
     p->ext_held           = ext_footprint;
     p->ext_budget         = ext_budget;
     p->n_ancestors        = charge.n;
+    const rv9_proc_t *pp  = find_locked(parent);
+    p->for_peer           = pp != NULL && pp->for_peer;
     memcpy(p->ancestors, charge.ancestors, sizeof(p->ancestors));
     strncpy(p->name, module_name, sizeof(p->name) - 1);
     if (arg_len > 0) memcpy(p->arg, arg, arg_len);   /* calloc'd: ends in 0 */

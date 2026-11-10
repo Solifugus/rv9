@@ -39,6 +39,19 @@ menu "RV-9 devices"
             /n0: /peer/<name>/cmd/<command>.mod, peers named in /f0/peers.
             A module path entry of /peer/p4/cmd/ runs what the P4 holds.
 
+    config RV9_PIPE_COUNT
+        int "Pipes /pipe holds at once"
+        range 4 24
+        default 16 if IDF_TARGET_ESP32P4
+        default 8
+        help
+            How many pipes there may be at once, each 256 bytes and a little
+            more, allocated at boot. A shell pipeline of n stages takes n-1,
+            and each command a peer runs here through execd takes three (its
+            input, output and errors), so a board that serves its peers
+            wants more than one that only types. A descriptor that names a
+            number (opt1) has it instead.
+
     config RV9_DRV_GPIO
         bool "/gpio: pins"
         default y

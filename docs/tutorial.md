@@ -904,6 +904,32 @@ It is kept only if this board would run it, and each file only if it is
 the build the module names in its `file` tag; the next start finds the
 copy on the card first.
 
+### Running a command on another board
+
+Some commands cannot move. `listen` wants the P4's FPU, its microphone and
+28 MB of its memory, and no copy of it will ever run on a C5. So the work
+moves instead: let the C5 ask, once, on the P4 —
+
+```
+c5> ident
+a546321ec24d77385b7d2787fd77f796
+p4> echo c5 a546321ec24d77385b7d2787fd77f796 >> /f0/callers
+```
+
+— and `listen` typed on the C5 runs on the P4, with its words coming back
+to the C5. The C5 still finds `listen` on its path at `/peer/p4/cmd/`; it
+cannot run it, so the P4 does. `can listen` says so, and `on p4 <command>`
+asks for anything explicitly, in pipelines too:
+
+```
+c5> dir /f0 | on p4 sort | on p4 count
+26 lines, 52 words, 736 bytes
+```
+
+The P4 runs only for the boards in its `/f0/callers`, each proving who it
+is with its own key. What it runs is the P4's own, and a path in the
+command is the P4's: `listen -f /sd0/clip.raw` reads the P4's card.
+
 So there are three places a command can live, and they cost different
 things: the store, which costs nothing to start and is reflashed to change;
 a volume's top level, `/f0/thing.mod`, read at every boot and held from

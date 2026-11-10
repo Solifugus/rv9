@@ -14,6 +14,7 @@
 #include "ssh.h"
 
 #include "rv9/kal.h"
+#include "rv9/module.h"
 
 #include "esp_log.h"
 #include "nvs.h"
@@ -82,6 +83,20 @@ static rv9_io_err_t generate_hostkey(uint8_t priv[SSH_HOSTPRIV_LEN])
 }
 
 /*
+ * The same key as this machine's identity to its peers (rv9/module.h,
+ * rv9_ident_*): `on` signs a peer's challenge with it. Never a message the
+ * length of an exchange hash, which is what this key signs for SSH, so a
+ * peer's challenge can never be made into a host signature.
+ */
+static int ident_sign(const uint8_t *msg, uint32_t len, uint8_t sig[64])
+{
+    size_t n = 0;
+    if (len == SSH_HASH_LEN) return -1;
+    return psa_sign_message(s_hostkey, PSA_ALG_ECDSA(PSA_ALG_SHA_256), msg, len,
+                            sig, 64, &n) == PSA_SUCCESS && n == 64 ? 0 : -1;
+}
+
+/*
  * Load the host key, making one the first time.
  *
  * A host key that changed every boot would make the client's warning about
@@ -136,6 +151,7 @@ rv9_io_err_t ssh_hostkey_load(void)
     }
 
     s_ready = true;
+    rv9_ident_set(ident_sign, s_hostpub);
 
     char fp[64];
     ssh_hostkey_fingerprint(fp, sizeof(fp));

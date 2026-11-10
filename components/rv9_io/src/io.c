@@ -31,6 +31,7 @@ _Static_assert((int)RV9_IO_ERR_INVAL       == RV9_IOE_INVAL,       "ABI drift");
 _Static_assert((int)RV9_IO_ERR_EXISTS      == RV9_IOE_EXISTS,      "ABI drift");
 _Static_assert((int)RV9_IO_ERR_TIMEOUT     == RV9_IOE_TIMEOUT,     "ABI drift");
 _Static_assert((int)RV9_IO_ERR_BUSY        == RV9_IOE_BUSY,        "ABI drift");
+_Static_assert((int)RV9_IO_ERR_DENIED      == RV9_IOE_DENIED,      "ABI drift");
 
 static const char *TAG = "rv9-io";
 
@@ -86,6 +87,7 @@ const char *rv9_io_strerror(rv9_io_err_t err)
     case RV9_IO_ERR_EXISTS:      return "already exists";
     case RV9_IO_ERR_TIMEOUT:     return "timed out";
     case RV9_IO_ERR_BUSY:        return "owned by another process";
+    case RV9_IO_ERR_DENIED:      return "not allowed";
     default:                     return "unknown error";
     }
 }
@@ -957,6 +959,16 @@ rv9_io_err_t rv9_io_write_path(rv9_path_t *p, const void *buf, size_t len,
     rv9_io_err_t err = p->dev->fmgr->write(p, buf, len, &moved);
     session_leave(p);
     if (done) *done = moved;
+    return err;
+}
+
+rv9_io_err_t rv9_io_getstat_path(rv9_path_t *p, uint32_t code, void *arg)
+{
+    if (p == NULL) return RV9_IO_ERR_INVAL;
+    if (p->dev->fmgr->getstat == NULL) return RV9_IO_ERR_UNSUPPORTED;
+    if (!session_enter(p)) return RV9_IO_ERR_IO;
+    rv9_io_err_t err = p->dev->fmgr->getstat(p, code, arg);
+    session_leave(p);
     return err;
 }
 

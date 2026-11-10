@@ -1551,6 +1551,38 @@ bool rv9_mod_peek_u32(const char *name, uint16_t tag, uint32_t *out)
     return got;
 }
 
+/*
+ * Where the work must move (design section 76): the module the path finds
+ * for `name` is a peer's, and this machine lacks what it needs as far as
+ * the machine is fixed. Then the peer's name, and what is lacked.
+ */
+bool rv9_mod_elsewhere(const char *name, char peer[16], char *why, size_t cap)
+{
+    rv9_mod_entry_t *e = (rv9_mod_entry_t *)rv9_mod_find(name);
+    if (e == NULL || e->type != RV9_MOD_PROGRAM) return false;
+
+    rv9_lock_acquire(s_lock);
+    uint8_t *head = NULL;
+    bool peer_one = e->image == NULL && e->head != NULL &&
+                    strncmp(e->path, "/peer/", 6) == 0;
+    if (peer_one) {
+        const char *p = e->path + 6;
+        size_t n = 0;
+        while (p[n] && p[n] != '/') n++;
+        peer_one = n > 0 && n < 16;
+        if (peer_one) {
+            memcpy(peer, p, n);
+            peer[n] = '\0';
+            head = head_copy(e->head, ((const rv9_mod_header_t *)e->head)->module_len);
+        }
+    }
+    rv9_lock_release(s_lock);
+
+    bool moves = head != NULL && !runs_here(head, why, cap);
+    rv9_free(head);
+    return moves;
+}
+
 /* RV9_SYS_NEEDS: a module's manifest, found as a fork would find it. */
 static int needs_op(void *buf, uint32_t len)
 {
@@ -1730,6 +1762,13 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
 
     case RV9_SYS_CHECK:
         return check_op(buf, len);
+
+    case RV9_SYS_IDENT: {
+        if (buf == NULL || len < sizeof(rv9_sys_ident_t)) return -1;
+        rv9_sys_ident_t *d = (rv9_sys_ident_t *)buf;
+        memset(d, 0, sizeof(*d));
+        return rv9_ident_get(d->pub, d->id) ? 1 : 0;
+    }
 
     case RV9_SYS_LIMITS:
         if (s_proc_ops == NULL || s_proc_ops->limits == NULL) return -1;

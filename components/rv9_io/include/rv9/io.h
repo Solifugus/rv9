@@ -50,6 +50,7 @@ typedef enum {
     RV9_IO_ERR_TIMEOUT,      /* appended: existing values are ABI, they
                                 travel to modules as negative returns */
     RV9_IO_ERR_BUSY,         /* somebody else owns it -- see claims, below */
+    RV9_IO_ERR_DENIED,       /* who is asking is not one allowed to */
 } rv9_io_err_t;
 
 const char *rv9_io_strerror(rv9_io_err_t err);
@@ -497,6 +498,7 @@ rv9_io_err_t rv9_io_open_detached(const char *name, uint32_t mode,
 rv9_io_err_t rv9_io_read_path(rv9_path_t *p, void *buf, size_t len, size_t *done);
 rv9_io_err_t rv9_io_write_path(rv9_path_t *p, const void *buf, size_t len,
                                size_t *done);
+rv9_io_err_t rv9_io_getstat_path(rv9_path_t *p, uint32_t code, void *arg);
 rv9_io_err_t rv9_io_setstat_path(rv9_path_t *p, uint32_t code, void *arg);
 void         rv9_io_close_path(rv9_path_t *p);
 

@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     17
+#define RV9_MODULE_ABI     18
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -620,6 +620,7 @@ typedef struct {
 #define RV9_IOE_EXISTS      10   /* already there, or already in use */
 #define RV9_IOE_TIMEOUT     11
 #define RV9_IOE_BUSY        12   /* somebody else owns it */
+#define RV9_IOE_DENIED      13   /* who is asking is not one allowed to */
 
 /*
  * And the same for fork, negated. Distinguishing these matters more than
@@ -1478,6 +1479,22 @@ typedef struct __attribute__((packed)) {
 } rv9_sys_check_t;
 
 /*
+ * Who this machine is, to its peers: the public half of its key (the SSH
+ * host key, which every board makes for itself and keeps in NVS) and the
+ * id another board names it by in /f0/callers, the first sixteen bytes of
+ * the SHA-256 of `pub`, in hex 32 digits, short enough to type. Returns 1,
+ * or 0 on a machine built without one. The private half never leaves the
+ * kernel; see `on` and execd (design section 76).
+ */
+#define RV9_SYS_IDENT   17
+
+typedef struct __attribute__((packed)) {
+    uint8_t  id[16];
+    uint8_t  pub[65];       /* 0x04 || X || Y, P-256 */
+    uint8_t  reserved[3];
+} rv9_sys_ident_t;
+
+/*
  * What time it is, as opposed to how long the machine has been up.
  *
  * `set` is the field that matters. This board has no clock that survives
@@ -1928,6 +1945,23 @@ void rv9_mod_set_log_source(uint32_t (*read)(uint32_t, char *, uint32_t),
    why this is registered rather than called. */
 void rv9_mod_set_clock_source(bool (*read)(uint32_t *epoch, uint32_t *age_s));
 
+/*
+ * This machine's identity, a P-256 key pair whose private half the layer
+ * that made it keeps: rv9_ssh registers its host key at start. Signing and
+ * checking are done in a background task of their own, as a module's
+ * signature is checked (sig.c), never on the caller's stack. Each returns
+ * 0, or -1 when there is no identity or it could not be done; verify
+ * returns -2 for a signature that does not match.
+ */
+typedef int (*rv9_ident_sign_fn)(const uint8_t *msg, uint32_t len, uint8_t sig[64]);
+void rv9_ident_set(rv9_ident_sign_fn sign, const uint8_t pub[65]);
+bool rv9_ident_get(uint8_t pub[65], uint8_t id[16]);
+int  rv9_ident_sign(const uint8_t *msg, uint32_t len, uint8_t sig[64]);
+int  rv9_ident_verify(const uint8_t *msg, uint32_t len, const uint8_t sig[64],
+                      const uint8_t pub[65]);
+/* The id of any public key, as rv9_ident_get gives this machine's. */
+int  rv9_ident_id(const uint8_t pub[65], uint8_t id[16]);
+
 /* Scan the module store and build the directory. Safe to call once at boot.
    Returns the number of valid modules found. */
 int rv9_mod_dir_init(void);
@@ -1951,6 +1985,11 @@ rv9_mod_err_t rv9_mod_read_at(const rv9_mod_entry_t *e, uint32_t off,
                               void *buf, uint32_t len, uint32_t *got);
 
 const rv9_mod_entry_t *rv9_mod_find(const char *name);
+
+/* The module the path finds for `name` is a peer's that this machine could
+   not run: the peer's name, and in `why` what this machine lacks. A fork
+   asks, and runs it there (design section 76). */
+bool rv9_mod_elsewhere(const char *name, char peer[16], char *why, size_t cap);
 
 /*
  * A u32 from a module's manifest without loading it: from the store, or

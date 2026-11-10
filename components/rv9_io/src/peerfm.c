@@ -4,6 +4,10 @@
  *     /peer                  the peers /f0/peers names, as a directory
  *     /peer/<name>/.../cmd   its modules, as a directory: GET .../catalog
  *     /peer/<name>/<rest>    GET /<rest> from that peer
+ *     /peer/<name>/run       a connection to its execd, this machine
+ *                            having proved who it is (read and write)
+ *     /peer/listen           wait for a peer to connect to this one's
+ *                            execd and prove who it is (read and write)
  *
  * so that /peer/p4/catalog is what the P4's httpd serves at /catalog, and
  * /peer/p4/cmd/listen.mod is its listen. A module path entry of
@@ -26,6 +30,22 @@
  * even on a machine with none (trust_check in module.c) -- it is the one
  * place a module can come from that nobody at this machine put there.
  *
+ * RUNNING ON A PEER (design section 76)
+ *
+ * /peer/<name>/run and /peer/listen are the two ends of one connection, on
+ * RUN_PORT, made only between machines that know each other. The listening
+ * end sends a challenge, 32 random bytes; the caller signs them with its
+ * identity (the SSH host key, rv9_ident_* in rv9/module.h) and sends its
+ * public key and the signature; the listener answers "ok" only when the
+ * key's id is in its /f0/callers and the signature is the key's. After
+ * that the path is the connection, bytes both ways, as /n0's are, and the
+ * caller's name in /f0/callers is PEER_GS_CALLER.
+ *
+ * What this proves is who connected. It does not protect what follows: the
+ * stream is neither encrypted nor checked, so somebody able to take over a
+ * TCP connection on this network can take over a session. A bench LAN, as
+ * rshd says of itself. Nor does the caller learn who answered.
+ *
  * WHEN THE PEER IS NOT THERE
  *
  * Every name the shell does not know is looked for along the path, so a
@@ -42,7 +62,9 @@
 #include <strings.h>
 
 #include "esp_log.h"
+#include "esp_random.h"
 #include "rv9/net.h"
+#include "rv9/proc.h"
 
 static const char *TAG = "rv9-peer";
 
@@ -58,9 +80,19 @@ static const char *TAG = "rv9-peer";
 #define CONNECT_MS    2000         /* a board on this network answers in ms */
 #define DOWN_SLOTS    8
 
+#define RUN_PORT      "2301"
+#define CALLERS_FILE  "/f0/callers"
+#define CHALLENGE     "rv9-run 1"           /* and what a caller signs begins with */
+#define NONCE_LEN     32
+#define CALLERS_MAX   1024
+#define PEER_GS_CALLER (RV9_SS_DRIVER_BASE + 32)   /* char[16]: who called */
+
 typedef struct {
     bool       is_dir;
     bool       is_cat;             /* /cmd: the catalog, read as a directory */
+    bool       is_stream;          /* run or listen: the connection itself */
+    bool       is_run;
+    char       caller[PEER_NAME_MAX];
     char       line[64];           /* the start of the catalog line being read */
     uint32_t   line_len;
     char       pend[64];           /* catalog bytes read and not yet used */
@@ -103,10 +135,10 @@ static void mark(const char *peer, bool down)
     s_down[slot].until = rv9_time_ms() + PEER_DOWN_MS;
 }
 
-static int read_peers(char *buf, uint32_t cap)
+static int read_small(const char *file, char *buf, uint32_t cap)
 {
     rv9_path_t *p = NULL;
-    if (rv9_io_open_detached(PEERS_FILE, RV9_MODE_READ, &p) != RV9_IO_OK) return -1;
+    if (rv9_io_open_detached(file, RV9_MODE_READ, &p) != RV9_IO_OK) return -1;
     uint32_t got = 0;
     size_t n = 0;
     while (got < cap && rv9_io_read_path(p, buf + got, cap - got, &n) == RV9_IO_OK && n > 0) {
@@ -115,6 +147,11 @@ static int read_peers(char *buf, uint32_t cap)
     rv9_io_close_path(p);
     buf[got] = '\0';
     return (int)got;
+}
+
+static int read_peers(char *buf, uint32_t cap)
+{
+    return read_small(PEERS_FILE, buf, cap);
 }
 
 /*
@@ -156,7 +193,7 @@ static bool find_one(const char *name, const char *addr, void *arg)
 
     const char *colon = strchr(addr, ':');
     size_t hl = colon ? (size_t)(colon - addr) : strlen(addr);
-    const char *port = colon ? colon + 1 : "8080";
+    const char *port = st->is_run ? RUN_PORT : colon ? colon + 1 : "8080";
     int n = snprintf(st->endpoint, sizeof(st->endpoint), "/n0/%.*s/%s/%d",
                      (int)hl, addr, port, CONNECT_MS);
     return hl > 0 && n > 0 && n < (int)sizeof(st->endpoint);
@@ -253,12 +290,218 @@ static rv9_io_err_t ask(peer_path_t *st)
     return e;
 }
 
+/* ---- running on a peer ---------------------------------------------- */
+
+static void to_hex(char *out, const uint8_t *b, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        out[2 * i]     = "0123456789abcdef"[b[i] >> 4];
+        out[2 * i + 1] = "0123456789abcdef"[b[i] & 15];
+    }
+    out[2 * n] = '\0';
+}
+
+static bool from_hex(uint8_t *out, const char *s, size_t n)
+{
+    for (size_t i = 0; i < 2 * n; i++) {
+        char c = s[i];
+        int v = (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+              : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+        if (v < 0) return false;
+        if (i & 1) out[i / 2] |= (uint8_t)v;
+        else       out[i / 2] = (uint8_t)(v << 4);
+    }
+    return true;
+}
+
+static bool send_all(peer_path_t *st, const char *s, size_t n)
+{
+    size_t done = 0;
+    return rv9_io_write_path(st->conn, s, n, &done) == RV9_IO_OK && done == n;
+}
+
+/* One line of the exchange, without its newline, a byte at a time so that
+   nothing after it is taken from the connection. */
+static bool recv_line(peer_path_t *st, char *line, size_t cap)
+{
+    size_t n = 0, got = 0;
+    for (;;) {
+        char c;
+        if (recv_some(st, &c, 1, &got) != RV9_IO_OK || got == 0) return false;
+        if (c == '\n') break;
+        if (n + 1 >= cap) return false;
+        if (c != '\r') line[n++] = c;
+    }
+    line[n] = '\0';
+    return true;
+}
+
+/* What a caller signs: the challenge's name, then its bytes. Never 32 bytes
+   long, the length of what the same key signs for SSH. */
+static void challenge_msg(uint8_t msg[sizeof(CHALLENGE) + NONCE_LEN], const uint8_t *nonce)
+{
+    memcpy(msg, CHALLENGE "\n", sizeof(CHALLENGE));
+    memcpy(msg + sizeof(CHALLENGE), nonce, NONCE_LEN);
+}
+
+/* /peer/<name>/run: connect to its execd and prove who this machine is. */
+static rv9_io_err_t run_open(peer_path_t *st)
+{
+    uint8_t pub[65];
+    if (!rv9_ident_get(pub, NULL)) {
+        ESP_LOGW(TAG, "%s: this machine has no key to say who it is (it is the "
+                      "SSH host key, and this firmware has no SSH)", st->peer);
+        return RV9_IO_ERR_UNSUPPORTED;
+    }
+    rv9_io_err_t e = rv9_io_open_detached(st->endpoint, RV9_MODE_RW, &st->conn);
+    if (e != RV9_IO_OK) {
+        st->conn = NULL;
+        ESP_LOGW(TAG, "%s (%s): %s", st->peer, st->endpoint, rv9_io_strerror(e));
+        return e;
+    }
+    uint32_t on = 1, off = 0;
+    rv9_io_setstat_path(st->conn, RV9_NET_SS_NOWAIT, &on);
+
+    char *line = st->head;
+    uint8_t nonce[NONCE_LEN], msg[sizeof(CHALLENGE) + NONCE_LEN], sig[64];
+    const size_t cl = sizeof(CHALLENGE) - 1;
+    if (!recv_line(st, line, HEAD_MAX) || strncmp(line, CHALLENGE " ", cl + 1) != 0 ||
+        strlen(line) != cl + 1 + 2 * NONCE_LEN || !from_hex(nonce, line + cl + 1, NONCE_LEN)) {
+        ESP_LOGW(TAG, "%s: no challenge from its execd", st->peer);
+        hang_up(st);
+        return RV9_IO_ERR_IO;
+    }
+    challenge_msg(msg, nonce);
+    if (rv9_ident_sign(msg, sizeof(msg), sig) != 0) {
+        hang_up(st);
+        return RV9_IO_ERR_IO;
+    }
+    to_hex(line, pub, sizeof(pub));
+    line[130] = ' ';
+    to_hex(line + 131, sig, sizeof(sig));
+    strcpy(line + 131 + 128, "\n");
+    if (!send_all(st, line, strlen(line)) || !recv_line(st, line, HEAD_MAX)) {
+        hang_up(st);
+        return RV9_IO_ERR_IO;
+    }
+    if (strcmp(line, "ok") != 0) {
+        ESP_LOGW(TAG, "%s will not run anything for this machine: %s", st->peer,
+                 strncmp(line, "no ", 3) == 0 ? line + 3 : line);
+        hang_up(st);
+        return RV9_IO_ERR_DENIED;
+    }
+    rv9_io_setstat_path(st->conn, RV9_NET_SS_NOWAIT, &off);
+    return RV9_IO_OK;
+}
+
+/* Once more after a pause, if the first did not connect: right after a
+   board starts, a connect has been seen to go unanswered once and then
+   work. A refusal by the peer itself is final. */
+static rv9_io_err_t run_ask(peer_path_t *st)
+{
+    rv9_io_err_t e = run_open(st);
+    if (e == RV9_IO_ERR_TIMEOUT || e == RV9_IO_ERR_IO) {
+        rv9_task_delay_ms(RETRY_MS);
+        e = run_open(st);
+    }
+    return e;
+}
+
+/* A line of /f0/callers whose id is the caller's: its name, kept. */
+typedef struct { const char *id; char *name; } caller_q_t;
+
+static bool caller_is(const char *name, const char *id, void *arg)
+{
+    caller_q_t *q = (caller_q_t *)arg;
+    if (strcasecmp(id, q->id) != 0) return false;
+    strncpy(q->name, name, PEER_NAME_MAX - 1);
+    return true;
+}
+
+/* /peer/listen: the next peer to connect that proves it is a caller. */
+static rv9_io_err_t listen_open(peer_path_t *st)
+{
+    char *callers = rv9_alloc(CALLERS_MAX + 1);
+    if (callers == NULL) return RV9_IO_ERR_NOMEM;
+    if (read_small(CALLERS_FILE, callers, CALLERS_MAX) <= 0) {
+        rv9_free(callers);
+        return RV9_IO_ERR_NOTFOUND;             /* nobody may: so nobody is waited for */
+    }
+    rv9_free(callers);
+
+    strcpy(st->peer, "a caller");
+    rv9_io_err_t e = rv9_io_open_detached("/n0/listen/" RUN_PORT, RV9_MODE_RW, &st->conn);
+    if (e != RV9_IO_OK) { st->conn = NULL; return e; }
+    uint32_t on = 1, off = 0;
+    rv9_io_setstat_path(st->conn, RV9_NET_SS_NOWAIT, &on);
+
+    char *line = st->head;
+    uint8_t nonce[NONCE_LEN], msg[sizeof(CHALLENGE) + NONCE_LEN], pub[65], sig[64], id[16];
+    esp_fill_random(nonce, sizeof(nonce));
+    strcpy(line, CHALLENGE " ");
+    to_hex(line + strlen(line), nonce, sizeof(nonce));
+    strcat(line, "\n");
+    if (!send_all(st, line, strlen(line)) || !recv_line(st, line, HEAD_MAX) ||
+        strlen(line) != 130 + 1 + 128 || line[130] != ' ' ||
+        !from_hex(pub, line, sizeof(pub)) || !from_hex(sig, line + 131, sizeof(sig)) ||
+        rv9_ident_id(pub, id) != 0) {
+        const char *no = "no that is not how a caller begins\n";
+        send_all(st, no, strlen(no));
+        hang_up(st);
+        return RV9_IO_ERR_IO;
+    }
+
+    char idhex[33];
+    to_hex(idhex, id, sizeof(id));
+    caller_q_t q = { .id = idhex, .name = st->caller };
+    callers = rv9_alloc(CALLERS_MAX + 1);
+    bool known = callers != NULL && read_small(CALLERS_FILE, callers, CALLERS_MAX) > 0 &&
+                 each_peer(callers, caller_is, &q);
+    rv9_free(callers);
+    if (!known) {
+        ESP_LOGW(TAG, "a peer whose id is %s asked to run something; it is not in %s",
+                 idhex, CALLERS_FILE);
+        const char *no = "no this machine does not know you\n";
+        send_all(st, no, strlen(no));
+        hang_up(st);
+        return RV9_IO_ERR_DENIED;
+    }
+    challenge_msg(msg, nonce);
+    if (rv9_ident_verify(msg, sizeof(msg), sig, pub) != 0) {
+        ESP_LOGW(TAG, "a peer said it was %s and could not sign as %s", st->caller, st->caller);
+        const char *no = "no that is not your signature\n";
+        send_all(st, no, strlen(no));
+        hang_up(st);
+        return RV9_IO_ERR_DENIED;
+    }
+    if (!send_all(st, "ok\n", 3)) { hang_up(st); return RV9_IO_ERR_IO; }
+    rv9_io_setstat_path(st->conn, RV9_NET_SS_NOWAIT, &off);
+    strncpy(st->peer, st->caller, PEER_NAME_MAX - 1);
+
+    /* What this process starts now, it starts for that peer. */
+    rv9_proc_serve_peer();
+    ESP_LOGI(TAG, "%s connected to run something", st->caller);
+    return RV9_IO_OK;
+}
+
 static rv9_io_err_t peer_open(rv9_path_t *path, const char *rest)
 {
-    if (path->mode & (RV9_MODE_WRITE | RV9_MODE_CREATE)) return RV9_IO_ERR_MODE;
+    bool stream = rest != NULL && (strcmp(rest, "listen") == 0 ||
+                                   (strchr(rest, '/') && strcmp(strchr(rest, '/'), "/run") == 0));
+    if (path->mode & RV9_MODE_CREATE) return RV9_IO_ERR_MODE;
+    if (stream != ((path->mode & RV9_MODE_WRITE) != 0)) return RV9_IO_ERR_MODE;
 
     peer_path_t *st = rv9_calloc(1, sizeof(*st));
     if (st == NULL) return RV9_IO_ERR_NOMEM;
+    st->is_stream = stream;
+
+    if (stream && strcmp(rest, "listen") == 0) {
+        rv9_io_err_t e = listen_open(st);
+        if (e != RV9_IO_OK) { rv9_free(st); return e; }
+        path->fm_state = st;
+        return RV9_IO_OK;
+    }
+    st->is_run = stream;
 
     if (rest == NULL || rest[0] == '\0') {
         st->is_dir = true;
@@ -281,7 +524,7 @@ static rv9_io_err_t peer_open(rv9_path_t *path, const char *rest)
        release's. */
     size_t ul = strlen(st->url);
     if (st->url[ul - 1] == '/') st->url[--ul] = '\0';
-    if (ul >= 4 && strcmp(st->url + ul - 4, "/cmd") == 0 && ul - 4 + 9 < sizeof(st->url)) {
+    if (!stream && ul >= 4 && strcmp(st->url + ul - 4, "/cmd") == 0 && ul - 4 + 9 < sizeof(st->url)) {
         st->is_cat = true;
         strcpy(st->url + ul - 4, "/catalog");
     }
@@ -292,7 +535,7 @@ static rv9_io_err_t peer_open(rv9_path_t *path, const char *rest)
     rv9_free(peers);
     if (!known) { rv9_free(st); return RV9_IO_ERR_NOTFOUND; }
 
-    rv9_io_err_t e = ask(st);
+    rv9_io_err_t e = stream ? run_ask(st) : ask(st);
     if (e != RV9_IO_OK) { rv9_free(st); return e; }
     path->fm_state = st;
     return RV9_IO_OK;
@@ -423,6 +666,7 @@ static rv9_io_err_t peer_read(rv9_path_t *path, void *buf, size_t len, size_t *d
 {
     peer_path_t *st = (peer_path_t *)path->fm_state;
     if (st == NULL || done == NULL) return RV9_IO_ERR_INVAL;
+    if (st->is_stream) return rv9_io_read_path(st->conn, buf, len, done);
     if (st->is_dir) return dir_read(path, buf, len, done);
     if (st->is_cat) return cat_read(path, st, buf, len, done);
     rv9_io_err_t e = body_read(st, buf, len, done);
@@ -432,14 +676,15 @@ static rv9_io_err_t peer_read(rv9_path_t *path, void *buf, size_t len, size_t *d
 
 static rv9_io_err_t peer_write(rv9_path_t *path, const void *buf, size_t len, size_t *done)
 {
-    (void)path; (void)buf; (void)len; (void)done;
-    return RV9_IO_ERR_MODE;
+    peer_path_t *st = (peer_path_t *)path->fm_state;
+    if (st == NULL || !st->is_stream) return RV9_IO_ERR_MODE;
+    return rv9_io_write_path(st->conn, buf, len, done);
 }
 
 static rv9_io_err_t peer_seek(rv9_path_t *path, int64_t offset, int whence)
 {
     peer_path_t *st = (peer_path_t *)path->fm_state;
-    if (st == NULL || st->is_dir) return RV9_IO_ERR_UNSUPPORTED;
+    if (st == NULL || st->is_dir || st->is_stream) return RV9_IO_ERR_UNSUPPORTED;
     int64_t base = whence == RV9_SEEK_SET ? 0 : whence == RV9_SEEK_CUR ? st->at : st->size;
     int64_t to = base + offset;
     if (base < 0 || to < 0 || (st->size >= 0 && to > st->size)) return RV9_IO_ERR_INVAL;
@@ -471,6 +716,13 @@ static rv9_io_err_t peer_seek(rv9_path_t *path, int64_t offset, int whence)
 static rv9_io_err_t peer_getstat(rv9_path_t *path, uint32_t code, void *arg)
 {
     peer_path_t *st = (peer_path_t *)path->fm_state;
+    if (st && st->is_stream) {
+        if (code == PEER_GS_CALLER && arg) {
+            memcpy(arg, st->caller, PEER_NAME_MAX);
+            return RV9_IO_OK;
+        }
+        return rv9_io_getstat_path(st->conn, code, arg);
+    }
     if (code == RV9_GS_SIZE && arg && st && !st->is_dir && st->size >= 0) {
         *(uint64_t *)arg = (uint64_t)st->size;
         return RV9_IO_OK;
@@ -480,7 +732,8 @@ static rv9_io_err_t peer_getstat(rv9_path_t *path, uint32_t code, void *arg)
 
 static rv9_io_err_t peer_setstat(rv9_path_t *path, uint32_t code, void *arg)
 {
-    (void)path; (void)code; (void)arg;
+    peer_path_t *st = (peer_path_t *)path->fm_state;
+    if (st && st->is_stream) return rv9_io_setstat_path(st->conn, code, arg);
     return RV9_IO_ERR_UNSUPPORTED;
 }
 

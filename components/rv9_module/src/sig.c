@@ -177,3 +177,97 @@ int rv9_sha256_end(rv9_sha256_ctx_t *c, uint8_t out[32])
     rv9_free(c);
     return r;
 }
+
+/*
+ * This machine's identity (rv9/module.h): who it is to its peers, for `on`
+ * and execd. The key pair is rv9_ssh's host key; this keeps only the means
+ * to sign with it and the public half. Signing and checking run in a task
+ * of their own, as a module's signature is checked above, and for the same
+ * reason: they are asked for on the stack of a process opening a path.
+ */
+static rv9_ident_sign_fn s_sign;
+static uint8_t           s_pub[65];
+
+void rv9_ident_set(rv9_ident_sign_fn sign, const uint8_t pub[65])
+{
+    memcpy(s_pub, pub, sizeof(s_pub));
+    s_sign = sign;
+}
+
+int rv9_ident_id(const uint8_t pub[65], uint8_t id[16])
+{
+    uint8_t h[32];
+    if (rv9_sha256(pub, 65, h) != 0) return -1;
+    memcpy(id, h, 16);
+    return 0;
+}
+
+bool rv9_ident_get(uint8_t pub[65], uint8_t id[16])
+{
+    if (s_sign == NULL) return false;
+    if (pub) memcpy(pub, s_pub, sizeof(s_pub));
+    return id == NULL || rv9_ident_id(s_pub, id) == 0;
+}
+
+typedef struct {
+    const uint8_t *msg;
+    uint32_t       len;
+    uint8_t       *sig;           /* out for a signing, in for a check */
+    const uint8_t *pub;           /* NULL: sign */
+    volatile int   state;
+    int            result;
+} ident_job_t;
+
+static void ident_worker(void *arg)
+{
+    ident_job_t *j = (ident_job_t *)arg;
+    if (j->pub == NULL) {
+        j->result = s_sign(j->msg, j->len, j->sig);
+    } else if (psa_crypto_init() != PSA_SUCCESS) {
+        j->result = -1;
+    } else {
+        psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
+        psa_set_key_type(&a, PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1));
+        psa_set_key_bits(&a, 256);
+        psa_set_key_usage_flags(&a, PSA_KEY_USAGE_VERIFY_MESSAGE);
+        psa_set_key_algorithm(&a, PSA_ALG_ECDSA(PSA_ALG_SHA_256));
+        psa_key_id_t id = 0;
+        psa_status_t st = psa_import_key(&a, j->pub, 65, &id);
+        psa_reset_key_attributes(&a);
+        if (st != PSA_SUCCESS) {
+            j->result = -1;
+        } else {
+            st = psa_verify_message(id, PSA_ALG_ECDSA(PSA_ALG_SHA_256), j->msg, j->len,
+                                    j->sig, 64);
+            psa_destroy_key(id);
+            j->result = st == PSA_SUCCESS ? 0 : -2;
+        }
+    }
+    j->state = DONE;
+    rv9_task_delete(NULL);
+}
+
+static int ident_job(ident_job_t *j)
+{
+    if (rv9_task_create_background(ident_worker, "rv9-ident", SIG_STACK, j) != RV9_OK) {
+        ESP_LOGE(TAG, "no task to sign or check in");
+        return -1;
+    }
+    while (j->state != DONE) rv9_task_delay_ms(2);
+    return j->result;
+}
+
+int rv9_ident_sign(const uint8_t *msg, uint32_t len, uint8_t sig[64])
+{
+    if (s_sign == NULL) return -1;
+    ident_job_t j = { .msg = msg, .len = len, .sig = sig, .state = QUEUED };
+    return ident_job(&j);
+}
+
+int rv9_ident_verify(const uint8_t *msg, uint32_t len, const uint8_t sig[64],
+                     const uint8_t pub[65])
+{
+    ident_job_t j = { .msg = msg, .len = len, .sig = (uint8_t *)sig, .pub = pub,
+                      .state = QUEUED };
+    return ident_job(&j);
+}

@@ -4,7 +4,7 @@
   "generated_by": "tools/mkprofile.py -- regenerate, do not edit",
   "module": {
     "magic": 1295603282,
-    "abi": 17,
+    "abi": 18,
     "header_bytes": 40,
     "types": {
       "PROGRAM": 1,
@@ -311,7 +311,8 @@
     "INVAL": 9,
     "EXISTS": 10,
     "TIMEOUT": 11,
-    "BUSY": 12
+    "BUSY": 12,
+    "DENIED": 13
   },
   "signals": {
     "STOP": 1,
@@ -334,7 +335,8 @@
     "CLOCK": 13,
     "HAVE": 14,
     "NEEDS": 15,
-    "CHECK": 16
+    "CHECK": 16,
+    "IDENT": 17
   },
   "calls": [
     {

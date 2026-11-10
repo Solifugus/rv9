@@ -8256,6 +8256,124 @@ Still to do: `get` does not fetch the files of a module already here, and
 `can` says a file is present without checking its hash, which would read
 megabytes. Discovery of peers, and running on one (step 4), are next.
 
+## 76. Running on a peer, where the work must move
+
+Step 4, and the other half of the distinction the federation started from:
+code moves when it can, work moves when it must. Steps 1 to 3 moved code;
+`listen` cannot be moved, because what it needs is the P4 itself, its FPU,
+its microphone and 28 MB of its memory. So a command the path finds on a
+peer that this machine cannot run is run on that peer.
+
+Three choices, agreed before it was built:
+
+- **Who may ask.** Proper authentication, not `rshd`'s anyone-on-the-LAN,
+  since a C3 driving motors is something left running. Each board already
+  had an identity, its SSH host key, a P-256 pair made on the board and
+  kept in NVS; a peer lists the ones it runs for in `/f0/callers`, a name
+  and the key's id a line, and the service runs only while that file
+  exists. The id is the first sixteen bytes of the SHA-256 of the public
+  key, 32 hex digits, short enough to go in an `echo` (the C5's 255-byte
+  argument would take the key, but not comfortably typed), and `ident`
+  prints it.
+- **When the work moves.** In the kernel's fork, so that a shell, a
+  pipeline, a script or any program gets it: when the module the path
+  finds for a name is a peer's, and this machine lacks what it needs as far
+  as the machine is fixed (its `isa`, a `device` or `exclusive`, the test
+  §74's 3d passes over on), the fork starts `on <peer> <name> <arg>` in its
+  place. The forker gets a pid and a status as for anything else. Not a
+  real-time fork. The peer runs its own module of that name, found by its
+  own path.
+- **What comes back.** Standard output and error, separately, as they are
+  written; the status, or the fork's refusal; and a hang-up when `on` is
+  killed, which stops the command there. Standard input is sent on from a
+  pipe or a file; from the terminal it is not, since a terminal cannot say
+  whether a key is waiting and a background `on` would otherwise take the
+  shell's keystrokes.
+
+**The proof is in the kernel; the plumbing is modules.** `/peer/<name>/run`
+and `/peer/listen` are two more kinds of path in `peerfm`, the ends of a
+connection on port 2301. The listener sends `rv9-run 1` and 32 random
+bytes; the caller signs `rv9-run 1\n` and the bytes with its key and sends
+its public key and the signature; the listener looks the key's id up in
+`/f0/callers`, checks the signature, and answers `ok` or `no` and why.
+After that each is the connection, as `/n0`'s paths are. The private key
+never reaches a module: `rv9_ssh` registers a signing function with the
+module layer (`rv9_ident_set`), and signing and checking run in a task of
+their own, as a module's signature is checked (§73), off the stack of
+whoever is opening the path. The SSH key signs a 32-byte exchange hash, so
+the identity function refuses to sign anything 32 bytes long, and a
+challenge (42 bytes, beginning with its own name) can never be made into a
+host signature.
+
+`execd` is `rshd` again: it opens `/peer/listen`, forks a session with the
+connection as its standard paths, and listens again. The session reads the
+command, forks it with three pipes as its standard paths, and carries them
+in frames (`modules/run.h`): a kind byte, a two-byte length, the bytes.
+Framed, unlike `rshd`'s bare stream, because three things come back over
+one connection and a status cannot be told from output. `on` is the other
+end, and stops at the first `x` (exit) or `r` (refused).
+
+**Not passed on.** A process that opens `/peer/listen` works for a peer
+from then on, and so does everything it starts (`for_peer`, inherited at
+fork); a fork from such a process is never moved. Two machines that each
+run the other's commands therefore cannot pass one back and forth.
+Measured: with the P4's path reaching a PC through `/peer/pc/cmd/`,
+`needi2c` (a test module needing `/i2c0`, which the P4 lacks) typed on the
+P4 was moved to the PC; asked for by the C5 through `on p4 needi2c`, it
+was refused on the P4 for `/i2c0`, and the P4 did not connect to the PC.
+
+**What it proves and what it does not.** That the machine at the other end
+of a connection holds a key a peer listed. Not the stream after that,
+which is neither encrypted nor checked, so somebody able to take over a
+TCP connection on this network can take over a session; and not, to the
+caller, who answered. A bench LAN's security, as `rshd` says of itself, and
+better than it by one thing: nobody unlisted can start anything. SSH's
+transport would protect the stream and is in the firmware already; it is
+the next thing if these boards leave the bench.
+
+### What testing found
+
+- **Every session shared one set of pipes.** The session number came from
+  `"session 7"` parsed from the space, which reads as 0, so every session
+  used `/pipe/xi0`, `xo0` and `xe0`. One at a time nobody could tell; with
+  `on p4 sleep 40 &` running, `on p4 procs` came back scrambled, the start
+  of its output after the prompt, because the background session was
+  reading the new one's output and sending it to the background `on`.
+  Sending the output to a file showed it: the first piece reached the
+  console anyway.
+- **Four pipes were not enough.** `/pipe` had four for the whole machine,
+  and a session takes three. The count is now the board's,
+  `CONFIG_RV9_PIPE_COUNT`, 16 on the P4 and 8 elsewhere, 2.5 KB on a C3;
+  `pipefm` had its own default of four as well, which had to follow.
+- **Input that came with the request was never read.** A caller with input
+  ready sends it, and its end, right after the command, and they arrive in
+  the same read; the session set them aside with the request and read
+  again, for bytes that were not coming. `dir /f0 | on p4 count` worked,
+  since `dir` was slower than the request, and `on p4 dir /f0 | on p4
+  count` left `count` waiting on the P4 for good.
+- **A second connect at once was dropped.** `nfm` listened with a backlog
+  of one; while `execd` checked one caller's signature, a second caller's
+  SYN was dropped and not sent again inside `/peer`'s two-second connect.
+  The backlog is four, and a run is tried once more after a timeout.
+- **`on` ran off a 2 KB stack** when its connect was refused: the failed
+  connect and its log lines are on the opener's stack. 4 KB; measured
+  2,124 at the deepest.
+
+Measured, the C5 calling the P4: `listen -f /sd0/clip.raw` typed on the C5
+ran on the P4 and printed the transcript a local run prints, 7.9 s to
+recognise 2.6 s against 7.8 s locally, and 5.0 s reading the model either
+way. `dir /f0 | on p4 sort | on p4 count` gave the 26 lines `dir /f0 |
+count` gives, five times running; three sessions at once (two `sleep`s and
+a command) ran side by side. Killing `on p4 sleep 60 &` left the P4's
+`sleep` killed. A caller not in `/f0/callers` was told so; one asking a
+peer that is off waited 4.6 s and was told so. `execd` peaked at 1,596
+bytes of stack in a session, `on` at 2,124.
+
+Still to do: a caller that vanishes without hanging up (switched off,
+reset) leaves its command running on the peer until the command ends,
+since nothing here sends keep-alives; discovery of peers; the stream's
+protection; and the C3, which waits on its WiFi.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

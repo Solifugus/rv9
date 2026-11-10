@@ -40,7 +40,12 @@
 static const char *TAG = "rv9-nfm";
 
 #define CONNECT_TIMEOUT_MS 15000
-#define ACCEPT_BACKLOG     1
+/* Connections that may wait to be accepted. One was enough while every
+   service took a connection at a time from people typing; a pipeline with
+   two stages on one peer connects twice at once, and while execd checked
+   the first caller the second's SYN was dropped, and not sent again inside
+   /peer's two-second connect. */
+#define ACCEPT_BACKLOG     4
 #define POLL_MS            10
 
 /*

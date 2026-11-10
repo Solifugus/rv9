@@ -47,6 +47,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "rv9-pipe";
 
@@ -130,7 +131,7 @@ static rv9_io_err_t pipe_mount(rv9_dev_t *dev)
     if (e != RV9_IO_OK || base == NULL) return RV9_IO_ERR_IO;
 
     uint32_t bytes = dev->opt[0] ? dev->opt[0] : 256;
-    uint32_t count = dev->opt[1] ? dev->opt[1] : 4;
+    uint32_t count = dev->opt[1] ? dev->opt[1] : CONFIG_RV9_PIPE_COUNT;   /* as pipemem */
 
     /* Lay the bookkeeping out first and the buffers after it, so a pipe's
        bytes are contiguous and a wrap is one memcpy plus one more. */

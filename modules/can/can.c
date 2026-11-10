@@ -9,6 +9,10 @@
  *     no   memory 28160 KB external this machine has none
  *   no: it would be refused
  *
+ * One found on a peer that this machine would refuse is run on that peer
+ * when it is asked for, and `can` says so: "no: not here; asked for, it
+ * runs on p4 (on p4)".
+ *
  * It reads the module's manifest as a fork would find the module (the
  * store, then the module path) and checks every need, not only the first
  * one that fails. A device, an exclusive one, or an instruction set it
@@ -221,6 +225,24 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     if (!said) m_say(env, RV9_STDOUT, "  it declares no needs\n");
 
     if (refused) {
+        /* A peer's that this machine cannot meet the needs of is run there
+           when it is asked for (design section 76): the work moves. */
+        const char *f = st->n.from;
+        if (f[0] == '/' && f[1] == 'p' && f[2] == 'e' && f[3] == 'e' && f[4] == 'r' &&
+            f[5] == '/' && f[6] != '\0') {
+            uint32_t k = 0;
+            while (f[6 + k] && f[6 + k] != '/' && k < sizeof(st->word) - 1) {
+                st->word[k] = f[6 + k];
+                k++;
+            }
+            st->word[k] = '\0';
+            m_say(env, RV9_STDOUT, "no: not here; asked for, it runs on ");
+            m_say(env, RV9_STDOUT, st->word);
+            m_say(env, RV9_STDOUT, " (on ");
+            m_say(env, RV9_STDOUT, st->word);
+            m_say(env, RV9_STDOUT, ")\n");
+            return 1;
+        }
         m_say(env, RV9_STDOUT, "no: it would be refused\n");
         return 1;
     }

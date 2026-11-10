@@ -1180,8 +1180,12 @@ a peer as it finds one on its card, and runs it if it can. In steps:
      keeps a checked copy and fetches the files it reads; `file` tags carry
      the SHA-256 of the build, checked by `get`, `mksystem.py` and
      `mkrepo.py`.
-4. **Running on a peer, where the work must move**: `listen` asked for on a
-   C3 runs on the P4, which has the microphone, the FPU and the memory.
+4. **Running on a peer, where the work must move — done** (design §76):
+   `listen` asked for on a C5 runs on the P4, which has the microphone,
+   the FPU and the memory. `on <peer> <command>` and `execd`; a peer runs
+   commands only for the machines in its `/f0/callers`, each proving who it
+   is with its SSH host key (`ident`). Still to do: discovery of peers, a
+   protected stream, and noticing a caller that vanished.
 
 ## Working with two boards attached
 

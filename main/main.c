@@ -593,6 +593,13 @@ static service_t s_services[] = {
     { .name = "httpd", .priority = RV9_PRIO_LOW, .wanted = "/f0/serve",
       .says = "httpd serving /m0 to peers (port in /f0/serve, else 8080)" },
 #endif
+#if CONFIG_RV9_DRV_PEER && CONFIG_RV9_DRV_SSH
+    /* Running commands for the peers in /f0/callers, when there are any:
+       a board nobody may run things on does not listen for them. The SSH
+       host key is who this machine is, so without SSH there is none. */
+    { .name = "execd", .priority = RV9_PRIO_LOW, .wanted = "/f0/callers",
+      .says = "execd running commands for the peers in /f0/callers (port 2301)" },
+#endif
     { .name = "shell", .priority = RV9_PRIO_NORMAL,
       .says = "shell on /uart0 (log quiet while it runs)" },
 };

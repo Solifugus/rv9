@@ -82,7 +82,7 @@ the one place the limit is worth remembering.
 | `pfm` | a cell name | the directory of cells; **read-only** |
 | `pipe` | a pipe name | refused: an unnamed pipe has no other end to find |
 | `mfm` | a module name | the directory of modules; **read-only** throughout |
-| `peerfm` | `PEER/what`, GET `/what` from that peer | the peers `/f0/peers` names; **read-only** throughout |
+| `peerfm` | `PEER/what`, GET `/what` from that peer; `PEER/run` and `listen`, a connection to run commands over | the peers `/f0/peers` names; **read-only** but for the two connections |
 
 `ifm` taking both `0x68` and `104` is deliberate. A datasheet says the first
 and a shell script usually says the second, and refusing either would be a
@@ -245,6 +245,20 @@ catalog may add fields. Any path ending in `/cmd` reads the
 `catalog` beside it, so a PC serving `a/cmd/` and `a/catalog` is listed as
 `dir /peer/pc/a/cmd`. A path with a space in it is not asked for.
 
+`/peer/p4/run` and `/peer/listen` are the two ends of a connection to run
+commands over (`on` and `execd`, below in §5), opened for reading and
+writing, on port 2301. The listening end sends a challenge of 32 random
+bytes; the caller signs `rv9-run 1\n` and those bytes with this machine's
+key and sends its public key and the signature; the listener answers `ok`
+only when the key's id is in its `/f0/callers` and the signature is that
+key's, and `no` and why otherwise. After that the path is the connection.
+`/peer/listen` fails at once with no `/f0/callers`, and a caller it turns
+away fails its open with `RV9_IO_ERR_DENIED`, as the caller's does. Its
+getstat `RV9_SS_DRIVER_BASE + 32` gives the caller's name in
+`/f0/callers` (16 bytes); other codes go to the `/n0` path below, so
+`RV9_NET_SS_NOWAIT` works on it. The key is the SSH host key, kept in the
+kernel, so a firmware without SSH has none and cannot be a caller.
+
 ### `pfm` — the publication file manager
 
 A cell at `/pub0/NAME` with exactly one writer, declared in that writer's
@@ -293,7 +307,7 @@ the firmware.
 | `/n0/…` | `nfm` | `net` | TCP, out and in. |
 | `/peer/NAME/…` | `peerfm` | `peer` | Another machine's files, as its `httpd` serves them: `/peer/p4/catalog`, `/peer/p4/cmd/listen.mod`, `/peer/p4/files/pico.rv9m`; `/peer/p4/cmd` as a directory is the catalog. Peers are named in `/f0/peers`, one a line, `<name> <host>[:<port>]` (8080), read at every open. One GET an open, over `/n0`; the length is the answer's, a seek forward reads on and a seek back asks again. A connect waits 2 s; a peer that did not answer is passed over for 60 s, one that refused is asked three times. A module read from here must be signed by a key in `/f0/trust` even when it holds none. Built with `/n0`. |
 | `/pub0/NAME` | `pfm` | `pubmem` | Published cells. |
-| `/pipe/NAME` | `pipe` | `pipemem` | Pipes. |
+| `/pipe/NAME` | `pipe` | `pipemem` | Pipes, 256 bytes each. As many as the board's `CONFIG_RV9_PIPE_COUNT`, sixteen on the P4 and eight elsewhere, unless the descriptor's `opt1` names a number: a shell pipeline of n stages takes n-1, and each command `execd` runs takes three. |
 | `/m0/NAME` | `mfm` | `moddir` | The modules this machine holds, as read-only files: the store's and any `load` brought in, byte for byte, signature included. `dir /m0` lists them, `copy /m0/pubs /sd0/cmd/pubs.mod` puts one on the card, and `httpd` serves them to peers. A module found on the module path is not listed: it is a file somewhere already. Always built. |
 
 Two behaviours that differ deliberately and will bite if assumed uniform:
@@ -518,6 +532,61 @@ and every file it reads are here.
 `build/modules`, refusing a file that is not the build its module names,
 and `--serve PORT` serves it. Named in `/f0/peers` and put on `/f0/path`,
 it is one more peer: `pc 192.168.1.12:8099` and `/peer/pc/cmd/`.
+
+**Running on a peer: `on` and `execd`.** The code moves when it can and
+the work when it must. A command the path finds on a peer that this
+machine cannot run, for want of the CPU or a device it cannot run without,
+is run on that peer: the fork starts `on <peer> <command> <arg>` in its
+place, with the same standard paths, so a shell, a pipeline or a program
+waiting on it has a process like any other, and its status. On a C5:
+
+```
+rv9> listen -f /sd0/clip.raw
+reading the model...                      (on the P4, from its card)
+thinking...
+Flash the light blue far too sanctified.
+(2617 ms of audio: 7936 ms to recognise; reading the model took 5021 ms)
+rv9> can listen
+...
+no: not here; asked for, it runs on p4 (on p4)
+```
+
+`on <peer> <command> [arg]` asks for it explicitly. Its standard output
+and error come back separately as the command writes them; its standard
+input is sent on from a pipe or a file (`dir /f0 | on p4 sort`), and from
+the terminal it is not, so the command reads an end at once. Killing `on`
+hangs up, and the peer stops the command. What runs is the peer's own,
+found by its own path, and paths in the argument are the peer's: `/sd0`
+above is the P4's card. A real-time fork is never moved.
+
+The peer runs it only for a machine it knows. `ident` prints this
+machine's id, the first sixteen bytes of the SHA-256 of its key (the SSH
+host key), and the peer lists it in `/f0/callers`, a name and an id a
+line:
+
+```
+c5> ident
+a546321ec24d77385b7d2787fd77f796
+p4> echo c5 a546321ec24d77385b7d2787fd77f796 >> /f0/callers
+```
+
+`execd`, which init starts when `/f0/callers` exists, takes each caller's
+connection (`/peer/listen`, above) and gives it to a session of its own,
+which forks the command with three pipes for its standard paths and sends
+what comes through them back in frames: a kind byte, a two-byte length,
+the bytes. `q` the command (first), `i` input and `z` its end, from the
+caller; `o` output, `e` errors, and last `x` (status and fault, four bytes
+each) or `r` (the fork's error), from the peer. Whatever a session starts
+works for that peer, and a fork from it is never moved to a peer in turn,
+so two machines that run each other's commands cannot hand one back and
+forth.
+
+Who connected is proved; what follows is not protected. The stream is
+neither encrypted nor checked, and the caller does not learn who answered,
+so this is for a network whose machines are trusted with each other's TCP,
+as `rshd` is. A caller that vanishes without hanging up (switched off)
+leaves its command running until it ends. A peer that does not answer
+costs about 4.6 s: two connects of two seconds and a pause.
 
 **The fork pays for the read** on the forking program's stack: the
 shell's went from 1,440 bytes at its deepest to 2,568, and its stack from
@@ -893,6 +962,7 @@ and why `RV9_SYS_MEM_MIN` exists to mark the part that may never move.
 | `RV9_SYS_CLOCK` | one `rv9_sys_clock_t` | Wall-clock time and whether it has ever been set. UTC only. It says *false* rather than lying when the network has never been asked. |
 | `RV9_SYS_HAVE` | one `rv9_sys_device_t` | **A question, not an enumeration.** Name in, device record out, returns 1 or 0. See §18. |
 | `RV9_SYS_NEEDS` | one `rv9_sys_needs_t` | A module's manifest, wherever a fork would find it. Module name in; where it was found, its revision and its manifest entries out. Returns 1, or 0 when there is no such module. What `can` reads. See §18. |
+| `RV9_SYS_IDENT` | one `rv9_sys_ident_t` | Who this machine is to its peers: its public key (`pub`, the SSH host key) and `id`, the first sixteen bytes of the key's SHA-256, which a peer lists it by in `/f0/callers`. Returns 1, or 0 on a firmware without one. What `ident` prints. |
 | `RV9_SYS_CHECK` | one `rv9_sys_check_t` | Is this file what it ought to be? `path` and `flags` in; the file's SHA-256 (read a kilobyte at a time, so any size), its size, and `err` out. With `RV9_CHECK_MODULE` it is also judged as a module from a peer: it verifies, is signed by a key in `/f0/trust` (`signer` names it), and could run here (`lacks` says what it needs, from its head, before the rest is read). Returns 1 when it passes, 0 when not. What `get` keeps by and `httpd`'s catalog hashes with. |
 
 ## 9. Device settings: getstat and setstat
@@ -1749,9 +1819,9 @@ still stops at its next release.
 
 ### I/O errors — the path operation did not happen
 
-Also returned negated. Twelve values, and the order is ABI: existing numbers
-never move, which is why `RV9_IO_ERR_TIMEOUT` and `RV9_IO_ERR_BUSY` are at
-the end rather than in a sensible place.
+Also returned negated. Thirteen values, and the order is ABI: existing
+numbers never move, which is why `RV9_IO_ERR_TIMEOUT`, `RV9_IO_ERR_BUSY` and
+`RV9_IO_ERR_DENIED` are at the end rather than in a sensible place.
 
 | error | value | cause |
 |---|---|---|
@@ -1767,6 +1837,7 @@ the end rather than in a sensible place.
 | `RV9_IO_ERR_EXISTS` | 10 | It is already there, or the pin is one the board's own devices use (see `/gpio/N`). |
 | `RV9_IO_ERR_TIMEOUT` | 11 | The device did not answer in time. Distinct from `IO` on purpose: a slow device and a broken one need different reactions. |
 | `RV9_IO_ERR_BUSY` | 12 | Somebody else owns it exclusively. |
+| `RV9_IO_ERR_DENIED` | 13 | Who is asking is not one allowed to: a peer that does not list this machine in its `/f0/callers`, or a caller not in this one's. |
 
 Two of these are worth remembering because they read like failures and are
 not: an I²C address that does not answer is reported as *absent*
@@ -1823,7 +1894,7 @@ same quantity.
 
 | profile | value | |
 |---|---|---|
-| `abi` | 17 | What this firmware implements. See §7 on `abi_version`. |
+| `abi` | 18 | What this firmware implements. See §7 on `abi_version`. |
 | `header_bytes` | 40 | The fixed header before the manifest (§5). |
 
 Two of these are worth a sentence, because the number is not the interesting
@@ -1989,9 +2060,9 @@ rv9-profile.json  -- checkdocs.py         -->  docs/reference.md
 ```
 
 So a system call added to `module.h` reaches this document without anybody
-remembering to tell it. It checks **167 names**: the 34 environment entries,
-the 20 manifest tags, 5 faults, 17 process errors, 12 I/O errors, 13 sysinfo
-codes, 42 getstat/setstat codes, 7 file managers and 15 drivers.
+remembering to tell it. It checks **199 names**: the 36 environment entries,
+the 26 manifest tags, 5 faults, 20 process errors, 13 I/O errors, 17 sysinfo
+codes, 52 getstat/setstat codes, 9 file managers and 21 drivers.
 
 *Mentioned* means the name appears in backticks somewhere in the file. That
 is a deliberately low bar — a bare substring search would pass vacuously for

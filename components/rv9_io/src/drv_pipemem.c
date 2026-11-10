@@ -9,18 +9,20 @@
  * Allocated once and never grown, because a pipe that can fail to exist
  * partway through a command line is worse than a pipe that is refused at
  * the start. The cost is memory spent at boot whether anything pipes or
- * not, so the defaults are small: four pipes of 256 bytes is 1 KB, and a
- * shell pipeline carrying the output of `dir` never comes close.
+ * not, so the defaults are small: 256 bytes a pipe, and as many pipes as
+ * the board's CONFIG_RV9_PIPE_COUNT, eight or on the P4 sixteen. Four was
+ * enough for the shell; a command a peer runs through execd takes three.
  *
  * Descriptor options:
  *   opt[0]  bytes of buffer per pipe (default 256)
- *   opt[1]  number of pipes          (default 4)
+ *   opt[1]  number of pipes          (default CONFIG_RV9_PIPE_COUNT)
  */
 #include "rv9/io.h"
 #include "rv9/kal.h"
 #include "rv9/module.h"
 
 #include "esp_log.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "rv9-pipemem";
 
@@ -28,7 +30,7 @@ static const char *TAG = "rv9-pipemem";
 #define OPT_PIPE_COUNT  1
 
 #define DEFAULT_PIPE_BYTES 256
-#define DEFAULT_PIPE_COUNT 4
+#define DEFAULT_PIPE_COUNT CONFIG_RV9_PIPE_COUNT
 
 /* A ceiling on what one descriptor may ask for. The store comes out of the
    same heap as everything else, and a typo in a descriptor should be
