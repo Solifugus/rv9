@@ -1,7 +1,8 @@
 /*
  * whisker -- a widget layer for a window you write SVG to.
  *
- * Labels, buttons and a text field in single-axis stacks, column or row.
+ * Labels, buttons and a text field in single-axis stacks, column or row,
+ * any of which may scroll.
  * All pure, none of them touching a device:
  *
  *     wsk_render(tree, sink, budget)                  one stack, whole screen
@@ -9,6 +10,9 @@
  *     wsk_render_clipped(tree, ids, n, sink, budget)  one stack, those rows
  *     wsk_hit(tree, x, y)                             which widget is there
  *     wsk_compose(body, ctx, sink, budget)            several stacks at once
+ *     wsk_scroll_max(tree)                            how far a stack may scroll
+ *     wsk_area_rows(tree, &y0, &y1)                   what a scroll step repaints
+ *     wsk_slice(pane, total, size, scroll, &first)    a long list, the rows in view
  *
  * The host writes what the sink collected to /w0, having first told the
  * window which rows to repaint:
@@ -77,6 +81,7 @@
  *                       is no focus traversal and there will not be (D9).
  *     -DWSK_NO_FIELD    drop the text field       (364 bytes)
  *     -DWSK_NO_MARKS    drop the corner marks     (288 bytes)
+ *     -DWSK_NO_SCROLL   drop scrolling            (496 bytes)
  *
  * A reduced build is not a different renderer. For the widgets it still has
  * it emits **byte-identical** documents, which `src/run.sh` checks by
@@ -92,6 +97,9 @@
 #  endif
 #  ifndef WSK_NO_MARKS
 #    define WSK_NO_MARKS 1
+#  endif
+#  ifndef WSK_NO_SCROLL
+#    define WSK_NO_SCROLL 1
 #  endif
 #endif
 
@@ -128,6 +136,20 @@ enum {
 	WSK_CENTER,                  /* half each end */
 	WSK_BETWEEN,                 /* shared between the children, none at the ends */
 	WSK_AROUND                   /* shared around them, half-shares at the ends */
+};
+
+/*
+ * What a stack does when its widgets want more than its area (D10, §5e).
+ *
+ * REFUSE is zero, so every tree written before scrolling existed keeps the
+ * rule it was written under: a stack that does not fit is WSK_E_FIT. SCROLL
+ * makes the area a viewport onto the stack laid out at its natural extents,
+ * slid back by `scroll` -- and a scrolling stack whose widgets fit lays out
+ * exactly as a refusing one, byte for byte.
+ */
+enum {
+	WSK_REFUSE = 0,
+	WSK_SCROLL
 };
 
 /*
@@ -226,6 +248,17 @@ typedef struct {
 
 	unsigned char ids;           /* emit id= attributes: 1 yes, 0 no */
 	unsigned char justify;       /* WSK_START..WSK_AROUND, along the axis */
+
+	/*
+	 * Scrolling (design.md §5e). The offset is the caller's, like every
+	 * other piece of state (D5): whisker keeps no position, no momentum and
+	 * no drag, and a wheel or a finger becomes a new `scroll` in the host
+	 * before a picture is asked for. 0 .. wsk_scroll_max(), or the tree is
+	 * refused with WSK_E_SCROLL rather than clamped -- whether an overshoot
+	 * is a bug or a bounce is the caller's to know.
+	 */
+	unsigned char overflow;      /* WSK_REFUSE, or WSK_SCROLL */
+	short         scroll;        /* pixels along the axis, from the start */
 } wsk_tree_t;
 
 typedef struct { short x, y, w, h; } wsk_rect_t;
@@ -242,7 +275,8 @@ enum {
 	WSK_E_EMPTY     = -4,        /* an empty row range: nothing to repaint */
 	WSK_E_DEVICE    = -5,        /* a stack sized for a different screen */
 	WSK_E_KIND      = -6,        /* a widget this build was compiled without */
-	WSK_E_FIT       = -7         /* the widgets want more than the stack's area */
+	WSK_E_FIT       = -7,        /* the widgets want more than the stack's area */
+	WSK_E_SCROLL    = -8         /* a scroll offset past either end */
 };
 
 /* ------------------------------------------------------------------ */
@@ -372,6 +406,29 @@ static inline int wsk_text_ok(const char *t)
  */
 static inline int wsk__natural(const wsk_tree_t *t, int i);
 
+/* What the widgets and the gaps between them want along the axis, padding
+   not included. */
+static inline int wsk__used(const wsk_tree_t *t)
+{
+	int used = 0;
+	for (int i = 0; i < t->n; i++) {
+		if (i > 0) used += t->gap;
+		used += wsk__natural(t, i);
+	}
+	return used;
+}
+
+/*
+ * How far a stack may scroll: the content -- padding, widgets, gaps,
+ * padding -- less the area it is seen through, or 0 when it fits. The one
+ * line a caller needs to clamp a drag is `if (s > max) s = max;`.
+ */
+static inline int wsk_scroll_max(const wsk_tree_t *t)
+{
+	int over = wsk__used(t) + 2 * t->pad - (t->axis == WSK_COL ? t->ah : t->aw);
+	return (over > 0) ? over : 0;
+}
+
 static inline int wsk_check(const wsk_tree_t *t, int *which)
 {
 	for (int i = 0; i < t->n; i++) {
@@ -396,6 +453,43 @@ static inline int wsk_check(const wsk_tree_t *t, int *which)
 		}
 #endif
 	}
+
+#ifdef WSK_NO_SCROLL
+	/* Refused by name, and there is no widget to name, so `which` is -1. */
+	if (t->overflow == WSK_SCROLL) {
+		if (which != 0) *which = -1;
+		return WSK_E_KIND;
+	}
+#else
+	/* A scrolling stack is allowed to want more than its area -- that is
+	   what it is for -- but not more than a coordinate can say, and not to
+	   be scrolled past either end.
+
+	   The first is not hypothetical. A rectangle is four shorts, so a
+	   widget laid out past row 32767 wraps to a negative row, and a list
+	   of 20,000 rows drew 17 KB of rows from the wrong places without a
+	   word (§5e). A list that long is not whisker's to hold anyway: every
+	   rectangle is laid out from the top, so a document costs the square
+	   of the list, and the caller -- who holds the list (D5) -- hands
+	   whisker the slice in view. `which` names the widget that would
+	   wrap. */
+	if (t->overflow == WSK_SCROLL) {
+		int end = ((t->axis == WSK_COL) ? t->ay : t->ax) + 2 * t->pad;
+		for (int i = 0; i < t->n; i++) {
+			if (i > 0) end += t->gap;
+			end += wsk__natural(t, i);
+			if (end > 32767) {
+				if (which != 0) *which = i;
+				return WSK_E_FIT;
+			}
+		}
+		if (t->scroll < 0 || t->scroll > wsk_scroll_max(t)) {
+			if (which != 0) *which = -1;
+			return WSK_E_SCROLL;
+		}
+		return WSK_OK;
+	}
+#endif
 
 	/* And whether the stack fits its area. Layout takes each widget's
 	   natural extent first and shares only the surplus, so when there is
@@ -490,6 +584,8 @@ static inline void wsk_init(wsk_tree_t *t, int axis, int dev_w, int dev_h)
 	t->trough = 0x081620u;
 	t->ids = 0;
 	t->justify = WSK_START;
+	t->overflow = WSK_REFUSE;
+	t->scroll = 0;
 }
 
 /* The part of the device this stack lays out in. */
@@ -571,6 +667,12 @@ static inline wsk_rect_t wsk_rect(const wsk_tree_t *t, int idx)
 	/* A weighted stack has no surplus left: the children took it. */
 	at = (t->axis == WSK_COL ? t->ay : t->ax) + t->pad
 	   + wsk__lead(t, idx, (weights > 0) ? 0 : extra);
+#ifndef WSK_NO_SCROLL
+	/* Slid back by the offset. A stack with something to scroll has no
+	   surplus, so nothing above moves it as well; one with nothing to
+	   scroll has scroll == 0, or wsk_check refused it. */
+	if (t->overflow == WSK_SCROLL) at -= t->scroll;
+#endif
 	for (int i = 0; i < idx; i++) {
 		int e = wsk__natural(t, i);
 		if (weights > 0 && t->item[i].weight > 0) {
@@ -618,6 +720,61 @@ static inline int wsk_find(const wsk_tree_t *t, const char *id)
 }
 
 /* ------------------------------------------------------------------ */
+/* The viewport: what a scrolling stack lets you see                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A widget's rectangle cut to its stack's area, along the axis; 0 when none
+ * of it is in view, and the rectangle untouched for a stack that does not
+ * scroll (design.md §5e).
+ *
+ * Cut by arithmetic because there is nothing else to cut with: no clipPath
+ * on /w0 (§2.4), and /w0's row clip belongs to one display system and is
+ * vertical only today, so whisker may not lean on it (§2.8). A rectangle can
+ * be intersected; text cannot, which is wsk__whole's business.
+ */
+static inline int wsk__cut(const wsk_tree_t *t, wsk_rect_t *r)
+{
+#ifndef WSK_NO_SCROLL
+	if (t->overflow == WSK_SCROLL) {
+		/* one axis, spelled once: the same four fields either way */
+		int col = (t->axis == WSK_COL);
+		short *at = col ? &r->y : &r->x, *len = col ? &r->h : &r->w;
+		int a = col ? t->ay : t->ax, b = a + (col ? t->ah : t->aw);
+		int lo = *at, hi = *at + *len;
+		if (lo < a) lo = a;
+		if (hi > b) hi = b;
+		if (hi <= lo) return 0;
+		*at = (short)lo;
+		*len = (short)(hi - lo);
+	}
+#else
+	(void)t; (void)r;
+#endif
+	return 1;
+}
+
+/*
+ * Whether [lo, hi) along the axis lies wholly in view. Text, the corner
+ * marks and the caret are drawn whole or not at all, because none of them
+ * can be cut: a label pops in at the edge of a scrolling pane rather than
+ * sliding in, which is the flat substrate's price and is paid nowhere else.
+ */
+static inline int wsk__whole(const wsk_tree_t *t, int lo, int hi)
+{
+#ifndef WSK_NO_SCROLL
+	if (t->overflow == WSK_SCROLL) {
+		int a = (t->axis == WSK_COL) ? t->ay : t->ax;
+		int b = a + ((t->axis == WSK_COL) ? t->ah : t->aw);
+		return lo >= a && hi <= b;
+	}
+#else
+	(void)t; (void)lo; (void)hi;
+#endif
+	return 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* Hit: a point, and the name of what is under it                      */
 /* ------------------------------------------------------------------ */
 
@@ -651,6 +808,9 @@ static inline int wsk_hit(const wsk_tree_t *t, int x, int y)
 {
 	for (int i = 0; i < t->n; i++) {
 		wsk_rect_t r = wsk_rect(t, i);
+		/* cut first: a widget scrolled off still has a rectangle, and it
+		   may lie over a neighbouring stack the person can see (§5e) */
+		if (!wsk__cut(t, &r)) continue;
 		if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
 			return i;
 	}
@@ -696,6 +856,7 @@ static inline int wsk_rows(const wsk_tree_t *t, const char *const *ids, int n,
 		wsk_rect_t r;
 		if (i < 0) return WSK_E_NOTFOUND;
 		r = wsk_rect(t, i);
+		if (!wsk__cut(t, &r)) continue;    /* out of view: nothing to repaint */
 		if (r.y < lo) lo = r.y;
 		if (r.y + r.h > hi) hi = r.y + r.h;
 	}
@@ -706,6 +867,76 @@ static inline int wsk_rows(const wsk_tree_t *t, const char *const *ids, int n,
 	if (lo < 0) lo = 0;
 	if (hi > t->h) hi = t->h;
 
+	*y0 = lo;
+	*y1 = hi;
+	return WSK_OK;
+}
+
+#ifndef WSK_NO_SCROLL
+/*
+ * A long list, a slice at a time (design.md §5e).
+ *
+ * whisker lays every rectangle out from the top of its stack, so a document
+ * costs the square of the list, and a rectangle is four shorts, so a stack
+ * may not run past row 32767. Neither matters to a pane of a few hundred
+ * rows and both end a table of ten thousand. The caller holds the list
+ * (D5), so the caller hands whisker only the rows in view -- and for rows
+ * of one size that choice is arithmetic, which is this.
+ *
+ * `t` is the pane: area, pad, gap, overflow = WSK_SCROLL. The list has
+ * `total` rows, each exactly `size` along the axis, and `scroll` is the
+ * offset into the WHOLE list, 0 .. wsk_slice_max(). On return `*first` is
+ * the first row to hand over, t->n how many, and t->scroll the offset into
+ * the slice; the caller points t->item at those rows. The document is then
+ * byte for byte the one the whole list would have drawn, which is how it is
+ * tested -- this is a shortcut to the same picture, never a second layout.
+ */
+static inline int wsk_slice_max(const wsk_tree_t *t, int total, int size)
+{
+	int over = 2 * t->pad + total * (size + t->gap) - t->gap
+	         - ((t->axis == WSK_COL) ? t->ah : t->aw);
+	return (total > 0 && over > 0) ? over : 0;
+}
+
+static inline int wsk_slice(wsk_tree_t *t, int total, int size, int scroll,
+                            int *first)
+{
+	int pitch = size + t->gap;
+	int pane = (t->axis == WSK_COL) ? t->ah : t->aw;
+	int f, last;
+
+	if (scroll < 0 || scroll > wsk_slice_max(t, total, size) || pitch <= 0)
+		return WSK_E_SCROLL;
+	if (total <= 0) {                       /* an empty list is an empty pane */
+		*first = 0;
+		t->n = 0;
+		t->scroll = 0;
+		return WSK_OK;
+	}
+	f = scroll / pitch;                     /* 32-bit: a module may */
+	last = (scroll + pane) / pitch + 1;     /* not divide 64 */
+	if (last > total - 1) last = total - 1;
+	if (f > last) f = last;
+	*first = f;
+	t->n = last - f + 1;
+	t->scroll = (short)(scroll - f * pitch);
+	return WSK_OK;
+}
+#endif
+
+/*
+ * The device rows of a stack's whole area, band-snapped: what a scroll step
+ * repaints, since every visible widget moves. A composite repaint whenever
+ * another stack shares those bands -- §5c's machinery, unchanged.
+ */
+static inline int wsk_area_rows(const wsk_tree_t *t, int *y0, int *y1)
+{
+	int lo = (t->ay / WSK_BAND) * WSK_BAND;
+	int hi = wsk__round_band(t->ay + t->ah);
+
+	if (lo < 0) lo = 0;
+	if (hi > t->h) hi = t->h;
+	if (hi <= lo) return WSK_E_EMPTY;
 	*y0 = lo;
 	*y1 = hi;
 	return WSK_OK;
@@ -802,6 +1033,12 @@ static inline void wsk__text(wsk_sink_t *s, const wsk_tree_t *t,
 	if (room < 1) return;
 	if (chars > room) chars = room;
 	if (chars == 0) return;
+	/* the text's own cell along the axis, which is all a scroll can cut */
+	{
+		int tw = wsk_text_w(t->font, chars);
+		int lo = (t->axis == WSK_COL) ? top : r.x + r.w / 2 - tw / 2;
+		if (!wsk__whole(t, lo, lo + ((t->axis == WSK_COL) ? t->font : tw))) return;
+	}
 
 	wsk__s(s, "<text x=\"");
 	wsk__n(s, r.x + r.w / 2);
@@ -856,6 +1093,10 @@ static inline void wsk__field(wsk_sink_t *s, const wsk_tree_t *t,
 	int x = r.x + WSK_FIELD_PAD;
 	int top = r.y + (r.h - t->font) / 2;
 	unsigned int ink = (w->ink != WSK_INHERIT) ? w->ink : t->ink;
+
+	/* the text and its caret, whole or not at all (§5e) */
+	if (t->axis == WSK_COL ? !wsk__whole(t, top, top + t->font)
+	                       : !wsk__whole(t, r.x, r.x + r.w)) return;
 
 	if (n > 0) {
 		wsk__s(s, "<text text-anchor=\"start\" x=\"");
@@ -1016,15 +1257,20 @@ static inline int wsk_part(const wsk_doc_t *d, const wsk_tree_t *t,
 
 	for (int i = 0; i < t->n; i++) {
 		const wsk_widget_t *w = &t->item[i];
-		wsk_rect_t r = wsk_rect(t, i);
-		if (r.y >= d->y1 || r.y + r.h <= d->y0) continue;  /* not in these rows */
+		wsk_rect_t r = wsk_rect(t, i), v = r;
+		if (!wsk__cut(t, &v)) continue;                    /* scrolled out of view */
+		if (v.y >= d->y1 || v.y + v.h <= d->y0) continue;  /* not in these rows */
+		/* The box is drawn cut (v); everything else from the widget's own
+		   rectangle (r), whole or not at all. */
 #ifdef WSK_NO_FIELD
-		if (w->kind == WSK_BUTTON) wsk__rect(s, t, w, r);
+		if (w->kind == WSK_BUTTON) wsk__rect(s, t, w, v);
 #else
-		if (w->kind == WSK_BUTTON || w->kind == WSK_FIELD) wsk__rect(s, t, w, r);
+		if (w->kind == WSK_BUTTON || w->kind == WSK_FIELD) wsk__rect(s, t, w, v);
 #endif
 #ifndef WSK_NO_MARKS
-		if (w->mark == WSK_MARK_CORNERS) wsk__marks(s, t, w, r);
+		if (w->mark == WSK_MARK_CORNERS &&
+		    (t->axis == WSK_COL ? v.h == r.h : v.w == r.w))
+			wsk__marks(s, t, w, r);
 #endif
 #ifndef WSK_NO_FIELD
 		if (w->kind == WSK_FIELD) wsk__field(s, t, w, r);

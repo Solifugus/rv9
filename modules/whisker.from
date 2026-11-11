@@ -18,7 +18,7 @@
 # what happens to be on the machine is worse than no gate.
 
 upstream  = ~/development/whisker/src/whisker.h
-commit    = d39c751
+commit    = c109eee
 dated     = 2026-10-24
-subject   = D10: a stack that does not fit its area is refused
-refreshed = 2026-10-24
+subject   = §5e: scrolling -- a stack may scroll, and a long list goes a slice at a time
+refreshed = 2026-11-11
