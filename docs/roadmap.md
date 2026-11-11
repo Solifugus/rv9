@@ -1189,7 +1189,9 @@ a peer as it finds one on its card, and runs it if it can. In steps:
    commands only for the machines in its `/f0/callers`, each proving who it
    is with its SSH host key (`ident`). A caller that vanishes has its
    command killed and its failsafes applied within about five seconds
-   (§78). Still to do: discovery of peers, and a protected stream.
+   (§78). Boards find each other by mDNS, and a PC finds them by name
+   (§81). Still to do: a protected stream, and a wired link between boards
+   in one machine.
 
 ## Working with two boards attached
 

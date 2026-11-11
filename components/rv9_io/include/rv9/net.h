@@ -51,6 +51,17 @@
  */
 #define RV9_NET_SS_KEEPALIVE (RV9_SS_DRIVER_BASE + 8)
 
+/*
+ * The boards on this network (peerdisc.c, design section 81). Started once,
+ * when the services are up; then /peer finds a name /f0/peers does not
+ * have here: its address and httpd port, if it has been heard and its id
+ * is the one first heard with its name.
+ */
+void rv9_peers_start(void);
+bool rv9_peer_heard(const char *name, uint8_t ip[4], uint16_t *http);
+/* rv9_sys_peer_t records, this machine first: RV9_SYS_PEERS's answer. */
+int  rv9_peers_list(void *buf, uint32_t len);
+
 #define RV9_NET_MAX_APS 12
 
 typedef struct __attribute__((packed)) {

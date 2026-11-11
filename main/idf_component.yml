@@ -1,4 +1,4 @@
-# RV-9's only managed dependencies, and the only ones it should ever want.
+# RV-9's managed dependencies, each for a reason given below.
 #
 # The P4 has no radio of its own. Its WiFi 6 comes from a companion ESP32-C6
 # over SDIO, and the host side of that is esp_hosted plus esp_wifi_remote --
@@ -32,6 +32,13 @@
 # compatible streaming mode enabled"). A newer host is therefore a change to
 # that negotiation, which is a thing to do on purpose and test, not to pick up
 # by resolving on a Tuesday.
+#
+# mdns, on every board (design section 81): how boards find
+# each other, as printers and speakers do, so a PC finds them too
+# (`ssh you@p4.local`). The standard, rather than a broadcast of RV-9's own
+# that only RV-9 would understand. Not gated: rv9_io requires it before the
+# configuration is known, and without the network nothing links it. Pinned
+# exactly, as the others are.
 dependencies:
   espressif/esp_hosted:
     version: "3.0.9"
@@ -43,3 +50,5 @@ dependencies:
     rules:
       - if: "target == esp32p4"
       - if: "$CONFIG{RV9_DRV_NET} == True"
+  espressif/mdns:
+    version: "1.14.1"

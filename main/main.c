@@ -11,6 +11,7 @@
 #include "rv9/module.h"
 #include "rv9/proc.h"
 #include "rv9/io.h"
+#include "rv9/net.h"
 #include "rv9/io_builtin.h"
 #include "rv9/tts.h"
 #include "rv9/ssh_builtin.h"
@@ -656,6 +657,13 @@ static void run_startup(void)
 static void init_shell_loop(void)
 {
     const size_t n = sizeof(s_services) / sizeof(s_services[0]);
+
+#if CONFIG_RV9_DRV_PEER
+    /* Announce this board and listen for the others (design section 81).
+       Like the clock below, safe before the radio associates: mDNS starts
+       answering when there is an address. */
+    rv9_peers_start();
+#endif
 
     /*
      * Ask the network what time it is.

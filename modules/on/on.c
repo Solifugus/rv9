@@ -134,7 +134,8 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         err(env, st->peer);
         err(env, c == -RV9_IOE_DENIED   ? ": that machine does not run commands for this "
                                           "one (`ident` here, and its /f0/callers)\n"
-               : c == -RV9_IOE_NOTFOUND ? ": no such peer in /f0/peers\n"
+               : c == -RV9_IOE_NOTFOUND ? ": no such peer (not in /f0/peers, and not heard "
+                                          "on the network: `peers`)\n"
                : c == -RV9_IOE_UNSUPPORTED ? ": this machine has no key to say who it is\n"
                : ": cannot reach its execd (see the log)\n");
         return 3;

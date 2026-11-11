@@ -854,11 +854,17 @@ curl -O http://<board>:8080/cmd/listen.mod  # the module, as in its store
 `/m0` is the same thing on the board itself: `dir /m0` lists the modules,
 and `copy /m0/pubs /sd0/cmd/pubs.mod` puts one on the card.
 
-Another board reads them through `/peer`. Name the server in `/f0/peers`
-and put it on the module path:
+Another board reads them through `/peer`. The boards find each other by
+themselves, announcing their names on the network (`peers` shows who is
+there; `echo p4 > /f0/name` names one), so a peer only needs to be on the
+module path. `/f0/peers` names one that cannot be heard, a PC's release
+for instance: `p4 192.168.1.178:8080`.
 
 ```
-rv9> echo p4 192.168.1.178:8080 > /f0/peers
+rv9> peers
+this board  c5            192.168.1.121    a546321e
+name        address          heard  id        serves  runs
+p4          192.168.1.178    3 s    b2630658  8080    2301
 rv9> echo /sd0/cmd/ /f0/cmd/ /peer/p4/cmd/ > /f0/path
 rv9> cat /peer/p4/catalog | count
 125 lines, 625 words, 4828 bytes

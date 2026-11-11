@@ -245,6 +245,18 @@ catalog may add fields. Any path ending in `/cmd` reads the
 `catalog` beside it, so a PC serving `a/cmd/` and `a/catalog` is listed as
 `dir /peer/pc/a/cmd`. A path with a space in it is not asked for.
 
+**Finding peers.** Every board announces itself by mDNS: the host name
+`<name>.local` and a service `_rv9._tcp` whose TXT record holds `id` (what
+`ident` prints) and `http` and `run`, its httpd's and execd's ports or 0.
+It asks who else is there every 30 s, and a name `/f0/peers` does not
+have is looked for among what it heard, so most boards need no line at
+all; a name heard nowhere is asked about once more, waiting 1.5 s, at most
+once in 10 s. A board's name is `/f0/name`, else its chip and the end of
+its MAC (`c3-7852a8`). The first id heard with a name is kept in
+`/f0/known`, and a board claiming the name with another id later is
+refused and logged; a board replaced on purpose is a line to delete from
+it. A PC sees the same: `ssh you@p4.local`.
+
 `/peer/p4/run` and `/peer/listen` are the two ends of a connection to run
 commands over (`on` and `execd`, below in §5), opened for reading and
 writing, on port 2301. The listening end sends a challenge of 32 random
@@ -305,7 +317,7 @@ the firmware.
 | `/touch` | `scf` | `touch` | The touch panel, as a stream of 12-byte events. Reads block; records are never split. The queue is emptied on first open, so a program gets fingers from now rather than a backlog. Only where there is one. **Flashing the P4 leaves the controller not scanning; an ordinary reset does not. Its reset line is not wired, so take the board's power away.** The driver says so when it sees it. Each finger put down clicks the speaker where there is one (the P4), whatever is reading or not, unless a program is reading or writing `/au0`: `/f0/click` holds the level in dB (default −20) or `off`, read at each click. |
 | `/i2c0/ADDR` | `ifm` | `i2c` | The two-wire bus. The pins are the board's; the only option is kHz (100). Shared with the touch controller. A register number above `0xff` is sent as two bytes, high first. |
 | `/n0/…` | `nfm` | `net` | TCP, out and in. |
-| `/peer/NAME/…` | `peerfm` | `peer` | Another machine's files, as its `httpd` serves them: `/peer/p4/catalog`, `/peer/p4/cmd/listen.mod`, `/peer/p4/files/pico.rv9m`; `/peer/p4/cmd` as a directory is the catalog. Peers are named in `/f0/peers`, one a line, `<name> <host>[:<port>]` (8080), read at every open. One GET an open, over `/n0`; the length is the answer's, a seek forward reads on and a seek back asks again. A connect waits 2 s; a peer that did not answer is passed over for 60 s, one that refused is asked three times. A module read from here must be signed by a key in `/f0/trust` even when it holds none. Built with `/n0`. |
+| `/peer/NAME/…` | `peerfm` | `peer` | Another machine's files, as its `httpd` serves them: `/peer/p4/catalog`, `/peer/p4/cmd/listen.mod`, `/peer/p4/files/pico.rv9m`; `/peer/p4/cmd` as a directory is the catalog. Peers are found on the network by mDNS (below), or named in `/f0/peers`, one a line, `<name> <host>[:<port>]` (8080), read at every open, which wins. One GET an open, over `/n0`; the length is the answer's, a seek forward reads on and a seek back asks again. A connect waits 2 s; a peer that did not answer is passed over for 60 s, one that refused is asked three times. A module read from here must be signed by a key in `/f0/trust` even when it holds none. Built with `/n0`. |
 | `/pub0/NAME` | `pfm` | `pubmem` | Published cells. |
 | `/pipe/NAME` | `pipe` | `pipemem` | Pipes, 256 bytes each. As many as the board's `CONFIG_RV9_PIPE_COUNT`, sixteen on the P4 and eight elsewhere, unless the descriptor's `opt1` names a number: a shell pipeline of n stages takes n-1, and each command `execd` runs takes three. |
 | `/m0/NAME` | `mfm` | `moddir` | The modules this machine holds, as read-only files: the store's and any `load` brought in, byte for byte, signature included. `dir /m0` lists them, `copy /m0/pubs /sd0/cmd/pubs.mod` puts one on the card, and `httpd` serves them to peers. A module found on the module path is not listed: it is a file somewhere already. Always built. |
@@ -973,6 +985,7 @@ and why `RV9_SYS_MEM_MIN` exists to mark the part that may never move.
 | `RV9_SYS_CLOCK` | one `rv9_sys_clock_t` | Wall-clock time and whether it has ever been set. UTC only. It says *false* rather than lying when the network has never been asked. |
 | `RV9_SYS_HAVE` | one `rv9_sys_device_t` | **A question, not an enumeration.** Name in, device record out, returns 1 or 0. See §18. |
 | `RV9_SYS_NEEDS` | one `rv9_sys_needs_t` | A module's manifest, wherever a fork would find it. Module name in; where it was found, its revision and its manifest entries out. Returns 1, or 0 when there is no such module. What `can` reads. See §18. |
+| `RV9_SYS_PEERS` | `rv9_sys_peer_t`, this machine first | Who is on the network: this machine (kind `RV9_PEER_THIS`), then each RV-9 board heard announcing itself in the last 150 s, `RV9_PEER_HEARD`, or `RV9_PEER_REFUSED` for a name heard with an id other than the one first heard with it. Name, address, httpd and execd ports (0 for none), id, seconds since heard. Returns how many. What `peers` prints. |
 | `RV9_SYS_IDENT` | one `rv9_sys_ident_t` | Who this machine is to its peers: its public key (`pub`, the SSH host key) and `id`, the first sixteen bytes of the key's SHA-256, which a peer lists it by in `/f0/callers`. Returns 1, or 0 on a firmware without one. What `ident` prints. |
 | `RV9_SYS_CHECK` | one `rv9_sys_check_t` | Is this file what it ought to be? `path` and `flags` in; the file's SHA-256 (read a kilobyte at a time, so any size), its size, and `err` out. With `RV9_CHECK_MODULE` it is also judged as a module from a peer: it verifies, is signed by a key in `/f0/trust` (`signer` names it), and could run here (`lacks` says what it needs, from its head, before the rest is read). Returns 1 when it passes, 0 when not. What `get` keeps by and `httpd`'s catalog hashes with. |
 
@@ -1906,7 +1919,7 @@ same quantity.
 
 | profile | value | |
 |---|---|---|
-| `abi` | 18 | What this firmware implements. See §7 on `abi_version`. |
+| `abi` | 19 | What this firmware implements. See §7 on `abi_version`. |
 | `header_bytes` | 40 | The fixed header before the manifest (§5). |
 
 Two of these are worth a sentence, because the number is not the interesting
@@ -2072,9 +2085,9 @@ rv9-profile.json  -- checkdocs.py         -->  docs/reference.md
 ```
 
 So a system call added to `module.h` reaches this document without anybody
-remembering to tell it. It checks **199 names**: the 36 environment entries,
-the 26 manifest tags, 5 faults, 20 process errors, 13 I/O errors, 17 sysinfo
-codes, 52 getstat/setstat codes, 9 file managers and 21 drivers.
+remembering to tell it. It checks **201 names**: the 36 environment entries,
+the 26 manifest tags, 5 faults, 20 process errors, 13 I/O errors, 18 sysinfo
+codes, 53 getstat/setstat codes, 9 file managers and 21 drivers.
 
 *Mentioned* means the name appears in backticks somewhere in the file. That
 is a deliberately low bar — a bare substring search would pass vacuously for

@@ -4,7 +4,7 @@
   "generated_by": "tools/mkprofile.py -- regenerate, do not edit",
   "module": {
     "magic": 1295603282,
-    "abi": 18,
+    "abi": 19,
     "header_bytes": 40,
     "types": {
       "PROGRAM": 1,
@@ -336,7 +336,8 @@
     "HAVE": 14,
     "NEEDS": 15,
     "CHECK": 16,
-    "IDENT": 17
+    "IDENT": 17,
+    "PEERS": 18
   },
   "calls": [
     {
@@ -960,7 +961,7 @@
       "read_rt": false,
       "write_rt": false,
       "retains": false,
-      "sessions": true
+      "sessions": false
     },
     {
       "name": "camera",

@@ -31,6 +31,13 @@ static uint32_t (*s_log_read)(uint32_t from, char *out, uint32_t cap);
 static uint32_t (*s_log_held)(void);
 static bool     (*s_clock_read)(uint32_t *epoch, uint32_t *age_s);
 
+static int (*s_peers_fill)(void *, uint32_t);
+
+void rv9_mod_set_peers_source(int (*fill)(void *buf, uint32_t len))
+{
+    s_peers_fill = fill;
+}
+
 void rv9_mod_set_clock_source(bool (*read)(uint32_t *, uint32_t *))
 {
     s_clock_read = read;
@@ -1762,6 +1769,10 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
 
     case RV9_SYS_CHECK:
         return check_op(buf, len);
+
+    case RV9_SYS_PEERS:
+        if (buf == NULL || len < sizeof(rv9_sys_peer_t)) return -1;
+        return s_peers_fill ? s_peers_fill(buf, len) : 0;
 
     case RV9_SYS_IDENT: {
         if (buf == NULL || len < sizeof(rv9_sys_ident_t)) return -1;

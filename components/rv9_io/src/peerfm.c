@@ -19,6 +19,9 @@
  *
  *     p4  192.168.1.178:8080
  *
+ * and a name it does not have is looked for among the boards heard on the
+ * network (peerdisc.c), so most boards need no line at all.
+ *
  * Read-only. A file is one GET over /n0, which this stacks on as ssh does,
  * reached by a detached path. Its length is the answer's Content-Length;
  * a seek forward reads and drops, and a seek back asks again, which is
@@ -544,6 +547,20 @@ static rv9_io_err_t peer_open(rv9_path_t *path, const char *rest)
     if (peers == NULL) { rv9_free(st); return RV9_IO_ERR_NOMEM; }
     bool known = read_peers(peers, PEERS_MAX_LEN) > 0 && each_peer(peers, find_one, st);
     rv9_free(peers);
+    if (!known) {
+        /* Heard on the network, then: its address, and its httpd's port --
+           a board that serves nothing has no files to ask for. */
+        uint8_t ip[4];
+        uint16_t http = 0;
+        if (rv9_peer_heard(st->peer, ip, &http) && (stream || http)) {
+            int n = stream
+                ? snprintf(st->endpoint, sizeof(st->endpoint), "/n0/%u.%u.%u.%u/" RUN_PORT "/%d",
+                           ip[0], ip[1], ip[2], ip[3], CONNECT_MS)
+                : snprintf(st->endpoint, sizeof(st->endpoint), "/n0/%u.%u.%u.%u/%u/%d",
+                           ip[0], ip[1], ip[2], ip[3], http, CONNECT_MS);
+            known = n > 0 && n < (int)sizeof(st->endpoint);
+        }
+    }
     if (!known) { rv9_free(st); return RV9_IO_ERR_NOTFOUND; }
 
     rv9_io_err_t e = stream ? run_ask(st) : ask(st);
@@ -576,6 +593,12 @@ static bool list_one(const char *name, const char *addr, void *arg)
     return l->n >= l->room;
 }
 
+static bool listed(const char *name, const char *addr, void *arg)
+{
+    (void)addr;
+    return strcmp(name, (const char *)arg) == 0;
+}
+
 static rv9_io_err_t dir_read(rv9_path_t *path, void *buf, size_t len, size_t *done)
 {
     list_t l = { .out = buf, .room = len / sizeof(rv9_dirent_t), .skip = path->pos };
@@ -583,7 +606,21 @@ static rv9_io_err_t dir_read(rv9_path_t *path, void *buf, size_t len, size_t *do
     if (l.room == 0) return RV9_IO_OK;
     char *peers = rv9_alloc(PEERS_MAX_LEN + 1);
     if (peers == NULL) return RV9_IO_ERR_NOMEM;
-    if (read_peers(peers, PEERS_MAX_LEN) > 0) each_peer(peers, list_one, &l);
+    bool file = read_peers(peers, PEERS_MAX_LEN) > 0;
+    if (file) each_peer(peers, list_one, &l);
+
+    /* Then the boards heard and not in the file, after it, so a listing's
+       order does not change as boards come and go at its end. */
+    rv9_sys_peer_t *heard = l.n < l.room ? rv9_alloc(16 * sizeof(*heard)) : NULL;
+    int nh = heard ? rv9_peers_list(heard, 16 * sizeof(*heard)) : 0;
+    for (int i = 1; i < nh && l.n < l.room; i++) {      /* [0] is this board */
+        char name[17];
+        memcpy(name, heard[i].name, 16);
+        name[16] = '\0';
+        if (heard[i].kind != RV9_PEER_HEARD || (file && each_peer(peers, listed, name))) continue;
+        list_one(name, "", &l);
+    }
+    rv9_free(heard);
     rv9_free(peers);
     path->pos += (int64_t)l.n;
     *done = l.n * sizeof(rv9_dirent_t);

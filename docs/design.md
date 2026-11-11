@@ -8503,6 +8503,49 @@ of the firmware. A board now runs `/f0/startup` once as a shell script when
 its services have settled, so the tune is one line on the P4's `/f0` and
 another board can do something else, or nothing.
 
+## 81. Boards that find each other
+
+Each board listed its peers by hand, `p4 192.168.1.178:8080` in
+`/f0/peers`, which broke when the router gave the P4 another address and
+meant typing on every board for every new one. Now every board announces
+itself by mDNS and listens for the others.
+
+**mDNS rather than a broadcast of our own**, agreed for one reason: a PC
+understands it. `ssh you@p4.local` works, and so does any tool that browses
+`_rv9._tcp`. The price is Espressif's `mdns` component, the third managed
+dependency, and about 60 KB of firmware on each board (the C5 is now at 85%
+of its partition), more than the 30 to 40 KB guessed.
+
+**What is announced.** The host name `<name>.local`, and a service
+`_rv9._tcp` on port 2301 whose TXT record carries `id`, the board's key id
+as `ident` prints it, and `http` and `run`, the ports of its httpd and
+execd, 0 where it runs neither, refreshed every 30 s as `/f0/serve` and
+`/f0/callers` come and go. The name is `/f0/name`, else the chip and the end
+of its MAC, `c3-7852a8`, so that four C3s do not all claim `c3`.
+
+**What is heard.** A host task below RV-9 asks for `_rv9._tcp` every 30 s,
+listening 1.5 s, and keeps up to sixteen boards, forgetting one unheard for
+150 s. `/peer` looks a name up in `/f0/peers` first, which wins, and in what
+was heard after; a name heard nowhere is asked about at once, but only once
+in 10 s, so a path naming a board that is off costs a lookup 1.5 s at most
+and the next ones nothing. `dir /peer` lists both, and `peers` shows who,
+where, how long ago and what they serve (`RV9_SYS_PEERS`, ABI 19).
+
+**What is trusted.** Discovery says where a board is and nothing more:
+modules from it must still be signed, and it runs commands only for its
+`/f0/callers`. It adds one thing. The first id heard with a name is written
+to `/f0/known`, and a board heard later claiming that name with another id
+is shown `refused`, logged, and not used, so a stranger on the network
+cannot become `p4`. A board replaced on purpose is a line to delete there.
+
+Measured with the three boards on WiFi and no `/f0/peers` on any: each
+lists the other two within a refresh; `dir /peer/p4/cmd` on the C5 listed
+the P4's 132 modules; `on p4 uptime` ran; `listen -f` typed on the C3 was
+passed over and run on the P4 as before. The PC resolved `p4.local`,
+`c5.local` and `c3-7852a8.local`. With the P4's `/f0/known` holding a wrong
+id for `c5`, the next refresh showed `c5` refused and `on c5` found no such
+peer.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

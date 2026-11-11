@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     18
+#define RV9_MODULE_ABI     19
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -1495,6 +1495,31 @@ typedef struct __attribute__((packed)) {
 } rv9_sys_ident_t;
 
 /*
+ * Who is on the network: this machine, then every RV-9 peer it has heard
+ * announce itself by mDNS (design section 81), a record each, as many as
+ * fit. Returns how many. The first record is this machine, kind THIS; a
+ * name heard with an id other than the one first heard with it is kept as
+ * kind REFUSED, and /peer will not use it. /f0/peers is not in here: it is
+ * a file, and `peers` reads it as one.
+ */
+#define RV9_SYS_PEERS   18
+
+#define RV9_PEER_THIS     0
+#define RV9_PEER_HEARD    1
+#define RV9_PEER_REFUSED  2
+
+typedef struct __attribute__((packed)) {
+    char     name[16];
+    uint8_t  ip[4];         /* 0.0.0.0 for this machine before it has one */
+    uint16_t http;          /* its httpd's port, 0 if it serves none */
+    uint16_t run;           /* its execd's port, 0 if it runs nothing */
+    uint8_t  id[16];        /* as `ident` prints it; zeros if it gave none */
+    uint32_t age_s;         /* since it was last heard */
+    uint8_t  kind;          /* RV9_PEER_* */
+    uint8_t  reserved[3];
+} rv9_sys_peer_t;
+
+/*
  * What time it is, as opposed to how long the machine has been up.
  *
  * `set` is the field that matters. This board has no clock that survives
@@ -1961,6 +1986,11 @@ int  rv9_ident_verify(const uint8_t *msg, uint32_t len, const uint8_t sig[64],
                       const uint8_t pub[65]);
 /* The id of any public key, as rv9_ident_get gives this machine's. */
 int  rv9_ident_id(const uint8_t pub[65], uint8_t id[16]);
+
+/* Where RV9_SYS_PEERS's answer comes from: the I/O layer's discovery, which
+   fills records and returns how many. See rv9_mod_set_log_source for why
+   this is registered rather than called. */
+void rv9_mod_set_peers_source(int (*fill)(void *buf, uint32_t len));
 
 /* Scan the module store and build the directory. Safe to call once at boot.
    Returns the number of valid modules found. */
