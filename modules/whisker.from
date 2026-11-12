@@ -18,7 +18,7 @@
 # what happens to be on the machine is worse than no gate.
 
 upstream  = ~/development/whisker/src/whisker.h
-commit    = c109eee
-dated     = 2026-10-24
-subject   = §5e: scrolling -- a stack may scroll, and a long list goes a slice at a time
+commit    = bf0c333
+dated     = 2026-11-11
+subject   = §5f: nesting -- a widget may be a stack, the id is prime, and every widget is pathable
 refreshed = 2026-11-11

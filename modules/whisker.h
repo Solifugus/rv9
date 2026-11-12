@@ -2,7 +2,7 @@
  * whisker -- a widget layer for a window you write SVG to.
  *
  * Labels, buttons and a text field in single-axis stacks, column or row,
- * any of which may scroll.
+ * any of which may scroll, and any of which may hold another stack.
  * All pure, none of them touching a device:
  *
  *     wsk_render(tree, sink, budget)                  one stack, whole screen
@@ -13,6 +13,8 @@
  *     wsk_scroll_max(tree)                            how far a stack may scroll
  *     wsk_area_rows(tree, &y0, &y1)                   what a scroll step repaints
  *     wsk_slice(pane, total, size, scroll, &first)    a long list, the rows in view
+ *     wsk_hit_in(tree, x, y, &in)                     the deepest widget there
+ *     wsk_find_in(tree, "id" or "/a/b", &in)          a widget at any depth
  *
  * The host writes what the sink collected to /w0, having first told the
  * window which rows to repaint:
@@ -82,6 +84,7 @@
  *     -DWSK_NO_FIELD    drop the text field       (364 bytes)
  *     -DWSK_NO_MARKS    drop the corner marks     (288 bytes)
  *     -DWSK_NO_SCROLL   drop scrolling            (496 bytes)
+ *     -DWSK_NO_NEST     drop nesting -- a stack inside a stack (1,780 bytes)
  *
  * A reduced build is not a different renderer. For the widgets it still has
  * it emits **byte-identical** documents, which `src/run.sh` checks by
@@ -101,6 +104,9 @@
 #  ifndef WSK_NO_SCROLL
 #    define WSK_NO_SCROLL 1
 #  endif
+#  ifndef WSK_NO_NEST
+#    define WSK_NO_NEST 1
+#  endif
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -114,11 +120,12 @@
 #define WSK_FIELD_PAD 6          /* a field's text, in from its trough */
 #define WSK_CARET_W   2          /* and the caret after it */
 #define WSK_BTN_ROWS  64         /* 8 bands, and about a finger at 170 dpi */
+#define WSK_DEPTH_MAX 8          /* stacks inside stacks; also what stops a cycle */
 
 /* Every profile declares every kind, and the values never move: a reduced
    build refuses WSK_FIELD, it does not renumber around it. A caller's panel,
    a golden and an id mean the same thing whatever this was compiled with. */
-enum { WSK_LABEL = 1, WSK_BUTTON, WSK_FIELD };
+enum { WSK_LABEL = 1, WSK_BUTTON, WSK_FIELD, WSK_STACK };
 enum { WSK_COL = 1, WSK_ROW };
 
 /*
@@ -188,9 +195,17 @@ typedef struct {
 	unsigned int  fill;          /* WSK_INHERIT to take the tree's accent */
 	unsigned int  ink;           /* WSK_INHERIT to take the tree's ink */
 	unsigned char mark;          /* WSK_MARK_CORNERS, or 0 */
+
+	/*
+	 * WSK_STACK: which tree is inside it -- an INDEX into the root's `nest`,
+	 * not a pointer (design.md §5f). A pointer in a `static const` panel is
+	 * an address in rodata, which an RV-9 module cannot link; an index keeps
+	 * a nested panel static. It sits in the padding: the struct is still 64.
+	 */
+	short         sub;
 } wsk_widget_t;
 
-typedef struct {
+typedef struct wsk_tree {
 	const wsk_widget_t *item;
 	int           n;
 
@@ -259,6 +274,20 @@ typedef struct {
 	 */
 	unsigned char overflow;      /* WSK_REFUSE, or WSK_SCROLL */
 	short         scroll;        /* pixels along the axis, from the start */
+
+	/*
+	 * Nesting (design.md §5f). The trees a WSK_STACK widget's `sub` indexes,
+	 * set on the ROOT only: a child is laid out in a copy that carries the
+	 * root's `nest`, its device, and an area that is the stack widget's own
+	 * rectangle -- so a child tree says only what it is, never where.
+	 */
+	const struct wsk_tree *nest;
+	short         nests;
+
+	/* Set by whisker in those copies, never by a caller: the intersection of
+	   every scrolling viewport above this stack, which cuts it (§5f rule 3). */
+	unsigned char clipped;
+	short         cx0, cy0, cx1, cy1;
 } wsk_tree_t;
 
 typedef struct { short x, y, w, h; } wsk_rect_t;
@@ -276,7 +305,8 @@ enum {
 	WSK_E_DEVICE    = -5,        /* a stack sized for a different screen */
 	WSK_E_KIND      = -6,        /* a widget this build was compiled without */
 	WSK_E_FIT       = -7,        /* the widgets want more than the stack's area */
-	WSK_E_SCROLL    = -8         /* a scroll offset past either end */
+	WSK_E_SCROLL    = -8,        /* a scroll offset past either end */
+	WSK_E_DEPTH     = -9         /* stacks nested past WSK_DEPTH_MAX, or in a cycle */
 };
 
 /* ------------------------------------------------------------------ */
@@ -429,13 +459,31 @@ static inline int wsk_scroll_max(const wsk_tree_t *t)
 	return (over > 0) ? over : 0;
 }
 
-static inline int wsk_check(const wsk_tree_t *t, int *which)
+static inline int wsk__check1(const wsk_tree_t *t, int *which)
 {
 	for (int i = 0; i < t->n; i++) {
 		if (!wsk_text_ok(t->item[i].text)) {
 			if (which != 0) *which = i;
 			return WSK_E_TEXT;
 		}
+#ifdef WSK_NO_NEST
+		if (t->item[i].kind == WSK_STACK) {
+			if (which != 0) *which = i;
+			return WSK_E_KIND;
+		}
+#else
+		/* A path is ids joined by '/', so an id may not hold one (D19). */
+		for (int k = 0; t->item[i].id[k] != '\0'; k++)
+			if (t->item[i].id[k] == '/') {
+				if (which != 0) *which = i;
+				return WSK_E_TEXT;
+			}
+		if (t->item[i].kind == WSK_STACK &&
+		    (t->nest == 0 || t->item[i].sub < 0 || t->item[i].sub >= t->nests)) {
+			if (which != 0) *which = i;
+			return WSK_E_KIND;
+		}
+#endif
 		/* And, in a reduced build, what this one cannot draw. Refusing is
 		   the point: drawing a field as a label would be a picture that is
 		   wrong without saying so, which is the failure shape §2.3 keeps
@@ -548,6 +596,7 @@ static inline void wsk_clone(wsk_widget_t *dst, const wsk_widget_t *src, int n)
 		dst[i].fill   = src[i].fill;
 		dst[i].ink    = src[i].ink;
 		dst[i].mark   = src[i].mark;
+		dst[i].sub    = src[i].sub;
 		wsk__scpy(dst[i].id, src[i].id, WSK_ID_MAX);
 		wsk__scpy(dst[i].text, src[i].text, WSK_TEXT_MAX);
 	}
@@ -586,6 +635,10 @@ static inline void wsk_init(wsk_tree_t *t, int axis, int dev_w, int dev_h)
 	t->justify = WSK_START;
 	t->overflow = WSK_REFUSE;
 	t->scroll = 0;
+	t->nest = 0;
+	t->nests = 0;
+	t->clipped = 0;
+	t->cx0 = t->cy0 = t->cx1 = t->cy1 = 0;
 }
 
 /* The part of the device this stack lays out in. */
@@ -609,6 +662,7 @@ static inline int wsk__round_band(int v)
  * clip snaps outward anyway, so a widget that straddles a boundary costs an
  * extra band for nothing (design.md §5, criterion 4).
  */
+#ifdef WSK_NO_NEST
 static inline int wsk__natural(const wsk_tree_t *t, int i)
 {
 	const wsk_widget_t *w = &t->item[i];
@@ -620,6 +674,57 @@ static inline int wsk__natural(const wsk_tree_t *t, int i)
 	if (w->kind == WSK_BUTTON) return WSK_BTN_ROWS;
 	return wsk__round_band(t->font + t->gap);
 }
+#else
+/*
+ * The same, measured along `axis`, which need not be the stack's own: a row
+ * nested in a column is as tall as its tallest child, so a child's extent
+ * ACROSS its stack has to be askable too (design.md §5f rule 1). A leaf's
+ * extent across is what it would be in a stack of that axis; `size` is
+ * along its own stack only.
+ *
+ * A stack's is its content: the sum along its axis, the largest across, its
+ * padding both ends. `nest` is passed beside `t` because a child tree
+ * measured here is the caller's own, which carries no `nest` of its own --
+ * only the copies layout makes do. `depth` stops a tree that holds itself.
+ */
+static inline int wsk__nat_on(const wsk_tree_t *nest, int nests,
+                              const wsk_tree_t *t, int i, int axis, int depth)
+{
+	const wsk_widget_t *w = &t->item[i];
+
+	if (w->size > 0 && axis == t->axis) return w->size;
+	if (w->kind == WSK_STACK) {
+		const wsk_tree_t *c;
+		int ext = 0;
+		if (nest == 0 || w->sub < 0 || w->sub >= nests || depth >= WSK_DEPTH_MAX)
+			return 0;                    /* wsk_check refuses it by name */
+		c = &nest[w->sub];
+#ifndef WSK_NO_SCROLL
+		/* A stack that scrolls asks for nothing along the axis it scrolls
+		   on: being shorter than its content is what it is for. Its size
+		   comes from `size` or `weight`. */
+		if (c->overflow == WSK_SCROLL && c->axis == axis) return 2 * c->pad;
+#endif
+		for (int j = 0; j < c->n; j++) {
+			int e = wsk__nat_on(nest, nests, c, j, axis, depth + 1);
+			if (c->axis == axis) ext += e + ((j > 0) ? c->gap : 0);
+			else if (e > ext) ext = e;
+		}
+		return ext + 2 * c->pad;
+	}
+	if (axis == WSK_ROW) {
+		int text = wsk_text_w(t->font, wsk__len(w->text));
+		return text + 2 * t->pad;
+	}
+	if (w->kind == WSK_BUTTON) return WSK_BTN_ROWS;
+	return wsk__round_band(t->font + t->gap);
+}
+
+static inline int wsk__natural(const wsk_tree_t *t, int i)
+{
+	return wsk__nat_on(t->nest, t->nests, t, i, t->axis, 0);
+}
+#endif
 
 /*
  * Where widget i sits, in device pixels.
@@ -720,6 +825,188 @@ static inline int wsk_find(const wsk_tree_t *t, const char *id)
 }
 
 /* ------------------------------------------------------------------ */
+/* Nesting: a stack inside a stack (design.md §5f)                      */
+/* ------------------------------------------------------------------ */
+
+#ifndef WSK_NO_NEST
+/*
+ * A tree, a byte at a time. Not `*d = *s`: a struct this size is copied with
+ * a call to memcpy, which a module has no way to link (see wsk_clone) -- and
+ * a plain byte loop is recognised as memcpy and turned back into the same
+ * call, so the empty asm says the loop must stay a loop. Field by field was
+ * 460 bytes of code; this is a few dozen, and ninety-odd byte moves is
+ * nothing beside the layout it precedes. A char may alias anything, so the
+ * loop is defined C; the barrier is GCC's and clang's spelling.
+ */
+static inline void wsk__tcopy(wsk_tree_t *d, const wsk_tree_t *s)
+{
+	unsigned char *o = (unsigned char *)d;
+	const unsigned char *i = (const unsigned char *)s;
+	for (unsigned k = 0; k < sizeof *d; k++) {
+		o[k] = i[k];
+#if defined(__GNUC__)
+		__asm__ volatile ("" ::: "memory");
+#endif
+	}
+}
+
+/*
+ * The tree inside widget i, ready to lay out: the caller's child tree, with
+ * the parent's device and `nest`, laid out in the widget's own rectangle,
+ * and cut by everything that cuts the parent -- plus the parent's own
+ * viewport when the parent scrolls (rule 3). 0 when the widget names no
+ * tree, which wsk_check has already refused by name.
+ */
+static inline int wsk__child(const wsk_tree_t *t, int i, wsk_tree_t *c)
+{
+	const wsk_widget_t *w = &t->item[i];
+	wsk_rect_t r;
+
+	if (t->nest == 0 || w->sub < 0 || w->sub >= t->nests) return 0;
+	wsk__tcopy(c, &t->nest[w->sub]);
+	c->w = t->w;
+	c->h = t->h;
+	c->nest = t->nest;
+	c->nests = t->nests;
+	r = wsk_rect(t, i);
+	c->ax = r.x; c->ay = r.y; c->aw = r.w; c->ah = r.h;
+
+	c->clipped = t->clipped;
+	c->cx0 = t->cx0; c->cy0 = t->cy0; c->cx1 = t->cx1; c->cy1 = t->cy1;
+#ifndef WSK_NO_SCROLL
+	if (t->overflow == WSK_SCROLL) {
+		int x0 = t->ax, y0 = t->ay, x1 = t->ax + t->aw, y1 = t->ay + t->ah;
+		if (!c->clipped) {
+			c->cx0 = (short)x0; c->cy0 = (short)y0;
+			c->cx1 = (short)x1; c->cy1 = (short)y1;
+			c->clipped = 1;
+		} else {
+			if (x0 > c->cx0) c->cx0 = (short)x0;
+			if (y0 > c->cy0) c->cy0 = (short)y0;
+			if (x1 < c->cx1) c->cx1 = (short)x1;
+			if (y1 < c->cy1) c->cy1 = (short)y1;
+		}
+	}
+#endif
+	return 1;
+}
+
+/*
+ * One level, then each stack inside it, each in the rectangle its parent
+ * gave it -- so D10 holds at every depth (rule 2). `in` gets the caller's own
+ * tree the refusal was found in, not the copy it was laid out in, so that
+ * `in->item[which]` is the widget to blame.
+ */
+static inline int wsk__check_at(const wsk_tree_t *t, const wsk_tree_t *orig,
+                                int *which, const wsk_tree_t **in, int depth)
+{
+	int e = wsk__check1(t, which);
+
+	if (e != WSK_OK) { if (in != 0) *in = orig; return e; }
+	for (int i = 0; i < t->n; i++) {
+		wsk_tree_t c;
+		if (t->item[i].kind != WSK_STACK) continue;
+		(void)wsk__child(t, i, &c);         /* wsk__check1 vouched for sub */
+		e = wsk__check_at(&c, &t->nest[t->item[i].sub], which, in, depth + 1);
+		if (e != WSK_OK) return e;
+	}
+	return WSK_OK;
+}
+
+/*
+ * How deep the stacks go, by structure alone and before any layout: a
+ * stack's natural size measures every tree under it, and measured past the
+ * limit from one level and short of it from the next, two levels would
+ * disagree about the same widget and the refusal would come out as "does
+ * not fit". So depth is refused first, as itself.
+ */
+static inline int wsk__deep(const wsk_tree_t *nest, int nests, const wsk_tree_t *t,
+                            int *which, const wsk_tree_t **in, int depth)
+{
+	for (int i = 0; i < t->n; i++) {
+		const wsk_widget_t *w = &t->item[i];
+		int e;
+		if (w->kind != WSK_STACK || w->sub < 0 || w->sub >= nests) continue;
+		if (depth + 1 >= WSK_DEPTH_MAX) {
+			if (which != 0) *which = i;
+			if (in != 0) *in = t;
+			return WSK_E_DEPTH;
+		}
+		e = wsk__deep(nest, nests, &nest[w->sub], which, in, depth + 1);
+		if (e != WSK_OK) return e;
+	}
+	return WSK_OK;
+}
+
+/*
+ * A tree used by two stacks would draw its ids twice, and an id is prime
+ * (D19) -- so each tree in `nest` may be inside at most one widget, anywhere.
+ * Counted over the root and every tree in `nest`, reachable or not.
+ */
+static inline int wsk__shared(const wsk_tree_t *t, int *which,
+                              const wsk_tree_t **in)
+{
+	for (int k = 0; k < t->nests; k++) {
+		int seen = 0;
+		for (int a = -1; a < t->nests; a++) {
+			const wsk_tree_t *u = (a < 0) ? t : &t->nest[a];
+			if (a >= 0 && u == t) continue;   /* the root, kept in its own nest */
+			for (int i = 0; i < u->n; i++) {
+				if (u->item[i].kind != WSK_STACK || u->item[i].sub != k) continue;
+				if (++seen > 1) {
+					if (which != 0) *which = i;
+					if (in != 0) *in = u;
+					return WSK_E_KIND;
+				}
+			}
+		}
+	}
+	return WSK_OK;
+}
+
+/* wsk_check, saying which tree as well as which widget. */
+static inline int wsk_check_in(const wsk_tree_t *t, int *which,
+                               const wsk_tree_t **in)
+{
+	/* Sharing first: it needs no layout, and a shared tree laid out in the
+	   wrong one of its two places would be blamed for not fitting. */
+	if (t->nest != 0) {
+		int e = wsk__shared(t, which, in);
+		if (e == WSK_OK) e = wsk__deep(t->nest, t->nests, t, which, in, 0);
+		if (e != WSK_OK) return e;
+	}
+	return wsk__check_at(t, t, which, in, 0);
+}
+
+static inline int wsk_check(const wsk_tree_t *t, int *which)
+{
+	return wsk_check_in(t, which, 0);
+}
+
+/*
+ * A child tree, started with its parent's look -- device, font, colours, ids
+ * -- so that nesting does not mean restating them. Padding, gap and the rest
+ * are wsk_init's. Nothing is inherited later or silently: what the child
+ * says after this is what it is.
+ */
+static inline void wsk_nest_init(wsk_tree_t *c, const wsk_tree_t *parent, int axis)
+{
+	wsk_init(c, axis, parent->w, parent->h);
+	c->font = parent->font;
+	c->bg = parent->bg;
+	c->ink = parent->ink;
+	c->accent = parent->accent;
+	c->trough = parent->trough;
+	c->ids = parent->ids;
+}
+#else
+static inline int wsk_check(const wsk_tree_t *t, int *which)
+{
+	return wsk__check1(t, which);
+}
+#endif /* WSK_NO_NEST */
+
+/* ------------------------------------------------------------------ */
 /* The viewport: what a scrolling stack lets you see                    */
 /* ------------------------------------------------------------------ */
 
@@ -751,6 +1038,19 @@ static inline int wsk__cut(const wsk_tree_t *t, wsk_rect_t *r)
 #else
 	(void)t; (void)r;
 #endif
+#ifndef WSK_NO_NEST
+	/* and by every viewport above it, along both axes (§5f rule 3) */
+	if (t->clipped) {
+		int x0 = r->x, y0 = r->y, x1 = r->x + r->w, y1 = r->y + r->h;
+		if (x0 < t->cx0) x0 = t->cx0;
+		if (y0 < t->cy0) y0 = t->cy0;
+		if (x1 > t->cx1) x1 = t->cx1;
+		if (y1 > t->cy1) y1 = t->cy1;
+		if (x1 <= x0 || y1 <= y0) return 0;
+		r->x = (short)x0; r->y = (short)y0;
+		r->w = (short)(x1 - x0); r->h = (short)(y1 - y0);
+	}
+#endif
 	return 1;
 }
 
@@ -773,6 +1073,16 @@ static inline int wsk__whole(const wsk_tree_t *t, int lo, int hi)
 #endif
 	return 1;
 }
+
+#ifndef WSK_NO_NEST
+/* Whether a box lies wholly inside every viewport above its stack: the
+   other half of drawing text whole or not at all, once stacks nest. */
+static inline int wsk__seen(const wsk_tree_t *t, int x0, int y0, int x1, int y1)
+{
+	if (!t->clipped) return 1;
+	return x0 >= t->cx0 && y0 >= t->cy0 && x1 <= t->cx1 && y1 <= t->cy1;
+}
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Hit: a point, and the name of what is under it                      */
@@ -822,11 +1132,124 @@ static inline int wsk_hit(const wsk_tree_t *t, int x, int y)
  * returns the id, which is the form §1 names and the one a host hands back
  * to its application. Null when nothing is there.
  */
+#ifndef WSK_NO_NEST
+/*
+ * The DEEPEST widget at the point, and the tree it is in (§5f rule 5): a
+ * leaf, or a stack when the point is in that stack's padding or gaps -- a
+ * stack is a widget with an id, so it has an answer there and the root,
+ * which is not a widget, does not. `in` is the caller's own tree, so
+ * `in->item[i]` is the widget.
+ *
+ * wsk_hit keeps its old answer, an index in the root -- the outermost
+ * widget there -- so that a flat caller is unchanged and a nested one can
+ * still ask which top-level region was touched.
+ */
+static inline int wsk__hit_at(const wsk_tree_t *t, const wsk_tree_t *orig,
+                              int x, int y, const wsk_tree_t **in, int depth)
+{
+	for (int i = 0; i < t->n; i++) {
+		wsk_rect_t r = wsk_rect(t, i);
+		if (!wsk__cut(t, &r)) continue;
+		if (!(x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)) continue;
+		if (t->item[i].kind == WSK_STACK && depth + 1 < WSK_DEPTH_MAX) {
+			wsk_tree_t c;
+			if (wsk__child(t, i, &c)) {
+				int k = wsk__hit_at(&c, &t->nest[t->item[i].sub], x, y, in,
+				                    depth + 1);
+				if (k >= 0) return k;
+			}
+		}
+		if (in != 0) *in = orig;
+		return i;
+	}
+	return WSK_E_NOTFOUND;
+}
+
+static inline int wsk_hit_in(const wsk_tree_t *t, int x, int y,
+                             const wsk_tree_t **in)
+{
+	return wsk__hit_at(t, t, x, y, in, 0);
+}
+
+static inline const char *wsk_hit_id(const wsk_tree_t *t, int x, int y)
+{
+	const wsk_tree_t *in = t;
+	int i = wsk_hit_in(t, x, y, &in);
+	return (i < 0) ? 0 : in->item[i].id;
+}
+#else
+static inline int wsk_hit_in(const wsk_tree_t *t, int x, int y,
+                             const wsk_tree_t **in)
+{
+	if (in != 0) *in = t;
+	return wsk_hit(t, x, y);
+}
+
 static inline const char *wsk_hit_id(const wsk_tree_t *t, int x, int y)
 {
 	int i = wsk_hit(t, x, y);
 	return (i < 0) ? 0 : t->item[i].id;
 }
+#endif
+
+#ifndef WSK_NO_NEST
+/*
+ * A widget by id at any depth, or by path (D19).
+ *
+ * An id is prime and document-unique, so a bare id is searched for through
+ * every stack. A key starting with '/' is a path -- ids from the root,
+ * `/toolbar/save` -- and is checked LINK BY LINK: each segment must be a
+ * widget directly inside the one before, and a path whose last id exists
+ * somewhere else is not found. Saying the path is the point of writing one.
+ *
+ * `at` gets the tree the widget was found in as LAID OUT -- device, area and
+ * viewports filled in -- which is what wsk_rows needs to cut it; `in` gets
+ * the caller's own tree.
+ */
+static inline int wsk__seg(const char *id, const char *p)
+{
+	int k = 0;
+	while (id[k] != '\0' && id[k] == p[k]) k++;
+	return (id[k] == '\0' && (p[k] == '/' || p[k] == '\0')) ? k : 0;
+}
+
+static inline int wsk__locate(const wsk_tree_t *t, const wsk_tree_t *orig,
+                              const char *key, int path, wsk_tree_t *at,
+                              const wsk_tree_t **in, int depth)
+{
+	for (int i = 0; i < t->n; i++) {
+		const wsk_widget_t *w = &t->item[i];
+		int k = path ? wsk__seg(w->id, key) : wsk__same(w->id, key);
+		if (k && (!path || key[k] == '\0')) {
+			if (at != 0) wsk__tcopy(at, t);
+			if (in != 0) *in = orig;
+			return i;
+		}
+		if (w->kind == WSK_STACK && depth + 1 < WSK_DEPTH_MAX && (!path || k)) {
+			wsk_tree_t c;
+			if (wsk__child(t, i, &c)) {
+				int f = wsk__locate(&c, &t->nest[w->sub], path ? key + k + 1 : key,
+				                    path, at, in, depth + 1);
+				if (f >= 0) return f;
+			}
+		}
+	}
+	return WSK_E_NOTFOUND;
+}
+
+static inline int wsk__lookup(const wsk_tree_t *t, const char *key,
+                              wsk_tree_t *at, const wsk_tree_t **in)
+{
+	if (key[0] == '/') return wsk__locate(t, t, key + 1, 1, at, in, 0);
+	return wsk__locate(t, t, key, 0, at, in, 0);
+}
+
+static inline int wsk_find_in(const wsk_tree_t *t, const char *key,
+                              const wsk_tree_t **in)
+{
+	return wsk__lookup(t, key, 0, in);
+}
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Rows: what a repaint costs, in the units the setstat wants          */
@@ -852,11 +1275,22 @@ static inline int wsk_rows(const wsk_tree_t *t, const char *const *ids, int n,
 	int lo = t->h, hi = 0;
 
 	for (int k = 0; k < n; k++) {
+#ifdef WSK_NO_NEST
 		int i = wsk_find(t, ids[k]);
 		wsk_rect_t r;
 		if (i < 0) return WSK_E_NOTFOUND;
 		r = wsk_rect(t, i);
 		if (!wsk__cut(t, &r)) continue;    /* out of view: nothing to repaint */
+#else
+		/* At any depth, by id or by path; a stack's rows are its whole
+		   rectangle, which is how a branch is repainted (§5f rule 4). */
+		wsk_tree_t at;
+		int i = wsk__lookup(t, ids[k], &at, 0);
+		wsk_rect_t r;
+		if (i < 0) return WSK_E_NOTFOUND;
+		r = wsk_rect(&at, i);
+		if (!wsk__cut(&at, &r)) continue;  /* out of view: nothing to repaint */
+#endif
 		if (r.y < lo) lo = r.y;
 		if (r.y + r.h > hi) hi = r.y + r.h;
 	}
@@ -1038,6 +1472,10 @@ static inline void wsk__text(wsk_sink_t *s, const wsk_tree_t *t,
 		int tw = wsk_text_w(t->font, chars);
 		int lo = (t->axis == WSK_COL) ? top : r.x + r.w / 2 - tw / 2;
 		if (!wsk__whole(t, lo, lo + ((t->axis == WSK_COL) ? t->font : tw))) return;
+#ifndef WSK_NO_NEST
+		if (!wsk__seen(t, r.x + r.w / 2 - tw / 2, top,
+		                  r.x + r.w / 2 - tw / 2 + tw, top + t->font)) return;
+#endif
 	}
 
 	wsk__s(s, "<text x=\"");
@@ -1097,6 +1535,9 @@ static inline void wsk__field(wsk_sink_t *s, const wsk_tree_t *t,
 	/* the text and its caret, whole or not at all (§5e) */
 	if (t->axis == WSK_COL ? !wsk__whole(t, top, top + t->font)
 	                       : !wsk__whole(t, r.x, r.x + r.w)) return;
+#ifndef WSK_NO_NEST
+	if (!wsk__seen(t, r.x, top, r.x + r.w, top + t->font)) return;
+#endif
 
 	if (n > 0) {
 		wsk__s(s, "<text text-anchor=\"start\" x=\"");
@@ -1227,6 +1668,88 @@ static inline void wsk_open(const wsk_doc_t *d, wsk_sink_t *s)
 	wsk__s(s, "\">");
 }
 
+#ifndef WSK_NO_NEST
+static inline void wsk__items(const wsk_doc_t *d, const wsk_tree_t *t,
+                              wsk_sink_t *s);
+
+/*
+ * A nested stack, out of line on purpose: its child tree is a copy on the
+ * stack, and inside wsk__items that copy would sit in the frame of every
+ * stack drawn -- flat ones included, which measured 144 bytes of stack for
+ * nothing (tools/evidence/stack). Here only a stack that holds a stack pays,
+ * once per level, and the rasteriser runs beneath all of it on /w0.
+ */
+#if defined(__GNUC__)
+__attribute__((noinline, unused))
+#endif
+static void wsk__stack(const wsk_doc_t *d, const wsk_tree_t *t, int i,
+                       wsk_rect_t v, wsk_sink_t *s)
+{
+	const wsk_widget_t *w = &t->item[i];
+	wsk_tree_t c;
+	int id = (t->ids && w->id[0] != '\0'), font, g;
+
+	if (!wsk__child(t, i, &c)) return;      /* wsk_check refused it */
+	font = (c.font != t->font);
+	g = id || font || c.ink != t->ink;
+	if (g) {
+		wsk__s(s, "<g");
+		if (id) { wsk__s(s, " id=\""); wsk__s(s, w->id); wsk__s(s, "\""); }
+		if (font) { wsk__s(s, " font-size=\""); wsk__n(s, c.font); wsk__s(s, "\""); }
+		if (c.ink != t->ink) { wsk__s(s, " fill=\""); wsk__col(s, c.ink); wsk__s(s, "\""); }
+		wsk__s(s, ">");
+	}
+	if (w->fill != WSK_INHERIT) wsk__box(s, 0, v, w->fill);
+	wsk__items(d, &c, s);
+	if (g) wsk__s(s, "</g>");
+}
+#endif
+
+/*
+ * One stack's widgets into a document, clipped to its rows -- and, for a
+ * WSK_STACK, the tree inside it, in the rectangle it was given (§5f).
+ *
+ * A nested stack is a <g> only when it has something to say: its id when
+ * ids are on, which the browser client replaces (§9.7); a font or ink that
+ * differs from the stack around it. A filled rectangle behind its children
+ * only when its widget asks for a fill. A stack that says nothing costs
+ * nothing, so nesting for layout alone adds no bytes.
+ */
+static inline void wsk__items(const wsk_doc_t *d, const wsk_tree_t *t,
+                              wsk_sink_t *s)
+{
+	for (int i = 0; i < t->n; i++) {
+		const wsk_widget_t *w = &t->item[i];
+		wsk_rect_t r = wsk_rect(t, i), v = r;
+		if (!wsk__cut(t, &v)) continue;                    /* scrolled out of view */
+		if (v.y >= d->y1 || v.y + v.h <= d->y0) continue;  /* not in these rows */
+		/* The box is drawn cut (v); everything else from the widget's own
+		   rectangle (r), whole or not at all. */
+#ifndef WSK_NO_NEST
+		if (w->kind == WSK_STACK) { wsk__stack(d, t, i, v, s); continue; }
+#endif
+#ifdef WSK_NO_FIELD
+		if (w->kind == WSK_BUTTON) wsk__rect(s, t, w, v);
+#else
+		if (w->kind == WSK_BUTTON || w->kind == WSK_FIELD) wsk__rect(s, t, w, v);
+#endif
+#ifndef WSK_NO_MARKS
+		if (w->mark == WSK_MARK_CORNERS &&
+		    (t->axis == WSK_COL ? v.h == r.h : v.w == r.w)
+#ifndef WSK_NO_NEST
+		    && wsk__seen(t, r.x, r.y, r.x + r.w, r.y + r.h)
+#endif
+		    )
+			wsk__marks(s, t, w, r);
+#endif
+#ifndef WSK_NO_FIELD
+		if (w->kind == WSK_FIELD) wsk__field(s, t, w, r);
+		else
+#endif
+		wsk__text(s, t, w, r);
+	}
+}
+
 /*
  * One stack's widgets, clipped to the document's rows. No <svg>, no backing.
  *
@@ -1255,29 +1778,7 @@ static inline int wsk_part(const wsk_doc_t *d, const wsk_tree_t *t,
 		wsk__s(s, "\">");
 	}
 
-	for (int i = 0; i < t->n; i++) {
-		const wsk_widget_t *w = &t->item[i];
-		wsk_rect_t r = wsk_rect(t, i), v = r;
-		if (!wsk__cut(t, &v)) continue;                    /* scrolled out of view */
-		if (v.y >= d->y1 || v.y + v.h <= d->y0) continue;  /* not in these rows */
-		/* The box is drawn cut (v); everything else from the widget's own
-		   rectangle (r), whole or not at all. */
-#ifdef WSK_NO_FIELD
-		if (w->kind == WSK_BUTTON) wsk__rect(s, t, w, v);
-#else
-		if (w->kind == WSK_BUTTON || w->kind == WSK_FIELD) wsk__rect(s, t, w, v);
-#endif
-#ifndef WSK_NO_MARKS
-		if (w->mark == WSK_MARK_CORNERS &&
-		    (t->axis == WSK_COL ? v.h == r.h : v.w == r.w))
-			wsk__marks(s, t, w, r);
-#endif
-#ifndef WSK_NO_FIELD
-		if (w->kind == WSK_FIELD) wsk__field(s, t, w, r);
-		else
-#endif
-		wsk__text(s, t, w, r);
-	}
+	wsk__items(d, t, s);
 
 	if (nested) wsk__s(s, "</g>");
 	return WSK_OK;

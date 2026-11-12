@@ -182,6 +182,7 @@ Both share one panel, and **whoever painted last is what you see**.
 | `wtap > /w0` | A whisker button you can actually press. Reports taps, moves, and the worst finger-to-pixels time. |
 | `wslop > /w0` | Five marks, eight taps each: how far a finger lands from where it aimed — bias, scatter and drift, in pixels and millimetres. Also draws a red bar on the top rows and a cyan one on the bottom, so the first frame shows whether the picture sits where the window says. **Measured 2026-10-24: scatter 12–26 px worst, drift zero.** The "picture ~45 rows low" from that day was wslop's own: its marks and bars were laid out 64 rows tall (a whisker button with no size), not the panel. Bias wants measuring again. |
 | `wscroll [rows] > /w0` | A list of ten thousand rows to drag, built a screenful at a time with whisker's `wsk_slice`. Times every frame — the repaint, and finger-to-pixels — and a tap names the row it hit. `wscroll 112` makes the pane 112 rows. **Measured 2026-11-11: 37.5 ms a frame for 112 rows (finger to pixels 42), 229 for the whole screen below the header.** |
+| `wnest > /w0` | A window that is one tree: a toolbar row, a list beside a column of buttons, a status row — whisker stacks nested three deep. A tap prints the id of the deepest widget under it; a button tapped is pressed by repainting only its own rows. |
 
 **`taps` is how you find out whether touch is wired up right.** A driver that
 reports nothing and one that reports mirrored coordinates look identical from
