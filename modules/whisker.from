@@ -18,7 +18,7 @@
 # what happens to be on the machine is worse than no gate.
 
 upstream  = ~/development/whisker/src/whisker.h
-commit    = bf0c333
+commit    = e34723f
 dated     = 2026-11-11
-subject   = §5f: nesting -- a widget may be a stack, the id is prime, and every widget is pathable
+subject   = §5i: the toolkit's first iteration -- press, click, drag, wheel
 refreshed = 2026-11-11

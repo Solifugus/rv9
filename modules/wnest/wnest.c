@@ -1,13 +1,14 @@
 /*
- * wnest -- a window that is one tree, and taps that name the deepest widget.
+ * wnest -- a window that is one tree, driven by the toolkit.
  *
  *     wnest > /w0
  *
- * design.md §5f, on the board: a toolbar row, a body row holding a list
- * beside a column of buttons, and a status row -- five stacks, nested
- * three deep, laid out from one root. A tap prints the id of the deepest
- * widget under it and the tree it is in, and a button tapped is pressed by
- * repainting only its own rows, found by id at whatever depth it lives.
+ * design.md §5f and §5i, on the board: a toolbar row, a body row holding a
+ * list beside a column of buttons, and a status row -- five stacks, nested
+ * three deep, laid out from one root. Every touch goes to wsk_feed, which
+ * presses, clicks and drags; this program only prints what it was told and
+ * repaints the rows it was given. Before §5i it found the widget, pressed it
+ * and repainted it by hand -- the toolkit is that code, written once.
  *
  * It is also the program tools/evidence/stack measures for nesting: layout,
  * check, hit and render all recurse now, and a recursion's depth is not in
@@ -36,12 +37,18 @@ static const wsk_widget_t BODY[] = {
 	{ .kind = WSK_STACK, .id = "side",  .sub = 3, .weight = 1 },
 };
 static const wsk_widget_t LIST[] = {
-	{ .kind = WSK_BUTTON, .id = "i0", .text = "Item 0", .size = 56 },
-	{ .kind = WSK_BUTTON, .id = "i1", .text = "Item 1", .size = 56 },
-	{ .kind = WSK_BUTTON, .id = "i2", .text = "Item 2", .size = 56 },
-	{ .kind = WSK_BUTTON, .id = "i3", .text = "Item 3", .size = 56 },
-	{ .kind = WSK_BUTTON, .id = "i4", .text = "Item 4", .size = 56 },
-	{ .kind = WSK_BUTTON, .id = "i5", .text = "Item 5", .size = 56 },
+	{ .kind = WSK_BUTTON, .id = "i0",  .text = "Item 0",  .size = 56 },
+	{ .kind = WSK_BUTTON, .id = "i1",  .text = "Item 1",  .size = 56 },
+	{ .kind = WSK_BUTTON, .id = "i2",  .text = "Item 2",  .size = 56 },
+	{ .kind = WSK_BUTTON, .id = "i3",  .text = "Item 3",  .size = 56 },
+	{ .kind = WSK_BUTTON, .id = "i4",  .text = "Item 4",  .size = 56 },
+	{ .kind = WSK_BUTTON, .id = "i5",  .text = "Item 5",  .size = 56 },
+	{ .kind = WSK_BUTTON, .id = "i6",  .text = "Item 6",  .size = 56 },
+	{ .kind = WSK_BUTTON, .id = "i7",  .text = "Item 7",  .size = 56 },
+	{ .kind = WSK_BUTTON, .id = "i8",  .text = "Item 8",  .size = 56 },
+	{ .kind = WSK_BUTTON, .id = "i9",  .text = "Item 9",  .size = 56 },
+	{ .kind = WSK_BUTTON, .id = "i10", .text = "Item 10", .size = 56 },
+	{ .kind = WSK_BUTTON, .id = "i11", .text = "Item 11", .size = 56 },
 };
 static const wsk_widget_t SIDE[] = {
 	{ .kind = WSK_BUTTON, .id = "yes", .text = "Yes", .size = 96 },
@@ -51,8 +58,6 @@ static const wsk_widget_t ST[] = {
 	{ .kind = WSK_LABEL, .id = "msg", .text = "tap anything", .weight = 1 },
 };
 
-#define PRESSED 0xd08030u
-
 typedef struct { const rv9_mod_env_t *env; int path; } out_t;
 
 static void to_path(wsk_sink_t *s, const char *b, int n)
@@ -61,33 +66,16 @@ static void to_path(wsk_sink_t *s, const char *b, int n)
 	o->env->write(o->path, b, (unsigned int)n);
 }
 
-/* Repaint the rows of one widget, found by id at any depth. */
-static int repaint(const rv9_mod_env_t *env, const wsk_tree_t *w,
-                   const char *id, wsk_sink_t *s)
-{
-	const char *ids[1];
-	int y0 = 0, y1 = 0;
-	uint32_t v;
-
-	ids[0] = id;
-	if (wsk_rows(w, ids, 1, &y0, &y1) != WSK_OK) return 0;
-	v = ((uint32_t)y0 << 16) | ((uint32_t)y1 & 0xFFFFu);
-	env->setstat(RV9_STDOUT, RV9_SVG_SS_ROWS, &v);
-	return wsk_render_clipped(w, ids, 1, s, 4096);
-}
-
 __attribute__((section(".text.entry")))
 int rv9_module_entry(const rv9_mod_env_t *env)
 {
-	wsk_widget_t tb[3], list[6], side[2];
 	wsk_tree_t w, k[5];
+	wsk_ui_t ui;
 	wsk_sink_t s;
 	out_t out;
 	const wsk_tree_t *in = 0;
 	uint32_t size = 0;
-	int tp, which = -1, e, held = -1;
-	wsk_widget_t *held_in = 0;
-	unsigned int held_fill = 0;
+	int tp, which = -1, e;
 
 	if (env == NULL || env->abi_version < 13) return 1;
 	{
@@ -99,23 +87,20 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 	}
 	if (env->getstat(RV9_STDOUT, RV9_GS_SIZE, &size) < 0) return 2;
 
-	wsk_clone(tb, TB, 3);
-	wsk_clone(list, LIST, 6);
-	wsk_clone(side, SIDE, 2);
-
+	/* Static panels throughout: the toolkit never writes a widget (§5i). */
 	wsk_init(&w, WSK_COL, (int)(size & 0xFFFFu), (int)(size >> 16));
 	w.pad = 0; w.gap = 0; w.font = 24; w.bg = 0x10203au; w.ids = 1;
 	w.item = WIN; w.n = 3;
 	w.nest = k; w.nests = 5;
 	wsk_nest_init(&k[0], &w, WSK_ROW);
-	k[0].pad = 6; k[0].gap = 6; k[0].item = tb; k[0].n = 3;
+	k[0].pad = 6; k[0].gap = 6; k[0].item = TB; k[0].n = 3;
 	wsk_nest_init(&k[1], &w, WSK_ROW);
 	k[1].pad = 6; k[1].gap = 12; k[1].item = BODY; k[1].n = 2;
 	wsk_nest_init(&k[2], &w, WSK_COL);
-	k[2].pad = 0; k[2].gap = 4; k[2].item = list; k[2].n = 6;
+	k[2].pad = 0; k[2].gap = 4; k[2].item = LIST; k[2].n = 12;
 	k[2].overflow = WSK_SCROLL;
 	wsk_nest_init(&k[3], &w, WSK_COL);
-	k[3].pad = 0; k[3].gap = 12; k[3].item = side; k[3].n = 2;
+	k[3].pad = 0; k[3].gap = 12; k[3].item = SIDE; k[3].n = 2;
 	wsk_nest_init(&k[4], &w, WSK_ROW);
 	k[4].pad = 4; k[4].font = 20; k[4].ink = 0x90a8c0u; k[4].item = ST; k[4].n = 1;
 
@@ -136,9 +121,10 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 
 	tp = env->open("/touch", RV9_MODE_READ);
 	if (tp < 0) return 0;                  /* drawn; nothing to tap with */
+	wsk_ui_init(&ui, &w);
 
 	for (;;) {
-		rv9_touch_event_t ev[4];
+		rv9_touch_event_t te[4];
 		int n, count;
 		uint32_t waiting = 0;
 
@@ -147,37 +133,37 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 			env->sleep_ms(8);
 			continue;
 		}
-		n = env->read(tp, ev, sizeof ev);
+		n = env->read(tp, te, sizeof te);
 		if (n < 0) break;
 		count = n / (int)sizeof(rv9_touch_event_t);
 		for (int i = 0; i < count; i++) {
-			int x = (int)ev[i].x, y = (int)ev[i].y, hit;
-			if (ev[i].kind == RV9_TOUCH_DOWN) {
-				hit = wsk_hit_in(&w, x, y, &in);
-				m_say(env, RV9_STDERR, "  tap ");
-				m_num(env, RV9_STDERR, x);
-				m_say(env, RV9_STDERR, ",");
-				m_num(env, RV9_STDERR, y);
-				if (hit < 0) { m_say(env, RV9_STDERR, " -> nothing\n"); continue; }
-				m_say(env, RV9_STDERR, " -> ");
-				m_say(env, RV9_STDERR, in->item[hit].id);
-				m_say(env, RV9_STDERR, (in->item[hit].kind == WSK_STACK) ? " (a stack)\n" : "\n");
-				/* Press it, if it is a button in one of our mutable copies. */
-				if (in->item[hit].kind == WSK_BUTTON &&
-				    (in == &k[0] || in == &k[2] || in == &k[3])) {
-					held_in = (wsk_widget_t *)&in->item[hit];
-					held = hit;
-					held_fill = held_in->fill;
-					held_in->fill = PRESSED;
-					repaint(env, &w, held_in->id, &s);
+			wsk_event_t ev;
+			wsk_note_t note[2];
+			int y0 = 0, y1 = 0, got;
+
+			ev.kind = (te[i].kind == RV9_TOUCH_DOWN) ? WSK_EV_DOWN
+			        : (te[i].kind == RV9_TOUCH_UP)   ? WSK_EV_UP : WSK_EV_MOVE;
+			ev.x = (short)te[i].x;
+			ev.y = (short)te[i].y;
+			ev.d = 0; ev.key = 0; ev.text[0] = '\0'; ev.ms = te[i].at_ms;
+			got = wsk_feed(&ui, &ev, note, 2, &y0, &y1);
+			for (int j = 0; j < got && j < 2; j++) {
+				if (note[j].kind == WSK_NOTE_CLICK) {
+					m_say(env, RV9_STDERR, "  click ");
+					m_say(env, RV9_STDERR, note[j].in->item[note[j].item].id);
+					m_say(env, RV9_STDERR, "\n");
 				}
-			} else if (ev[i].kind == RV9_TOUCH_UP && held >= 0) {
-				held_in->fill = held_fill;
-				repaint(env, &w, held_in->id, &s);
-				held = -1;
+			}
+			if (y1 > y0) {
+				uint32_t v = ((uint32_t)y0 << 16) | ((uint32_t)y1 & 0xFFFFu);
+				env->setstat(RV9_STDOUT, RV9_SVG_SS_ROWS, &v);
+				wsk_render_rows(&w, y0, y1, &s, 4096);
 			}
 		}
 	}
 	env->close(tp);
+	m_say(env, RV9_STDERR, "  the list ended scrolled to ");
+	m_num(env, RV9_STDERR, k[2].scroll);
+	m_say(env, RV9_STDERR, "\n");
 	return 0;
 }
