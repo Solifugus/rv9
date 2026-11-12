@@ -242,6 +242,17 @@ typedef struct {
 	short         sub;
 } wsk_widget_t;
 
+/*
+ * Editable text (design.md §5j): a field's text, when it may change, lives
+ * in a buffer the CALLER owns -- not in the widget, which may be in flash
+ * and which the toolkit never writes. `b` holds `cap` bytes including the
+ * NUL, so a field takes cap - 1 characters; `caret` is where the next goes.
+ */
+typedef struct {
+	char  *b;
+	short  cap, len, caret;
+} wsk_buf_t;
+
 typedef struct wsk_tree {
 	const wsk_widget_t *item;
 	int           n;
@@ -344,6 +355,17 @@ typedef struct wsk_tree {
 	 * and the toolkit writes nothing it cannot be sure is RAM.
 	 */
 	const void   *held;
+
+	/*
+	 * Fields that edit (§5j): the buffers a WSK_FIELD's `sub` indexes, on
+	 * the root and carried into copies. A field uses one when the root has
+	 * buffers and its `sub` is in range; otherwise it is §5d's read-only
+	 * field of inline text. `focus` is the widget typing goes to, set by the
+	 * toolkit, drawn with its caret.
+	 */
+	wsk_buf_t    *buf;
+	short         bufs;
+	const void   *focus;
 
 	/* Set by whisker in those copies, never by a caller: the intersection of
 	   every scrolling viewport above this stack, which cuts it (§5f rule 3). */
@@ -676,6 +698,23 @@ static inline int wsk__check1(const wsk_tree_t *t, int *which)
 			if (which != 0) *which = i;
 			return WSK_E_KIND;
 		}
+#else
+		/* A field's buffer says what it holds, and holds what the window
+		   can draw (§5j): the toolkit keeps both true, and a caller who
+		   filled one by hand is checked the same way. */
+		if (t->item[i].kind == WSK_FIELD && t->buf != 0 &&
+		    t->item[i].sub >= 0 && t->item[i].sub < t->bufs) {
+			const wsk_buf_t *b = &t->buf[t->item[i].sub];
+			if (b->b == 0 || b->cap < 1 || b->len < 0 || b->len >= b->cap ||
+			    b->caret < 0 || b->caret > b->len || b->b[b->len] != '\0') {
+				if (which != 0) *which = i;
+				return WSK_E_KIND;
+			}
+			if (!wsk_text_ok(b->b)) {
+				if (which != 0) *which = i;
+				return WSK_E_TEXT;
+			}
+		}
 #endif
 #ifdef WSK_NO_MARKS
 		if (t->item[i].mark == WSK_MARK_CORNERS) {
@@ -861,6 +900,9 @@ static inline void wsk_init(wsk_tree_t *t, int axis, int dev_w, int dev_h)
 	t->str = 0;
 	t->strs = 0;
 	t->held = 0;
+	t->buf = 0;
+	t->bufs = 0;
+	t->focus = 0;
 	t->clipped = 0;
 	t->cx0 = t->cy0 = t->cx1 = t->cy1 = 0;
 }
@@ -1295,6 +1337,9 @@ static inline int wsk__child(const wsk_tree_t *t, int i, wsk_tree_t *c)
 	c->str = t->str;
 	c->strs = t->strs;
 	c->held = t->held;
+	c->buf = t->buf;
+	c->bufs = t->bufs;
+	c->focus = t->focus;
 	r = wsk_rect(t, i);
 	c->ax = r.x; c->ay = r.y; c->aw = r.w; c->ah = r.h;
 
@@ -1967,15 +2012,42 @@ static inline void wsk__text(wsk_sink_t *s, const wsk_tree_t *t,
  * the only ones anybody is looking at. So the window slides, and `from` is
  * where it starts.
  */
+/*
+ * The buffer a field edits, or 0 for §5d's read-only field (§5j).
+ */
+static inline wsk_buf_t *wsk__fbuf(const wsk_tree_t *t, const wsk_widget_t *w)
+{
+	if (w->kind != WSK_FIELD || t->buf == 0 || w->sub < 0 || w->sub >= t->bufs)
+		return 0;
+	return &t->buf[w->sub];
+}
+
+/*
+ * Which characters show, given where the caret is: all of them when they
+ * fit; otherwise a window ending at the caret, so the caret is always in
+ * sight -- at the right edge when the text is longer than the field. With
+ * the caret at the end that is the tail, which is all §5d's field ever was,
+ * so the read-only field draws byte for byte as it did.
+ */
+static inline int wsk__view(const wsk_tree_t *t, wsk_rect_t r, int len, int caret,
+                            int *from)
+{
+	int room = (r.w - 2 * WSK_FIELD_PAD - WSK_CARET_W) / wsk_advance(t->font);
+	int f;
+
+	if (room < 0) room = 0;
+	f = caret - room;
+	if (f > len - room) f = len - room;
+	if (f < 0) f = 0;
+	*from = f;
+	return (len - f < room) ? len - f : room;
+}
+
 static inline int wsk_field_view(const wsk_tree_t *t, const wsk_widget_t *w,
                                  wsk_rect_t r, int *from)
 {
 	int chars = wsk__len(w->text);
-	int room = (r.w - 2 * WSK_FIELD_PAD - WSK_CARET_W) / wsk_advance(t->font);
-
-	if (room < 0) room = 0;
-	*from = (chars > room) ? chars - room : 0;
-	return chars - *from;
+	return wsk__view(t, r, chars, chars, from);
 }
 
 /*
@@ -1990,8 +2062,13 @@ static inline int wsk_field_view(const wsk_tree_t *t, const wsk_widget_t *w,
 static inline void wsk__field(wsk_sink_t *s, const wsk_tree_t *t,
                               const wsk_widget_t *w, wsk_rect_t r)
 {
-	int from, n = wsk_field_view(t, w, r, &from);
+	const wsk_buf_t *b = wsk__fbuf(t, w);
+	const char *txt = (b != 0) ? b->b : w->text;
+	int len = (b != 0) ? b->len : wsk__len(w->text);
+	int caret = (b != 0) ? b->caret : len;
+	int from, n = wsk__view(t, r, len, caret, &from);
 	int x = r.x + WSK_FIELD_PAD;
+	int show = (w->mark == WSK_MARK_CARET);
 	int top = r.y + (r.h - t->font) / 2;
 	unsigned int ink = (w->ink != WSK_INHERIT) ? w->ink : t->ink;
 
@@ -2012,13 +2089,16 @@ static inline void wsk__field(wsk_sink_t *s, const wsk_tree_t *t,
 			wsk__col(s, w->ink);
 		}
 		wsk__s(s, "\">");
-		wsk__w(s, w->text + from, n);
+		wsk__w(s, txt + from, n);
 		wsk__s(s, "</text>");
 	}
 
-	if (w->mark == WSK_MARK_CARET) {
+#ifndef WSK_NO_INPUT
+	if ((const void *)w == t->focus) show = 1;
+#endif
+	if (show) {
 		wsk_rect_t c;
-		c.x = (short)(x + n * wsk_advance(t->font));
+		c.x = (short)(x + (caret - from) * wsk_advance(t->font));
 		c.y = (short)(top + t->font / 8);
 		c.w = WSK_CARET_W;
 		c.h = (short)(t->font - t->font / 4);
@@ -2488,7 +2568,14 @@ typedef struct {
 
 /* What changed. A notice names its widget as wsk_hit_in does -- the
    caller's own tree and an index in it -- because stacks nest (§5f). */
-enum { WSK_NOTE_CLICK = 1, WSK_NOTE_SCROLL };
+enum { WSK_NOTE_CLICK = 1, WSK_NOTE_SCROLL, WSK_NOTE_TEXT, WSK_NOTE_ENTER,
+       WSK_NOTE_FOCUS };
+
+/* The keys that mean something to a field (§5j). A character typed is TEXT,
+   not a key, so that a keyboard layout stays the host's business. */
+enum { WSK_KEY_LEFT = 1, WSK_KEY_RIGHT, WSK_KEY_HOME, WSK_KEY_END,
+       WSK_KEY_BACKSPACE, WSK_KEY_DELETE, WSK_KEY_ENTER, WSK_KEY_TAB,
+       WSK_KEY_BACKTAB };
 
 typedef struct {
 	unsigned char     kind;
@@ -2516,6 +2603,11 @@ typedef struct {
 	wsk_tree_t       *drag;      /* the scrolling stack under the down */
 	wsk_tree_t        drag_at;   /* ... as laid out: its area and range */
 	short             scroll0;
+
+	const wsk_tree_t *focus_in;  /* the focused field: its tree and index, */
+	short             focus_item;
+	wsk_rect_t        focus_r;   /* its rows to repaint, */
+	wsk_buf_t        *focus_b;   /* and the buffer it edits */
 } wsk_ui_t;
 
 static inline void wsk_ui_init(wsk_ui_t *ui, wsk_tree_t *root)
@@ -2527,26 +2619,32 @@ static inline void wsk_ui_init(wsk_ui_t *ui, wsk_tree_t *root)
 	ui->drag = 0;
 	ui->hit = -1;
 	ui->word = -1;
+	ui->focus_in = 0;
+	ui->focus_item = -1;
+	ui->focus_b = 0;
 	root->held = 0;
+	root->focus = 0;
 }
 
 /* The deepest widget at a point, its tree, its rectangle as cut, and its
    word if it is a paragraph's. */
 static inline int wsk__ui_hit(wsk_tree_t *r, int x, int y, const wsk_tree_t **in,
-                              wsk_rect_t *rect, int *word)
+                              wsk_rect_t *rect, int *word, wsk_tree_t *at,
+                              const wsk_tree_t **laid)
 {
 	int k;
 	const wsk_tree_t *lay;
 #ifndef WSK_NO_NEST
-	wsk_tree_t at;
-	k = wsk__hit_at(r, r, x, y, in, &at, 0);
-	lay = &at;
+	k = wsk__hit_at(r, r, x, y, in, at, 0);
+	lay = at;
 #else
+	(void)at;
 	k = wsk_hit(r, x, y);
 	*in = r;
 	lay = r;
 #endif
 	*word = -1;
+	*laid = lay;
 	if (k < 0) return k;
 	*rect = wsk_rect(lay, k);
 	(void)wsk__cut(lay, rect);
@@ -2608,6 +2706,14 @@ static inline int wsk__scroll_to(wsk_tree_t *orig, wsk_tree_t *at, int to)
 }
 #endif
 
+/* A rectangle into one the toolkit keeps. Field by field, because the
+   assignment became a call to memcpy in two places, which a module cannot
+   link -- the module build caught both (§5j). */
+static inline void wsk__rput(wsk_rect_t *d, wsk_rect_t s)
+{
+	d->x = s.x; d->y = s.y; d->w = s.w; d->h = s.h;
+}
+
 static inline void wsk__span(int *lo, int *hi, int a, int b)
 {
 	if (b <= a) return;
@@ -2626,6 +2732,114 @@ static inline int wsk__note(wsk_note_t *note, int max, int n, int kind,
 	}
 	return n + 1;
 }
+
+
+#ifndef WSK_NO_FIELD
+/*
+ * The editable fields, in declaration order, depth first -- the order D0
+ * kept stable for exactly this (§5j rule 4). Returns how many there are. The
+ * one that is `want` (a widget's address), or failing that the `nth`, has
+ * its tree, index, rectangle as cut and buffer written out; *pos gets the
+ * ordinal of `want`, or stays -1.
+ */
+static inline int wsk__fields(const wsk_tree_t *t, const wsk_tree_t *orig,
+                              int count, const void *want, int nth, int *pos,
+                              const wsk_tree_t **in, short *item, wsk_rect_t *rect,
+                              wsk_buf_t **buf, int depth)
+{
+	for (int i = 0; i < t->n; i++) {
+		const wsk_widget_t *w = &t->item[i];
+		wsk_buf_t *b = wsk__fbuf(t, w);
+		if (b != 0) {
+			if ((const void *)w == want || (want == 0 && count == nth)) {
+				wsk_rect_t r = wsk_rect(t, i);
+				if (!wsk__cut(t, &r)) r.h = 0;        /* out of view */
+				if (pos != 0) *pos = count;
+				*in = orig; *item = (short)i; *buf = b;
+				wsk__rput(rect, r);
+			}
+			count++;
+		}
+#ifndef WSK_NO_NEST
+		if (w->kind == WSK_STACK && depth + 1 < WSK_DEPTH_MAX) {
+			wsk_tree_t c;
+			if (wsk__child(t, i, &c))
+				count = wsk__fields(&c, &t->nest[w->sub], count, want, nth, pos,
+				                    in, item, rect, buf, depth + 1);
+		}
+#endif
+	}
+	(void)depth;
+	return count;
+}
+
+/* Focus moves: the old field's rows and the new one's both repaint. */
+static inline void wsk__refocus(wsk_ui_t *ui, const wsk_tree_t *in, int item,
+                                wsk_rect_t r, wsk_buf_t *b, int *lo, int *hi)
+{
+	if (ui->focus_b != 0) wsk__span(lo, hi, ui->focus_r.y, ui->focus_r.y + ui->focus_r.h);
+	ui->focus_in = in;
+	ui->focus_item = (short)item;
+	wsk__rput(&ui->focus_r, r);
+	ui->focus_b = b;
+	ui->root->focus = (b != 0) ? (const void *)&in->item[item] : 0;
+	if (b != 0) wsk__span(lo, hi, r.y, r.y + r.h);
+}
+
+/* Where the focused field is NOW -- a drag may have moved it since. */
+static inline void wsk__focus_now(wsk_ui_t *ui)
+{
+	if (ui->focus_b == 0) return;
+	(void)wsk__fields(ui->root, ui->root, 0, ui->root->focus, -1, 0, &ui->focus_in,
+	                  &ui->focus_item, &ui->focus_r, &ui->focus_b, 0);
+}
+
+/* Characters moved within a buffer. A loop the compiler is told to keep:
+   it would otherwise become memmove, which a module cannot link. */
+static inline void wsk__shift(char *b, int from, int to, int n)
+{
+	if (to > from)
+		for (int j = n - 1; j >= 0; j--) {
+			b[to + j] = b[from + j];
+#if defined(__GNUC__)
+			__asm__ volatile ("" ::: "memory");
+#endif
+		}
+	else
+		for (int j = 0; j < n; j++) {
+			b[to + j] = b[from + j];
+#if defined(__GNUC__)
+			__asm__ volatile ("" ::: "memory");
+#endif
+		}
+}
+
+#ifndef WSK_NO_NEST
+/*
+ * Give a field focus by id or path, as a program does when its window
+ * opens. Sets y0..y1 to the rows to repaint. WSK_E_NOTFOUND if it is not an
+ * editable field.
+ */
+static inline int wsk_ui_focus(wsk_ui_t *ui, const char *key, int *y0, int *y1)
+{
+	wsk_tree_t at;
+	const wsk_tree_t *in = 0;
+	int lo = 32767, hi = -1, i = wsk__lookup(ui->root, key, &at, &in);
+	wsk_buf_t *b;
+	wsk_rect_t r;
+
+	if (i < 0 || (b = wsk__fbuf(&at, &at.item[i])) == 0) return WSK_E_NOTFOUND;
+	r = wsk_rect(&at, i);
+	if (!wsk__cut(&at, &r)) r.h = 0;
+	wsk__focus_now(ui);
+	wsk__refocus(ui, in, i, r, b, &lo, &hi);
+	*y0 = (lo / WSK_BAND) * WSK_BAND;
+	*y1 = wsk__round_band(hi);
+	if (*y1 > ui->root->h) *y1 = ui->root->h;
+	return WSK_OK;
+}
+#endif
+#endif /* WSK_NO_FIELD */
 
 /*
  * One event in; the notices of what changed out, and the rows to repaint
@@ -2650,9 +2864,10 @@ static inline int wsk_feed(wsk_ui_t *ui, const wsk_event_t *ev,
 	int n = 0, lo = 32767, hi = -1, x = ev->x, y = ev->y;
 
 	if (ev->kind == WSK_EV_DOWN) {
-		const wsk_tree_t *in = 0;
+		const wsk_tree_t *in = 0, *lay = r;
+		wsk_tree_t at;
 		wsk_rect_t rect;
-		int word = -1, k = wsk__ui_hit(r, x, y, &in, &rect, &word);
+		int word = -1, k = wsk__ui_hit(r, x, y, &in, &rect, &word, &at, &lay);
 		ui->down = 1;
 		ui->dragging = 0;
 		ui->x0 = (short)x;
@@ -2662,9 +2877,28 @@ static inline int wsk_feed(wsk_ui_t *ui, const wsk_event_t *ev,
 		ui->word = (short)word;
 		if (k >= 0 && in->item[k].kind == WSK_BUTTON) {
 			r->held = &in->item[k];
-			ui->held = rect;
+			wsk__rput(&ui->held, rect);
 			wsk__span(&lo, &hi, rect.y, rect.y + rect.h);
 		}
+#ifndef WSK_NO_FIELD
+		/* A tap on a field focuses it, the caret at the character tapped;
+		   a tap on anything else leaves focus alone, so that a key of an
+		   on-screen keyboard does not take it from the field (§5j rule 2). */
+		if (k >= 0 && wsk__fbuf(lay, &lay->item[k]) != 0) {
+			wsk_buf_t *b = wsk__fbuf(lay, &lay->item[k]);
+			wsk_rect_t whole = wsk_rect(lay, k);
+			int adv = wsk_advance(lay->font), from, c;
+			int changed = ((const void *)&in->item[k] != r->focus);
+			(void)wsk__view(lay, whole, b->len, b->caret, &from);
+			c = from + (x - (whole.x + WSK_FIELD_PAD) + adv / 2) / adv;
+			if (c < 0) c = 0;
+			if (c > b->len) c = b->len;
+			b->caret = (short)c;
+			wsk__focus_now(ui);
+			wsk__refocus(ui, in, k, rect, b, &lo, &hi);
+			if (changed) n = wsk__note(note, max, n, WSK_NOTE_FOCUS, in, k, 0);
+		}
+#endif
 #ifndef WSK_NO_SCROLL
 		ui->drag = wsk__scroller(r, r, x, y, &ui->drag_at, 0);
 #ifdef WSK_NO_NEST
@@ -2698,15 +2932,71 @@ static inline int wsk_feed(wsk_ui_t *ui, const wsk_event_t *ev,
 			wsk__span(&lo, &hi, ui->held.y, ui->held.y + ui->held.h);
 		}
 		if (!ui->dragging && ui->hit >= 0) {
-			const wsk_tree_t *in = 0;
+			const wsk_tree_t *in = 0, *lay = r;
+			wsk_tree_t at;
 			wsk_rect_t rect;
-			int word = -1, k = wsk__ui_hit(r, x, y, &in, &rect, &word);
+			int word = -1, k = wsk__ui_hit(r, x, y, &in, &rect, &word, &at, &lay);
 			if (k == ui->hit && in == ui->hit_in)
 				n = wsk__note(note, max, n, WSK_NOTE_CLICK, in, k, ui->word);
 		}
 		ui->dragging = 0;
 		ui->drag = 0;
 	}
+#ifndef WSK_NO_FIELD
+	else if ((ev->kind == WSK_EV_TEXT || ev->kind == WSK_EV_KEY) && ui->focus_b != 0) {
+		wsk_buf_t *b;
+		int edit = 0, moved = 0;
+		wsk__focus_now(ui);
+		b = ui->focus_b;
+		if (ev->kind == WSK_EV_TEXT) {
+			/* All of it or none of it: characters the window can draw, and
+			   room for every one (§5j rule 3). */
+			int m = 0, ok = 1;
+			while (m < (int)sizeof ev->text && ev->text[m] != '\0') {
+				char c = ev->text[m];
+				if (c < 32 || c > 126 || c == '<' || c == '&' || c == '>') ok = 0;
+				m++;
+			}
+			if (ok && m > 0 && b->len + m < b->cap) {
+				wsk__shift(b->b, b->caret, b->caret + m, b->len - b->caret + 1);
+				for (int j = 0; j < m; j++) b->b[b->caret + j] = ev->text[j];
+				b->len = (short)(b->len + m);
+				b->caret = (short)(b->caret + m);
+				edit = 1;
+			}
+		} else if (ev->key == WSK_KEY_LEFT && b->caret > 0) {
+			b->caret--; moved = 1;
+		} else if (ev->key == WSK_KEY_RIGHT && b->caret < b->len) {
+			b->caret++; moved = 1;
+		} else if (ev->key == WSK_KEY_HOME && b->caret != 0) {
+			b->caret = 0; moved = 1;
+		} else if (ev->key == WSK_KEY_END && b->caret != b->len) {
+			b->caret = b->len; moved = 1;
+		} else if (ev->key == WSK_KEY_BACKSPACE && b->caret > 0) {
+			wsk__shift(b->b, b->caret, b->caret - 1, b->len - b->caret + 1);
+			b->caret--; b->len--; edit = 1;
+		} else if (ev->key == WSK_KEY_DELETE && b->caret < b->len) {
+			wsk__shift(b->b, b->caret + 1, b->caret, b->len - b->caret);
+			b->len--; edit = 1;
+		} else if (ev->key == WSK_KEY_ENTER) {
+			n = wsk__note(note, max, n, WSK_NOTE_ENTER, ui->focus_in, ui->focus_item, b->len);
+		} else if (ev->key == WSK_KEY_TAB || ev->key == WSK_KEY_BACKTAB) {
+			const wsk_tree_t *in = 0;
+			short item = -1;
+			wsk_rect_t fr = { 0, 0, 0, 0 };
+			wsk_buf_t *nb = 0;
+			int pos = -1, all = wsk__fields(r, r, 0, r->focus, -1, &pos, &in, &item, &fr, &nb, 0);
+			if (all > 1) {
+				int to = (ev->key == WSK_KEY_TAB) ? (pos + 1) % all : (pos + all - 1) % all;
+				(void)wsk__fields(r, r, 0, 0, to, 0, &in, &item, &fr, &nb, 0);
+				wsk__refocus(ui, in, item, fr, nb, &lo, &hi);
+				n = wsk__note(note, max, n, WSK_NOTE_FOCUS, in, item, 0);
+			}
+		}
+		if (edit) n = wsk__note(note, max, n, WSK_NOTE_TEXT, ui->focus_in, ui->focus_item, b->len);
+		if (edit || moved) wsk__span(&lo, &hi, ui->focus_r.y, ui->focus_r.y + ui->focus_r.h);
+	}
+#endif
 #ifndef WSK_NO_SCROLL
 	else if (ev->kind == WSK_EV_WHEEL) {
 		wsk_tree_t at;

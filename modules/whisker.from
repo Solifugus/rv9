@@ -18,7 +18,7 @@
 # what happens to be on the machine is worse than no gate.
 
 upstream  = ~/development/whisker/src/whisker.h
-commit    = e34723f
+commit    = 1bf6341
 dated     = 2026-11-11
-subject   = §5i: the toolkit's first iteration -- press, click, drag, wheel
+subject   = §5j: fields that edit, and focus -- and wkeys, the P4's keyboard
 refreshed = 2026-11-11
