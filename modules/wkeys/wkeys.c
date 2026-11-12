@@ -19,6 +19,11 @@
  * panels and are never written; the field's text is in a buffer this program
  * owns (§5j), and that is the only text anything changes.
  *
+ * SHIFT, as a phone's: tap it and the letters are capitals for the next
+ * letter only, then lower case again; its label says which (Shift / SHIFT).
+ * Added 2026-11-11 after the first person to type on it asked where the
+ * capitals were.
+ *
  * TWO LAYERS, as a phone's keyboard has, and for the reason a phone has
  * them: all forty-three keys on one screen came to 4,298 bytes of document
  * against /w0's 4,096 (SRC_MAX). Letters, and a 123 key that swaps three rows
@@ -54,8 +59,15 @@ static const wsk_widget_t L1[] = { K("q"), K("w"), K("e"), K("r"), K("t"),
                                    K("y"), K("u"), K("i"), K("o"), K("p") };
 static const wsk_widget_t L2[] = { K("a"), K("s"), K("d"), K("f"), K("g"),
                                    K("h"), K("j"), K("k"), K("l") };
-static const wsk_widget_t L3[] = { K("z"), K("x"), K("c"), K("v"), K("b"),
-                                   K("n"), K("m"), K(","), K(".") };
+static const wsk_widget_t L3[] = { K("Shift"), K("z"), K("x"), K("c"), K("v"),
+                                   K("b"), K("n"), K("m"), K(","), K(".") };
+/* capitals, for one letter after Shift */
+static const wsk_widget_t U1[] = { K("Q"), K("W"), K("E"), K("R"), K("T"),
+                                   K("Y"), K("U"), K("I"), K("O"), K("P") };
+static const wsk_widget_t U2[] = { K("A"), K("S"), K("D"), K("F"), K("G"),
+                                   K("H"), K("J"), K("K"), K("L") };
+static const wsk_widget_t U3[] = { K("SHIFT"), K("Z"), K("X"), K("C"), K("V"),
+                                   K("B"), K("N"), K("M"), K(","), K(".") };
 /* digits and symbols -- none the window cannot draw (§2.4: no < & >) */
 static const wsk_widget_t N1[] = { K("1"), K("2"), K("3"), K("4"), K("5"),
                                    K("6"), K("7"), K("8"), K("9"), K("0") };
@@ -73,13 +85,16 @@ static const wsk_widget_t N3[] = { K("!"), K("'"), K("#"), K("%"), K("*"),
 static const wsk_widget_t B_LETTERS[] = BOTTOM("123");
 static const wsk_widget_t B_SYMBOLS[] = BOTTOM("abc");
 
-/* Point the rows at one layer or the other. */
-static void layer(wsk_tree_t *k, int symbols)
+enum { LOWER, UPPER, SYMBOLS };
+
+/* Point the rows at a layer. */
+static void layer(wsk_tree_t *k, int which)
 {
-	k[2].item = symbols ? N1 : L1; k[2].n = symbols ? 10 : 10;
-	k[3].item = symbols ? N2 : L2; k[3].n = 9;
-	k[4].item = symbols ? N3 : L3; k[4].n = 9;
-	k[5].item = symbols ? B_SYMBOLS : B_LETTERS; k[5].n = 6;
+	k[2].item = (which == SYMBOLS) ? N1 : (which == UPPER) ? U1 : L1; k[2].n = 10;
+	k[3].item = (which == SYMBOLS) ? N2 : (which == UPPER) ? U2 : L2; k[3].n = 9;
+	k[4].item = (which == SYMBOLS) ? N3 : (which == UPPER) ? U3 : L3;
+	k[4].n = (which == SYMBOLS) ? 9 : 10;
+	k[5].item = (which == SYMBOLS) ? B_SYMBOLS : B_LETTERS; k[5].n = 6;
 }
 
 typedef struct { const rv9_mod_env_t *env; int path; } out_t;
@@ -113,7 +128,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 	char text[64];
 	wsk_buf_t buf[1];
 	wsk_tree_t w, k[6];
-	int symbols = 0;
+	int mode = LOWER;
 	wsk_ui_t ui;
 	wsk_sink_t s;
 	out_t out;
@@ -149,7 +164,8 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 		wsk_nest_init(&k[i], &w, WSK_ROW);
 		k[i].pad = 0; k[i].gap = 6;
 	}
-	layer(k, 0);
+	layer(k, LOWER);
+	k[4].font = 28;
 	k[5].font = 22;
 
 	e = wsk_check_in(&w, &which, &in);
@@ -224,10 +240,12 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 				if (note[j].kind != WSK_NOTE_CLICK) continue;
 				key = &note[j].in->item[note[j].item];
 				if (key->kind != WSK_BUTTON) continue;
-				if (same(key->text, "123") || same(key->text, "abc")) {
+				if (same(key->text, "123") || same(key->text, "abc") ||
+				    same(key->text, "Shift") || same(key->text, "SHIFT")) {
 					const char *ids[1] = { "keys" };
-					symbols = !symbols;
-					layer(k, symbols);
+					mode = same(key->text, "123") ? SYMBOLS
+					     : same(key->text, "Shift") ? UPPER : LOWER;
+					layer(k, mode);
 					if (wsk_rows(&w, ids, 1, &y0, &y1) == WSK_OK)
 						repaint(env, &w, &s, y0, y1);
 					continue;
@@ -263,6 +281,14 @@ int rv9_module_entry(const rv9_mod_env_t *env)
 
 				kg = wsk_feed(&ui, &kv, kn, 2, &y0, &y1);
 				repaint(env, &w, &s, y0, y1);
+				/* Shift is for one letter: after it, lower case again. */
+				if (mode == UPPER && kv.kind == WSK_EV_TEXT) {
+					const char *ids[1] = { "keys" };
+					mode = LOWER;
+					layer(k, mode);
+					if (wsk_rows(&w, ids, 1, &y0, &y1) == WSK_OK)
+						repaint(env, &w, &s, y0, y1);
+				}
 				if (kg > 0 && kn[0].kind == WSK_NOTE_ENTER) {
 					m_say(env, RV9_STDERR, "  entered: ");
 					m_say(env, RV9_STDERR, text);
