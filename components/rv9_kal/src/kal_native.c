@@ -28,6 +28,8 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
+#include "esp_timer.h"
 #include "esp_freertos_hooks.h"
 #include "esp_timer.h"
 
@@ -100,6 +102,49 @@ _Static_assert(RV9K_TICK_HZ == CONFIG_FREERTOS_HZ,
 static void IRAM_ATTR tick_hook(void)
 {
     if (s_tick_ref) (*s_tick_ref)++;
+}
+
+/*
+ * THE WATCHDOG, RV-9's (design section 82).
+ *
+ * ESP-IDF's task watchdog was off, because it watches the host's idle task
+ * and RV-9's threads keep that busy by design. Supervision is the OS's
+ * job, so RV-9 starts it itself, watching one thing: that the scheduler
+ * comes round. It is fed from there, at most once a second, and a kernel
+ * that stops coming round for WATCHDOG_S -- a thread that never gives the
+ * CPU back, a scheduler wedged -- is a panic, which the next boot counts
+ * and the black box describes, rather than a board stuck until somebody
+ * visits. Two minutes: `listen` computes for up to about forty seconds
+ * without a break, and that is work, not a fault.
+ */
+#define WATCHDOG_S 120
+
+static esp_task_wdt_user_handle_t s_wdt;
+static int64_t s_fed_us;
+
+static void beat(void)
+{
+    int64_t now = esp_timer_get_time();
+    if (s_wdt && now - s_fed_us >= 1000000) {
+        s_fed_us = now;
+        esp_task_wdt_reset_user(s_wdt);
+    }
+}
+
+static void watchdog_start(void)
+{
+    esp_task_wdt_config_t cfg = {
+        .timeout_ms     = WATCHDOG_S * 1000,
+        .idle_core_mask = 0,             /* not the host's idle tasks: ours */
+        .trigger_panic  = true,
+    };
+    esp_err_t e = esp_task_wdt_init(&cfg);
+    if (e == ESP_ERR_INVALID_STATE) e = esp_task_wdt_reconfigure(&cfg);
+    if (e == ESP_OK && esp_task_wdt_add_user("rv9-kernel", &s_wdt) == ESP_OK) {
+        rv9k_set_beat_hook(beat);
+    } else {
+        ESP_LOGW(TAG, "no watchdog over the kernel: %s", esp_err_to_name(e));
+    }
 }
 
 /* Nothing to run: let the rest of the machine have the CPU. On bare metal
@@ -220,6 +265,7 @@ rv9_err_t rv9_kal_start(rv9_task_fn fn, const char *name, size_t stack_bytes,
     rv9_kal_timer_guard_start();
 
     rv9k_set_idle_hook(host_idle);
+    watchdog_start();
 
     rv9_err_t err = rv9_task_create(fn, name, stack_bytes, arg, priority, NULL);
     if (err != RV9_OK) return err;

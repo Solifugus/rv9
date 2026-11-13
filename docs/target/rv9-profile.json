@@ -4,7 +4,7 @@
   "generated_by": "tools/mkprofile.py -- regenerate, do not edit",
   "module": {
     "magic": 1295603282,
-    "abi": 19,
+    "abi": 20,
     "header_bytes": 40,
     "types": {
       "PROGRAM": 1,
@@ -337,7 +337,8 @@
     "NEEDS": 15,
     "CHECK": 16,
     "IDENT": 17,
-    "PEERS": 18
+    "PEERS": 18,
+    "HEALTH": 19
   },
   "calls": [
     {

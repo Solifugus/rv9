@@ -63,7 +63,10 @@ The habit this machine rewards: ask it, do not guess. All of these read
 | `budgets` | What each process is charged (`own`), what it and its children hold (`held`), and its ceiling — then the same held and ceiling for external memory (`ext`, `-` for none declared). Watch how close `held` is to `budget` for a shell running background work. |
 | `free` | Memory. *Free* and *available* are different questions and both are printed; the second is the one that decides whether the next process starts. |
 | `uptime` | `up 2h 14m 8s`. |
-| `log` | What the machine has been saying — an 8 KB ring in RAM. `log \| match error` is the usual form. |
+| `boots` | How this machine has been keeping: this run, its mode, then the last sixteen boots -- what started each (a panic, a watchdog, a brownout, power on, the USB port, asked to), its mode, how long it was up (last known), and the address of the crash that started it -- and the last crash in full. |
+| `safe` / `safe on` / `safe off` | Whether this run is in safe mode, why and until when. A board goes there by itself after three bad ends in a row and finds its way back after a healthy hour, then four, sixteen, up to a day; `on` puts it there to stay, `off` restarts it normally with the count cleared. Safe mode runs the core and `/f0/essential`, not `/f0/startup`, the modules on `/f0` or `/sd0`, `httpd` or `execd`. |
+| `reboot` | Restart the machine, as asked; safe mode stays as it is. |
+| `log` / `log -p` | What the machine has been saying — an 8 KB ring in RAM that survives a reset. `log \| match error` is the usual form. `-p` is the run before, kept in `/f0/blackbox` when it ended badly. |
 | `owns` | Who has which device. One line per owner, so a device shared by five processes is five lines. `reserved` marks a claim taken from a manifest at fork. |
 | `pubs` | What is being published, by whom, how often, how long ago, and how many snapshots were abandoned (`torn`). |
 | `date` | Acquired from the network, and **unknown until it answers** — this board has no clock that survives power. It says so rather than printing 1970. |
@@ -239,6 +242,8 @@ promises), `greet` (writes through the full I/O stack by two routes),
 `tiny` (how little stack a process can have), `chaintest` (becomes another
 module without becoming another process), `downloaded` (a program that was
 never flashed — fetched, `load`ed and run).
+
+**Crashing on purpose:** `crash` (writes to address 0, which with no memory protection yet is a panic of the whole board; in `/f0/startup` it shows a board reaching safe mode), `crash hang` (never gives the CPU back, for the watchdog).
 
 **Storage and the network:** `filetest` (proves RBF works by verifying rather
 than assuming), `nettest` and `netecho` (NFM over loopback, and neither module

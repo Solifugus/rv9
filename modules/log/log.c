@@ -4,6 +4,9 @@
  *   log                    everything still held
  *   log | last 20          the tail
  *   log | match error      only the trouble
+ *   log -p                 the run before, as it was when it ended badly:
+ *                          /f0/blackbox, which the next boot writes after a
+ *                          panic, a watchdog or a brownout (design §82)
  *
  * Until this existed, the board's own account of itself went out of the
  * USB port and was gone -- so the answer to "why did that fail" lived on
@@ -28,6 +31,22 @@ int rv9_module_entry(const rv9_mod_env_t *env)
     if (st == NULL || env->statics_size < sizeof(*st)) {
         m_say(env, RV9_STDERR, "log: static_size in build.conf is too small\n");
         return -2;
+    }
+
+    if (env->arg && env->arg[0] == '-' && env->arg[1] == 'p') {
+        int f = env->open("/f0/blackbox", RV9_MODE_READ);
+        if (f < 0) {
+            m_say(env, RV9_STDERR, "log: no run has ended badly since /f0/blackbox "
+                                   "was last cleared\n");
+            return 1;
+        }
+        for (;;) {
+            int got = env->read(f, st->q.text, sizeof(st->q.text));
+            if (got <= 0) break;
+            env->write(RV9_STDOUT, st->q.text, (uint32_t)got);
+        }
+        env->close(f);
+        return 0;
     }
 
     uint32_t from = 0;

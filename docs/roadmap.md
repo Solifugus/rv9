@@ -1193,6 +1193,26 @@ a peer as it finds one on its card, and runs it if it can. In steps:
    (§81). Still to do: a protected stream, and a wired link between boards
    in one machine.
 
+## Robustness, for long unattended missions
+
+The purpose RV-9 is held to: a machine nobody will be beside when it fails.
+A light core that keeps the rest well, in steps:
+
+1. **A black box and safe mode — done** (design §82): the log survives a
+   reset and is kept on `/f0` after a bad end, with the panic's reason and
+   address; the last sixteen boots are recorded; three bad ends in a row
+   and the board runs only its core and `/f0/essential`, and finds its own
+   way back; RV-9 owns the task watchdog.
+2. **A device supervisor**: each driver says whether it is healthy and can
+   reset itself, and a failed one is reset, step by step (the program, the
+   device, the subsystem, then a reboot), before the board gives up on it.
+3. **Two firmware slots that roll back** by themselves when a new firmware
+   does not prove itself, and room for a core dump.
+4. **Memory protection between programs** (PMP), which needs RV-9 to own
+   the CPU's traps first; then **drivers as restartable modules**.
+5. **Checking what is stored** in the background, and **peers watching
+   each other**, as the pieces exist.
+
 ## Working with two boards attached
 
 `/dev/ttyACM0` is not the C5. Enumeration order depends on which board was

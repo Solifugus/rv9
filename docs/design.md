@@ -8546,6 +8546,73 @@ passed over and run on the P4 as before. The PC resolved `p4.local`,
 id for `c5`, the next refresh showed `c5` refused and `on c5` found no such
 peer.
 
+## 82. Keeping well, unattended
+
+RV-9 is for machines nobody will be beside when they fail: a sea drone, a
+delivery drone, a satellite, a rover. So a board must do something about
+its own failures with no one to press reset. The plan agreed for that, in
+the spirit of MINIX 3 and sized for a microcontroller: a light core whose
+work, besides scheduling and memory, is keeping everything else well. Its
+steps are a black box and safe mode (this), a supervisor that resets a
+failed device, two firmware slots that roll back, memory protection
+between programs, and drivers as restartable modules. Not message passing
+for every call: real-time paths stay direct, and file managers already
+stand where MINIX has servers.
+
+**The black box.** The log's ring is in memory the boot does not clear, so
+after a panic or a watchdog the next boot has what the dying run said, and
+writes it, after a bad end, to `/f0/blackbox`, which a loss of power does
+not take. ESP-IDF's panic handler is wrapped (`--wrap`) so what faulted and
+where -- reason, `pc`, `ra`, cause, value -- goes into the same memory
+before it prints the same to a serial port nobody is watching. The run's
+uptime is written there as it goes, so a run that died says how long it
+lasted. A record of the last sixteen boots lives in NVS, so a loss of
+power keeps it: `boots`.
+
+**Safe mode.** A panic, a watchdog or a brownout is a bad end; a run that
+stays up five minutes with its services proves itself and clears the count.
+Three bad ends in a row and the next boot runs only the core: the console,
+`sshd` and `rshd`, the network and peer discovery, the store's modules, and
+`/f0/essential`, a new script run first in either mode for what the mission
+cannot do without. Left out is everything a crash could have come from: the
+modules on `/f0` and `/sd0`, `/f0/startup`, the services a file starts
+(`httpd`, `execd`), the self-tests. It says so in the log and in its mDNS
+announcement, so its peers and whoever is listening know; `peers` shows it.
+
+**The way back, by itself**, since nobody may be there to type `safe off`:
+an hour healthy in safe mode and it tries a normal boot; one that ends badly
+before proving itself puts it back, waiting four times as long, up to a
+day. Put there by hand (`safe on`) it stays. Found in testing: the try out
+was refused by the very rule that had sent it in, since the count of bad
+ends it carried was still three, so it looped in safe mode for ever. A try
+is now judged only by how it ends.
+
+**The watchdog is RV-9's.** ESP-IDF's task watchdog had been off since
+phase 2, because it watched the host's idle task and RV-9's threads keep
+that busy by design, with a note that supervision was the OS's job for
+later. Now RV-9 starts it, watching that its scheduler comes round, fed from
+there at most once a second. Two minutes without -- a program that never
+gives the CPU back, a wedged kernel -- is a panic, a reset and a counted bad
+end. Two minutes, because `listen` computes for up to about forty seconds
+without a break, and that is work.
+
+Measured on the C3: `crash`, which writes to address 0 (with no memory
+protection yet, a panic of the whole board), came back recorded as "Store
+access fault at pc 0x42113e5e, cause 7, value 0", the address being in
+`crash`, and `log -p` held the dead run's log. With `crash` in
+`/f0/startup` the board panicked at every boot five seconds into it and
+came up in safe mode at the third, `/f0/startup` not run. With the timings
+cut to 1 and 2 minutes for a test build, it tried a normal boot, crashed,
+returned with the wait four times longer; with the crash taken out of
+`/f0/startup`, the next try proved itself in a minute and left safe mode
+for good. `crash hang`, which never gives the CPU back, froze the board,
+and 130 s later the task watchdog named `rv9-kernel` and reset it, the next
+boot saying so with the spinning loop's address.
+
+Not yet: the panic's full register dump and backtrace, which would need a
+core dump partition, a change of layout that belongs with the two
+firmware slots; and a supervisor for the devices, which is next.
+
 ## 9. Migration to a native kernel
 
 The point of the KAL. When the personality layer is working and the design has

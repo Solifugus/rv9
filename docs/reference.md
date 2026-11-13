@@ -610,7 +610,33 @@ shell's went from 1,440 bytes at its deepest to 2,568, and its stack from
 2,560 to 3,584. Other programs that fork modules by a name a person gave
 them should allow a kilobyte and a half beyond their own measurement.
 
-**At startup.** `/f0/startup`, if it exists, is run once as a shell
+**Keeping well, unattended** (design §82). Every boot is recorded, in NVS,
+the last sixteen: why it started, which is how the run before it ended
+(`RV9_RESET_*`), its mode, how long it was up, and where the crash that
+started it was. A panic, a watchdog or a brownout is a bad end; a run
+proves itself by staying up five minutes with its services, which clears
+the count. **Three bad ends in a row and the next boot is in safe mode**:
+the console, `sshd` and `rshd`, the network and peer discovery, the store's
+modules, and `/f0/essential` -- not the modules on `/f0` and `/sd0`,
+`/f0/startup`, `httpd`, `execd` or the self-tests. It says so in the log
+and in its mDNS announcement (`mode=safe`). After an hour healthy in safe
+mode it tries a normal boot; one that ends badly before proving itself puts
+it back, and the wait is four times as long, up to a day. `safe on` puts it
+there by hand, to stay; `safe off` takes it out with the count cleared.
+
+The log is kept in memory a reset does not clear, and after a bad end the
+next boot writes the run's log to `/f0/blackbox` with what its panic said
+(the reason and the `pc`, `ra`, cause and value; for an abort, such as the
+watchdog's, only where), so `log -p` reads it after a loss of power too.
+`boots` gives each crash's `pc`, for addr2line against the firmware's ELF.
+
+**The watchdog is RV-9's.** ESP-IDF's task watchdog watches one thing, that
+RV-9's scheduler comes round, fed from it at most once a second; two
+minutes without (a program that never gives the CPU back, a wedged kernel)
+is a panic and a reset that `boots` calls the task watchdog's.
+
+**At startup.** `/f0/essential` runs first, in either mode: what the
+mission cannot do without. `/f0/startup`, if it exists, is run once as a shell
 script (`shell /f0/startup`) when the services have settled, about nine
 seconds into a P4's boot. It is not waited on and not started again.
 Whatever a board should do when it comes on is a line there: the P4 plays a
@@ -985,6 +1011,7 @@ and why `RV9_SYS_MEM_MIN` exists to mark the part that may never move.
 | `RV9_SYS_CLOCK` | one `rv9_sys_clock_t` | Wall-clock time and whether it has ever been set. UTC only. It says *false* rather than lying when the network has never been asked. |
 | `RV9_SYS_HAVE` | one `rv9_sys_device_t` | **A question, not an enumeration.** Name in, device record out, returns 1 or 0. See §18. |
 | `RV9_SYS_NEEDS` | one `rv9_sys_needs_t` | A module's manifest, wherever a fork would find it. Module name in; where it was found, its revision and its manifest entries out. Returns 1, or 0 when there is no such module. What `can` reads. See §18. |
+| `RV9_SYS_HEALTH` | one `rv9_sys_health_t` | How this machine is keeping: this run's number, whether it is in safe mode, by hand (`manual`) or not, the count of bad ends in a row, how long until safe mode tries a normal boot, the last crash (reason, `pc`, `ra`, cause and value), and the last sixteen boots (`rv9_sys_boot_t`: number, `RV9_RESET_*` reason it started for, mode, proved, uptime, crash `pc`). `op` in: `RV9_HEALTH_ASK` only tells; `RV9_HEALTH_SAFE`, `RV9_HEALTH_NORMAL` and `RV9_HEALTH_REBOOT` restart the machine and do not return. What `boots`, `safe` and `reboot` use. A peer's record has `RV9_PEER_SAFE` in its `flags` when it says it is in safe mode. |
 | `RV9_SYS_PEERS` | `rv9_sys_peer_t`, this machine first | Who is on the network: this machine (kind `RV9_PEER_THIS`), then each RV-9 board heard announcing itself in the last 150 s, `RV9_PEER_HEARD`, or `RV9_PEER_REFUSED` for a name heard with an id other than the one first heard with it. Name, address, httpd and execd ports (0 for none), id, seconds since heard. Returns how many. What `peers` prints. |
 | `RV9_SYS_IDENT` | one `rv9_sys_ident_t` | Who this machine is to its peers: its public key (`pub`, the SSH host key) and `id`, the first sixteen bytes of the key's SHA-256, which a peer lists it by in `/f0/callers`. Returns 1, or 0 on a firmware without one. What `ident` prints. |
 | `RV9_SYS_CHECK` | one `rv9_sys_check_t` | Is this file what it ought to be? `path` and `flags` in; the file's SHA-256 (read a kilobyte at a time, so any size), its size, and `err` out. With `RV9_CHECK_MODULE` it is also judged as a module from a peer: it verifies, is signed by a key in `/f0/trust` (`signer` names it), and could run here (`lacks` says what it needs, from its head, before the rest is read). Returns 1 when it passes, 0 when not. What `get` keeps by and `httpd`'s catalog hashes with. |
@@ -1919,7 +1946,7 @@ same quantity.
 
 | profile | value | |
 |---|---|---|
-| `abi` | 19 | What this firmware implements. See §7 on `abi_version`. |
+| `abi` | 20 | What this firmware implements. See §7 on `abi_version`. |
 | `header_bytes` | 40 | The fixed header before the manifest (§5). |
 
 Two of these are worth a sentence, because the number is not the interesting
@@ -2085,8 +2112,8 @@ rv9-profile.json  -- checkdocs.py         -->  docs/reference.md
 ```
 
 So a system call added to `module.h` reaches this document without anybody
-remembering to tell it. It checks **201 names**: the 36 environment entries,
-the 26 manifest tags, 5 faults, 20 process errors, 13 I/O errors, 18 sysinfo
+remembering to tell it. It checks **202 names**: the 36 environment entries,
+the 26 manifest tags, 5 faults, 20 process errors, 13 I/O errors, 19 sysinfo
 codes, 53 getstat/setstat codes, 9 file managers and 21 drivers.
 
 *Mentioned* means the name appears in backticks somewhere in the file. That

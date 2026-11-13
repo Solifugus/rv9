@@ -63,6 +63,7 @@ typedef struct {
     uint8_t  id[16];
     uint64_t heard_ms;
     uint8_t  kind;                /* RV9_PEER_HEARD or _REFUSED */
+    uint8_t  flags;               /* RV9_PEER_SAFE */
 } peer_t;
 
 static peer_t       s_peers[SLOTS];
@@ -74,6 +75,9 @@ static volatile bool     s_asked;          /* somebody wants a query now */
 static volatile bool     s_answered;
 static uint64_t     s_last_ask;
 static bool         s_started;
+static bool         s_safe;                 /* this board is in safe mode */
+
+void rv9_peers_set_safe(bool safe) { s_safe = safe; }
 
 /* ---- small files on /f0 ---- */
 
@@ -217,6 +221,8 @@ static void txt_now(void)
     mdns_service_txt_item_set("_rv9", "_tcp", "id", id);
     mdns_service_txt_item_set("_rv9", "_tcp", "http", http);
     mdns_service_txt_item_set("_rv9", "_tcp", "run", run);
+    /* So its peers, and whoever is listening, know it is in safe mode. */
+    mdns_service_txt_item_set("_rv9", "_tcp", "mode", s_safe ? "safe" : "normal");
 }
 
 static bool announce(void)
@@ -268,7 +274,7 @@ static void heard(const mdns_result_t *r)
     uint8_t id[16] = { 0 };
     const char *ids = txt(r, "id");
     bool has_id = ids && strlen(ids) == 32 && from_hex(id, ids, 16);
-    const char *h = txt(r, "http"), *u = txt(r, "run");
+    const char *h = txt(r, "http"), *u = txt(r, "run"), *mode = txt(r, "mode");
     uint8_t kind = (!has_id || known_ok(r->hostname, id)) ? RV9_PEER_HEARD : RV9_PEER_REFUSED;
 
     rv9_lock_acquire(s_lock);
@@ -288,6 +294,7 @@ static void heard(const mdns_result_t *r)
     slot->run = (uint16_t)(u ? atoi(u) : 0);
     slot->heard_ms = rv9_time_ms();
     slot->kind = kind;
+    slot->flags = (mode && strcmp(mode, "safe") == 0) ? RV9_PEER_SAFE : 0;
     rv9_lock_release(s_lock);
 
     if (news && kind == RV9_PEER_REFUSED) {
@@ -372,6 +379,7 @@ int rv9_peers_list(void *buf, uint32_t len)
     out[0].run = s_run;
     memcpy(out[0].id, s_id, 16);
     out[0].kind = RV9_PEER_THIS;
+    out[0].flags = s_safe ? RV9_PEER_SAFE : 0;
     n = 1;
 
     rv9_lock_acquire(s_lock);
@@ -388,6 +396,7 @@ int rv9_peers_list(void *buf, uint32_t len)
         memcpy(o->id, p->id, 16);
         o->age_s = (uint32_t)((now - p->heard_ms) / 1000);
         o->kind = p->kind;
+        o->flags = p->flags;
     }
     rv9_lock_release(s_lock);
     return (int)n;

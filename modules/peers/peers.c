@@ -77,7 +77,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
         m_pad(env, RV9_STDOUT, me->name, 14);
         m_pad(env, RV9_STDOUT, st->ip, 17);
         m_say(env, RV9_STDOUT, st->id);
-        m_say(env, RV9_STDOUT, "\n");
+        m_say(env, RV9_STDOUT, me->flags & RV9_PEER_SAFE ? "  SAFE MODE\n" : "\n");
         if (n == 1) {
             m_say(env, RV9_STDOUT, "no other board heard yet\n");
         } else {
@@ -110,7 +110,7 @@ int rv9_module_entry(const rv9_mod_env_t *env)
             }
             port(env, p->http, 8);
             port(env, p->run, 6);
-            m_say(env, RV9_STDOUT, "\n");
+            m_say(env, RV9_STDOUT, p->flags & RV9_PEER_SAFE ? "SAFE MODE\n" : "\n");
         }
     }
 

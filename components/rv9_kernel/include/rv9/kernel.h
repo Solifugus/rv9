@@ -229,6 +229,10 @@ void rv9k_run(void);
  */
 void rv9k_set_idle_hook(void (*fn)(void));
 
+/* Called each time round the scheduler, from its own stack: what the
+   host's watchdog is fed from (kal_native.c). */
+void rv9k_set_beat_hook(void (*fn)(void));
+
 /* Stacks are painted at creation so their use can be measured rather than
    guessed. Unused counts from the low end; zero means it has run out. */
 #define RV9K_STACK_PAINT 0xA5C3A5C3u

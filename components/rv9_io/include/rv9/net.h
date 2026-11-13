@@ -58,6 +58,8 @@
  * is the one first heard with its name.
  */
 void rv9_peers_start(void);
+/* Before it starts: whether to announce this board as in safe mode. */
+void rv9_peers_set_safe(bool safe);
 bool rv9_peer_heard(const char *name, uint8_t ip[4], uint16_t *http);
 /* rv9_sys_peer_t records, this machine first: RV9_SYS_PEERS's answer. */
 int  rv9_peers_list(void *buf, uint32_t len);

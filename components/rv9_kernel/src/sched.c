@@ -34,6 +34,7 @@ static uint64_t       s_blocks;
 static bool           s_running;
 static uint32_t       s_sched_lock;
 static void         (*s_idle_hook)(void);
+static void         (*s_beat_hook)(void);
 static uint32_t       s_stack_faults;
 
 /* ------------------------------------------------------------------ */
@@ -549,6 +550,7 @@ void rv9k_sched_unlock(void)
 }
 
 void rv9k_set_idle_hook(void (*fn)(void)) { s_idle_hook = fn; }
+void rv9k_set_beat_hook(void (*fn)(void)) { s_beat_hook = fn; }
 
 void rv9k_set_allocators(void *(*alloc)(size_t), void (*release)(void *))
 {
@@ -596,6 +598,9 @@ void rv9k_serve(void)
     s_running = true;
 
     for (;;) {
+        /* The scheduler came round again: the kernel is alive. A thread
+           that never gives the CPU back stops this, which is the point. */
+        if (s_beat_hook) s_beat_hook();
         drain_pending();
         reap_dead();
         wake_sleepers();

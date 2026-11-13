@@ -30,7 +30,7 @@ extern "C" {
 #endif
 
 #define RV9_MODULE_MAGIC   0x4D395652u   /* "RV9M" little-endian */
-#define RV9_MODULE_ABI     19
+#define RV9_MODULE_ABI     20
 #define RV9_MODULE_HDR_LEN 40
 
 /* Module types. Only PROGRAM is loadable in phase 1; the rest are declared
@@ -1516,8 +1516,71 @@ typedef struct __attribute__((packed)) {
     uint8_t  id[16];        /* as `ident` prints it; zeros if it gave none */
     uint32_t age_s;         /* since it was last heard */
     uint8_t  kind;          /* RV9_PEER_* */
-    uint8_t  reserved[3];
+    uint8_t  flags;         /* RV9_PEER_SAFE: it says it is in safe mode */
+    uint8_t  reserved[2];
 } rv9_sys_peer_t;
+
+#define RV9_PEER_SAFE     0x01
+
+/*
+ * How this machine is keeping (design section 82): which run this is,
+ * whether it is in safe mode and why, the last crash, and the last sixteen
+ * boots. `op` in says what to do as well as tell:
+ *
+ *   RV9_HEALTH_ASK     only tell
+ *   RV9_HEALTH_SAFE    restart in safe mode, and stay there until told
+ *   RV9_HEALTH_NORMAL  restart normally, the count of bad ends cleared
+ *   RV9_HEALTH_REBOOT  restart
+ *
+ * Returns 1, or -1 for a bad call; the three that restart do not return.
+ * A boot's `reason` is why it started, which is how the run before it
+ * ended: RV9_RESET_*, ESP-IDF's numbers.
+ */
+#define RV9_SYS_HEALTH  19
+
+#define RV9_HEALTH_ASK     0
+#define RV9_HEALTH_SAFE    1
+#define RV9_HEALTH_NORMAL  2
+#define RV9_HEALTH_REBOOT  3
+
+#define RV9_RESET_UNKNOWN    0
+#define RV9_RESET_POWERON    1
+#define RV9_RESET_EXT        2   /* the reset pin */
+#define RV9_RESET_SW         3   /* asked to: reboot, safe, an update */
+#define RV9_RESET_PANIC      4
+#define RV9_RESET_INT_WDT    5
+#define RV9_RESET_TASK_WDT   6
+#define RV9_RESET_WDT        7
+#define RV9_RESET_DEEPSLEEP  8
+#define RV9_RESET_BROWNOUT   9
+#define RV9_RESET_USB       11   /* the USB port reset it (a console opened) */
+#define RV9_RESET_JTAG      12
+
+typedef struct __attribute__((packed)) {
+    uint32_t boot;          /* its number, counted since NVS was new */
+    uint8_t  reason;        /* RV9_RESET_*: how the run before it ended */
+    uint8_t  safe;          /* it ran in safe mode */
+    uint8_t  proved;        /* it stayed up five minutes with its services */
+    uint8_t  trial;         /* it was a try out of safe mode */
+    uint32_t up_s;          /* how long it ran, as last written (hourly) */
+    uint32_t pc;            /* where the crash that started it was, or 0 */
+} rv9_sys_boot_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t op;            /* in: RV9_HEALTH_* */
+    uint32_t boot;          /* this run's number */
+    uint8_t  safe;          /* this run is in safe mode */
+    uint8_t  manual;        /* put there by hand: it does not try its way out */
+    uint8_t  fails;         /* bad ends in a row, none of them proved */
+    uint8_t  trial;         /* this run is a try out of safe mode */
+    uint32_t up_s;
+    uint32_t retry_in_s;    /* in safe mode, not manual: until it tries a normal boot */
+    char     panic[48];     /* the last crash's reason, "" if the last run did not crash */
+    uint32_t panic_pc, panic_ra, panic_cause, panic_tval;
+    uint8_t  n;             /* boots that follow */
+    uint8_t  reserved[3];
+    rv9_sys_boot_t boots[16];   /* oldest first */
+} rv9_sys_health_t;
 
 /*
  * What time it is, as opposed to how long the machine has been up.
@@ -1991,6 +2054,9 @@ int  rv9_ident_id(const uint8_t pub[65], uint8_t id[16]);
    fills records and returns how many. See rv9_mod_set_log_source for why
    this is registered rather than called. */
 void rv9_mod_set_peers_source(int (*fill)(void *buf, uint32_t len));
+
+/* And RV9_SYS_HEALTH's: init's, in main/health.c. */
+void rv9_mod_set_health_source(int (*op)(void *buf, uint32_t len));
 
 /* Scan the module store and build the directory. Safe to call once at boot.
    Returns the number of valid modules found. */

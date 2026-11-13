@@ -17,6 +17,7 @@
 #include "rv9/ssh_builtin.h"
 #include "kal_selftest.h"
 #include "logring.h"
+#include "health.h"
 #include "clock.h"
 #include "kernel_test.h"
 #include "module_test.h"
@@ -330,13 +331,19 @@ static void io_bringup(void)
 
     devs();
 
-    /* Anything left on the persistent volume becomes a command again. */
-    autoload("/f0");
+    /* Anything left on the persistent volume becomes a command again --
+       unless this is safe mode, where nothing a crash could have come from
+       is loaded (health.c). */
+    if (!rv9_health_safe()) {
+        autoload("/f0");
 
-    /* And from the card, if there is one: a program written to /sd0 is a
-       command on the next boot, the same way /f0 works. A board with no
-       card opens nothing and this costs nothing. */
-    autoload("/sd0");
+        /* And from the card, if there is one: a program written to /sd0 is
+           a command on the next boot, the same way /f0 works. A board with
+           no card opens nothing and this costs nothing. */
+        autoload("/sd0");
+    } else {
+        ESP_LOGW(TAG, "safe mode: the modules on /f0 and /sd0 are not loaded");
+    }
 
     /* Processes with no parent inherit these. */
     /* The terminal is the USB cable: keyboard in, characters out. The
@@ -638,20 +645,33 @@ static void say_last_reset(void)
  * firmware, and `del /f0/startup` is how to stop it. Not waited on: a
  * script that runs for ever is a service the board was asked for.
  */
-#define STARTUP_FILE "/f0/startup"
+#define STARTUP_FILE   "/f0/startup"
+#define ESSENTIAL_FILE "/f0/essential"
 
-static void run_startup(void)
+static void run_script(const char *file)
 {
     rv9_path_t *p = NULL;
-    if (rv9_io_open_detached(STARTUP_FILE, RV9_MODE_READ, &p) != RV9_IO_OK) return;
+    if (rv9_io_open_detached(file, RV9_MODE_READ, &p) != RV9_IO_OK) return;
     rv9_io_close_path(p);
 
     rv9_pid_t pid;
-    if (rv9_proc_fork("shell", RV9_PRIO_NORMAL, STARTUP_FILE, &pid) == RV9_PROC_OK) {
-        ESP_LOGW(TAG, "running " STARTUP_FILE " as pid %d", (int)pid);
+    if (rv9_proc_fork("shell", RV9_PRIO_NORMAL, file, &pid) == RV9_PROC_OK) {
+        ESP_LOGW(TAG, "running %s as pid %d", file, (int)pid);
     } else {
-        ESP_LOGW(TAG, "could not run " STARTUP_FILE);
+        ESP_LOGW(TAG, "could not run %s", file);
     }
+}
+
+/*
+ * /f0/essential first, in either mode: what the mission cannot do without
+ * -- a failsafe held, a beacon, the link home. Then /f0/startup, unless
+ * this is safe mode (health.c), where it is one of the things left out.
+ */
+static void run_startup(void)
+{
+    run_script(ESSENTIAL_FILE);
+    if (!rv9_health_safe()) run_script(STARTUP_FILE);
+    else ESP_LOGW(TAG, "safe mode: " STARTUP_FILE " is not run");
 }
 
 static void init_shell_loop(void)
@@ -662,6 +682,7 @@ static void init_shell_loop(void)
     /* Announce this board and listen for the others (design section 81).
        Like the clock below, safe before the radio associates: mDNS starts
        answering when there is an address. */
+    rv9_peers_set_safe(rv9_health_safe());
     rv9_peers_start();
 #endif
 
@@ -705,6 +726,13 @@ static void init_shell_loop(void)
             }
 
             if (now < s->next_ms) continue;
+
+            /* Safe mode runs the core: the shell and the ways in. A
+               service a file asks for is not core. */
+            if (s->wanted != NULL && rv9_health_safe()) {
+                s->next_ms = UINT64_MAX;
+                continue;
+            }
 
             if (s->wanted != NULL) {
                 int f = rv9_io_open(s->wanted, RV9_MODE_READ);
@@ -750,8 +778,11 @@ static void init_shell_loop(void)
         if (++settled == 5000 / SERVICE_POLL_MS) {
             heap_mark("services up");
             say_last_reset();
+            rv9_health_keep_blackbox();
             run_startup();
         }
+
+        if (settled >= 5000 / SERVICE_POLL_MS) rv9_health_tick();
 
         rv9_task_delay_ms(SERVICE_POLL_MS);
     }
@@ -1083,6 +1114,10 @@ static void rv9_init_task(void *arg)
      */
     rv9_logring_start();
     rv9_mod_set_log_source(rv9_logring_read, rv9_logring_held);
+
+    /* Which boot this is, how the last run ended, and whether this one is
+       in safe mode -- before anything that safe mode leaves out. */
+    rv9_health_boot();
     rv9_mod_set_clock_source(rv9_clock_read);
 
 
@@ -1121,7 +1156,7 @@ static void rv9_init_task(void *arg)
     term_banner();
 #endif
 
-    selftests(boot_cls);
+    if (!rv9_health_safe()) selftests(boot_cls);
 
 
     /* Every suite has run, mem-test included, so the low-water mark has

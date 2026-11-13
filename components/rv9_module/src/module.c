@@ -32,6 +32,12 @@ static uint32_t (*s_log_held)(void);
 static bool     (*s_clock_read)(uint32_t *epoch, uint32_t *age_s);
 
 static int (*s_peers_fill)(void *, uint32_t);
+static int (*s_health_op)(void *, uint32_t);
+
+void rv9_mod_set_health_source(int (*op)(void *buf, uint32_t len))
+{
+    s_health_op = op;
+}
 
 void rv9_mod_set_peers_source(int (*fill)(void *buf, uint32_t len))
 {
@@ -1769,6 +1775,10 @@ static int env_sysinfo(uint32_t what, void *buf, uint32_t len)
 
     case RV9_SYS_CHECK:
         return check_op(buf, len);
+
+    case RV9_SYS_HEALTH:
+        if (buf == NULL || len < sizeof(rv9_sys_health_t)) return -1;
+        return s_health_op ? s_health_op(buf, len) : -1;
 
     case RV9_SYS_PEERS:
         if (buf == NULL || len < sizeof(rv9_sys_peer_t)) return -1;
